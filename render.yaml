@@ -1,0 +1,35 @@
+services:
+  # Backend API + WebSocket server
+  - type: web
+    name: orderflow-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DHAN_CLIENT_ID
+        sync: false
+      - key: DHAN_ACCESS_TOKEN
+        sync: false
+      - key: CANDLE_SECONDS
+        value: "60"
+      - key: IMBALANCE_RATIO
+        value: "3.0"
+    healthCheckPath: /api/health
+
+  # Frontend static site
+  - type: web
+    name: orderflow-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_WS_URL
+        value: wss://orderflow-backend.onrender.com/ws
+      - key: VITE_API_URL
+        value: https://orderflow-backend.onrender.com
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
