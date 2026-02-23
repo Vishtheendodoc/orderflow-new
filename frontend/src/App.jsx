@@ -136,11 +136,11 @@ function parseCSV(text) {
 
 // Extract base name (strip expiry month/year suffix like "MAR FUT", "FEB FUT", "APR FUT")
 function getBaseName(symbol) {
-  return symbol.replace(/\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+FUT$/i, "").trim();
+  return String(symbol).replace(/\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+FUT$/i, "").trim();
 }
 
 function getExpiry(symbol) {
-  const m = symbol.match(/\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+FUT$/i);
+  const m = String(symbol).match(/\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+FUT$/i);
   return m ? m[1].toUpperCase() : "CURR";
 }
 
