@@ -1,0 +1,65 @@
+/* Theme overrides to modernize background and UI */
+
+:root {
+  --bg-override: linear-gradient(180deg, #071022 0%, #081424 40%, #071018 100%);
+  --panel-glass: rgba(255,255,255,0.02);
+  --panel-glass-2: rgba(255,255,255,0.01);
+  --accent-a: #60a5fa;
+  --accent-b: #a78bfa;
+  --muted-a: #9fb6c8;
+  --text-bright: #e6eef6;
+}
+
+html, body, #root {
+  background: var(--bg-override) !important;
+  color: var(--text-bright) !important;
+}
+
+/* Make header larger and glassy */
+.header {
+  background: transparent !important;
+  border-bottom: 1px solid rgba(255,255,255,0.04) !important;
+  height: 64px !important;
+  padding: 0 20px !important;
+  align-items: center !important;
+}
+
+.logo-text { color: var(--text-bright) !important; }
+.logo-mark { color: var(--accent-a) !important; }
+
+/* Sidebar glass panel */
+.sidebar {
+  background: linear-gradient(180deg, var(--panel-glass), var(--panel-glass-2)) !important;
+  border-right: 1px solid rgba(255,255,255,0.04) !important;
+  width: 260px !important;
+}
+
+/* Canvas elevated card */
+.canvas {
+  background: linear-gradient(180deg, rgba(3,6,12,0.12), rgba(3,6,12,0.04)) !important;
+  margin: 12px !important;
+  border-radius: 8px !important;
+  padding: 12px !important;
+  box-shadow: 0 12px 40px rgba(2,6,16,0.6) !important;
+}
+
+/* Tab active style */
+.tab-active {
+  background: linear-gradient(90deg, var(--accent-a), var(--accent-b)) !important;
+  color: #031024 !important;
+  font-weight: 700 !important;
+  box-shadow: 0 8px 24px rgba(12,40,80,0.35) !important;
+}
+
+/* Ticker sizing */
+.ticker-ltp { font-size: 24px !important; font-weight: 900 !important; }
+
+/* Slightly larger fonts for readability */
+body, .inst-name, .tab, .search-input { font-size: 13px !important; }
+
+/* Improve empty state contrast */
+.empty-state { color: rgba(255,255,255,0.65) !important; }
+
+/* Smooth transitions globally */
+* { transition: background-color 0.12s ease, color 0.12s ease, transform 0.08s ease; }
+
