@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import httpx
 import websockets
+import struct
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -222,7 +223,8 @@ class OrderFlowEngine:
 
 engines: Dict[str, OrderFlowEngine] = {}
 connected_clients: Set[WebSocket] = set()
-subscribed_symbols: Dict[str, str] = {}  # symbol -> security_id
+# symbol -> { "security_id": str, "exchange_segment": str }
+subscribed_symbols: Dict[str, dict] = {}
 
 
 # ─────────────────────────────────────────────
@@ -231,20 +233,15 @@ subscribed_symbols: Dict[str, str] = {}  # symbol -> security_id
 
 def build_dhan_subscription(security_ids: List[str]) -> dict:
     """Build Dhan subscription packet."""
+    # Build subscription per Dhan v2 JSON subscribe format (RequestCode 15)
     instruments = [
         {"ExchangeSegment": "NSE_FO", "SecurityId": sid}
         for sid in security_ids
     ]
     return {
-        "LoginReq": {
-            "MsgCode": 11,
-            "ClientId": DHAN_CLIENT_ID,
-            "Token": DHAN_ACCESS_TOKEN,
-        },
-        "Subscription": {
-            "MsgCode": 21,
-            "Data": instruments,
-        }
+        "RequestCode": 15,
+        "InstrumentCount": len(instruments),
+        "InstrumentList": instruments,
     }
 
 
@@ -262,30 +259,206 @@ async def dhan_feed_task():
             await demo_feed_task()
             return
 
+        # Prefer official dhanhq client if available (simpler and robust)
         try:
-            async with websockets.connect(
-                DHAN_WS_URL,
-                extra_headers={"Authorization": f"Bearer {DHAN_ACCESS_TOKEN}"},
-                ping_interval=20,
-            ) as ws:
-                logger.info("Connected to Dhan WebSocket")
+            from dhanhq import DhanContext, MarketFeed  # type: ignore
 
-                # Auth + subscribe
-                sub = build_dhan_subscription(list(subscribed_symbols.values()))
-                await ws.send(json.dumps(sub["LoginReq"]))
+            logger.info("Using official dhanhq MarketFeed client")
+            # Build instruments list expected by MarketFeed: (ExchangeSegmentConst, "security_id", MarketFeed.Quote)
+            dhan_ctx = DhanContext(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
+            instruments = []
+            for sym, info in subscribed_symbols.items():
+                sec = str(info.get("security_id", ""))
+                seg = info.get("exchange_segment", "NSE_FO")
+                # Try to resolve segment constant from MarketFeed class
+                try:
+                    seg_const = getattr(MarketFeed, seg)
+                except Exception:
+                    seg_const = seg
+                instruments.append((seg_const, sec, MarketFeed.Quote))
+
+            if not instruments:
                 await asyncio.sleep(1)
-                await ws.send(json.dumps(sub["Subscription"]))
+                continue
 
-                async for raw in ws:
+            # Batch-subscribe via official client to respect 100 instruments/msg limit
+            import threading
+
+            # Start MarketFeed with the first batch (or empty list)
+            first_batch = instruments[:100]
+            remaining = instruments[100:]
+            mf = MarketFeed(dhan_ctx, first_batch, "v2")
+
+            # run_forever is blocking — run it in a background thread so we can subscribe more batches
+            def _mf_runner():
+                try:
+                    mf.run_forever()
+                except Exception as e:
+                    logger.error(f"MarketFeed runner exception: {e}")
+
+            t = threading.Thread(target=_mf_runner, daemon=True)
+            t.start()
+
+            # Wait briefly for connection to establish
+            await asyncio.sleep(1.0)
+
+            # Subscribe remaining instruments in 100-item batches
+            try:
+                for i in range(0, len(remaining), 100):
+                    batch = remaining[i : i + 100]
                     try:
-                        msg = json.loads(raw) if isinstance(raw, str) else raw
-                        await handle_dhan_tick(msg)
+                        mf.subscribe_symbols(batch)
+                        logger.info(f"MarketFeed subscribed batch of {len(batch)} instruments")
                     except Exception as e:
-                        logger.error(f"Tick parse error: {e}")
+                        logger.warning(f"MarketFeed subscribe batch failed: {e}")
+                    await asyncio.sleep(0.12)
+            except Exception as e:
+                logger.warning(f"Error while batch-subscribing via MarketFeed: {e}")
 
-        except Exception as e:
-            logger.error(f"Dhan WS error: {e}. Reconnecting in 5s...")
-            await asyncio.sleep(5)
+            # Continuously read data from MarketFeed (non-blocking)
+            try:
+                while True:
+                    try:
+                        resp = mf.get_data()
+                        if resp:
+                            await handle_dhan_tick(resp)
+                    except Exception as e:
+                        logger.error(f"Error handling MarketFeed message: {e}")
+                    await asyncio.sleep(0.01)
+            except Exception as e:
+                logger.error(f"MarketFeed main loop error: {e}. Reconnecting in 5s...")
+                await asyncio.sleep(5)
+
+        except Exception as client_err:
+            # If official client not available or fails, fallback to raw websocket + binary parser
+            logger.warning(f"dhanhq client unavailable or failed ({client_err}). Falling back to raw websocket.")
+            # Use query parameters as required by Dhan v2 (version, token, clientId, authType)
+            url = f"{DHAN_WS_URL}?version=2&token={DHAN_ACCESS_TOKEN}&clientId={DHAN_CLIENT_ID}&authType=2"
+
+            try:
+                async with websockets.connect(url, ping_interval=20) as ws:
+                    logger.info("Connected to Dhan WebSocket (v2) [fallback]")
+
+                    # Build subscription objects using stored exchange_segment
+                    instruments = []
+                    for sym, info in subscribed_symbols.items():
+                        instruments.append({"ExchangeSegment": info.get("exchange_segment", "NSE_FO"), "SecurityId": info.get("security_id")})
+
+                    # If there are >0 instruments, send subscription (split into batches of 100 if needed)
+                    for i in range(0, len(instruments), 100):
+                        batch = instruments[i : i + 100]
+                        packet = {
+                            "RequestCode": 15,
+                            "InstrumentCount": len(batch),
+                            "InstrumentList": batch,
+                        }
+                        await ws.send(json.dumps(packet))
+                        await asyncio.sleep(0.1)
+
+                    async for raw in ws:
+                        try:
+                            # Dhan sends binary market packets. Handle bytes and text both.
+                            if isinstance(raw, (bytes, bytearray)):
+                                parsed = parse_dhan_binary(raw)
+                                if parsed:
+                                    await handle_dhan_tick(parsed)
+                            else:
+                                # Some informational messages may arrive as text/JSON
+                                try:
+                                    msg = json.loads(raw)
+                                    await handle_dhan_tick(msg)
+                                except Exception:
+                                    # ignore unexpected text frames
+                                    pass
+                        except Exception as e:
+                            logger.error(f"Tick parse error: {e}")
+
+            except Exception as e:
+                logger.error(f"Dhan WS error: {e}. Reconnecting in 5s...")
+                await asyncio.sleep(5)
+
+
+def parse_dhan_binary(raw: bytes) -> Optional[dict]:
+    """Parse minimal Dhan binary feed packets for ticker and quote.
+
+    Returns a dict similar to Dhan v2 JSON 'data' payload:
+    { 'securityId': '...', 'LTP': ..., 'BidPrice': ..., 'AskPrice': ..., 'volume': ..., 'timestamp': ... }
+    """
+    try:
+        # Need at least 8 bytes for header
+        if len(raw) < 8:
+            return None
+        # Header: byte0 = feed response code (uint8)
+        # bytes1-2 = message length (uint16 little endian)
+        # byte3 = exchange segment (uint8)
+        # bytes4-7 = security id (int32 little endian)
+        feed_code = struct.unpack_from("<B", raw, 0)[0]
+        msg_len = struct.unpack_from("<H", raw, 1)[0]
+        exch_seg = struct.unpack_from("<B", raw, 3)[0]
+        security_id = struct.unpack_from("<I", raw, 4)[0]
+
+        # Ticker packet (code 2): next 4 bytes float32 LTP, next 4 bytes int32 timestamp
+        if feed_code == 2 and len(raw) >= 8 + 8:
+            ltp = struct.unpack_from("<f", raw, 8)[0]
+            ts = struct.unpack_from("<I", raw, 12)[0]
+            return {
+                "type": "ticker",
+                "data": {
+                    "securityId": str(security_id),
+                    "LTP": float(ltp),
+                    "timestamp": int(ts) * 1000 if ts and ts < 1e12 else int(ts),
+                },
+            }
+
+        # Quote packet (code 4): fields described in docs (LTP, LTQ, LTT, ATP, Volume, SellQty, BuyQty, DayOpen, DayClose, DayHigh, DayLow)
+        if feed_code == 4 and len(raw) >= 8 + 50:
+            offset = 8
+            ltp = struct.unpack_from("<f", raw, offset)[0]
+            offset += 4
+            ltq = struct.unpack_from("<h", raw, offset)[0]  # int16
+            offset += 2
+            ltt = struct.unpack_from("<I", raw, offset)[0]
+            offset += 4
+            atp = struct.unpack_from("<f", raw, offset)[0]
+            offset += 4
+            volume = struct.unpack_from("<I", raw, offset)[0]
+            offset += 4
+            total_sell_qty = struct.unpack_from("<I", raw, offset)[0]
+            offset += 4
+            total_buy_qty = struct.unpack_from("<I", raw, offset)[0]
+            offset += 4
+            day_open = struct.unpack_from("<f", raw, offset)[0]
+            offset += 4
+            day_close = struct.unpack_from("<f", raw, offset)[0]
+            offset += 4
+            day_high = struct.unpack_from("<f", raw, offset)[0]
+            offset += 4
+            day_low = struct.unpack_from("<f", raw, offset)[0]
+
+            # Build a normalized dict
+            return {
+                "type": "quote",
+                "data": {
+                    "securityId": str(security_id),
+                    "LTP": float(ltp),
+                    "LastTradedQty": int(ltq),
+                    "LastTradeTime": int(ltt) * 1000 if ltt and ltt < 1e12 else int(ltt),
+                    "ATP": float(atp),
+                    "volume": int(volume),
+                    "totalSellQty": int(total_sell_qty),
+                    "totalBuyQty": int(total_buy_qty),
+                    "DayOpen": float(day_open),
+                    "DayClose": float(day_close),
+                    "DayHigh": float(day_high),
+                    "DayLow": float(day_low),
+                },
+            }
+
+        # Other feed codes not handled here
+        return None
+    except Exception as e:
+        logger.error(f"Binary parse error: {e}")
+        return None
 
 
 async def handle_dhan_tick(msg: dict):
@@ -300,8 +473,8 @@ async def handle_dhan_tick(msg: dict):
 
     # Find symbol for this security_id
     symbol = None
-    for sym, sec_id in subscribed_symbols.items():
-        if sec_id == sid:
+    for sym, info in subscribed_symbols.items():
+        if str(info.get("security_id", "")) == sid:
             symbol = sym
             break
 
@@ -380,11 +553,11 @@ async def subscribe(payload: dict):
     """Subscribe to a symbol. payload: {symbol, security_id, exchange_segment}"""
     symbol = payload.get("symbol", "").upper()
     security_id = str(payload.get("security_id", ""))
+    exchange_segment = payload.get("exchange_segment", payload.get("segment", "NSE_FO"))
 
     if not symbol or not security_id:
         raise HTTPException(400, "symbol and security_id required")
-
-    subscribed_symbols[symbol] = security_id
+    subscribed_symbols[symbol] = {"security_id": security_id, "exchange_segment": exchange_segment}
     if symbol not in engines:
         engines[symbol] = OrderFlowEngine(symbol, security_id)
 
@@ -467,6 +640,45 @@ async def websocket_endpoint(ws: WebSocket):
 
 @app.on_event("startup")
 async def startup():
+    # Auto-subscribe instruments from stock_list.csv for NSE FNO and MCX
+    def auto_subscribe_from_csv():
+        csv_path = os.path.join(os.path.dirname(__file__), "stock_list.csv")
+        if not os.path.exists(csv_path):
+            logger.warning("stock_list.csv not found; skipping auto-subscribe")
+            return
+        import csv as _csv
+
+        count = 0
+        try:
+            with open(csv_path, newline="") as f:
+                reader = _csv.DictReader(f)
+                for row in reader:
+                    exch = (row.get("exchange") or "").strip().upper()
+                    instr = (row.get("instrument") or "").strip().upper()
+                    security_id = str(row.get("security_id", "")).strip()
+                    symbol = (row.get("symbol") or "").strip().upper()
+
+                    if not security_id or not symbol:
+                        continue
+
+                    # We only auto-subscribe NSE FNO and MCX as requested
+                    seg_name = None
+                    if exch == "MCX":
+                        seg_name = "MCX"
+                    elif exch == "NSE" and ("FUT" in instr or "FUTIDX" in instr or "FUTSTK" in instr or row.get("segment","").upper()=="D"):
+                        seg_name = "NSE_FNO"
+
+                    if seg_name:
+                        # store segment name (will be resolved to MarketFeed constant at runtime)
+                        subscribed_symbols[symbol] = {"security_id": security_id, "exchange_segment": seg_name}
+                        if symbol not in engines:
+                            engines[symbol] = OrderFlowEngine(symbol, security_id)
+                        count += 1
+            logger.info(f"Auto-subscribed {count} instruments (NSE_FNO/MCX) from stock_list.csv")
+        except Exception as e:
+            logger.error(f"Auto-subscribe failed: {e}")
+
+    auto_subscribe_from_csv()
     asyncio.create_task(dhan_feed_task())
     logger.info("OrderFlow Engine started")
 
