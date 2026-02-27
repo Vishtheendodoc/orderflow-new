@@ -41,8 +41,8 @@ const C = {
 const MONO = "'JetBrains Mono','Fira Mono','Consolas',monospace";
 const SANS = "'IBM Plex Sans','Segoe UI',sans-serif";
 const GAP         = 2;
-const NUM_ZONE_W  = 52; // fixed width for sell/buy numbers (keeps distance from candle independent of zoom)
-const PS_W     = 80;   // price scale width
+const NUM_ZONE_W  = 38; // fixed width for sell/buy numbers
+const PS_W     = 60;   // price scale width
 const LABEL_W  = 52;   // bottom strip label column width (chart must start here to align)
 const HDR_H    = 48;
 const TIME_H   = 24;
@@ -584,6 +584,26 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       ctx.restore();
     }
 
+    /* ── current last-price track line (always visible) ── */
+    const lastBar = bs[bs.length - 1];
+    if (lastBar) {
+      const lp = lastBar.close ?? lastBar.open ?? 0;
+      const ly = p2y(lp, H);
+      if (ly >= 0 && ly <= H) {
+        const bull = lp >= (lastBar.open ?? lp);
+        ctx.save();
+        ctx.strokeStyle = bull ? C.buy : C.sell;
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.75;
+        ctx.setLineDash([5, 3]);
+        ctx.beginPath();
+        ctx.moveTo(0, Math.round(ly) + 0.5);
+        ctx.lineTo(W, Math.round(ly) + 0.5);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
     /* horizontal price-level crosshair on hover */
     if (hoverPrice != null && isFinite(hoverPrice)) {
       const py = p2y(hoverPrice, H);
@@ -970,7 +990,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       e.preventDefault();
       userZoomedW.current = true;
       candleWRef.current = Math.max(W_MIN, Math.min(W_MAX,
-        candleWRef.current + (e.deltaY > 0 ? -3 : 3)));
+        candleWRef.current + (e.deltaY > 0 ? -1 : 1)));
       scheduleDraw();
     };
     const onDown = e => {
@@ -983,7 +1003,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       // drag right → wider candles; drag left → narrower candles
       const dx = e.clientX - dragStartX;
       userZoomedW.current = true;
-      candleWRef.current = Math.max(W_MIN, Math.min(W_MAX, dragStartCW + dx * 0.4));
+      candleWRef.current = Math.max(W_MIN, Math.min(W_MAX, dragStartCW + dx * 0.15));
       scheduleDraw();
     };
     const onUp = () => { dragStartX = null; };
@@ -1081,14 +1101,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         <span style={{ fontSize: 13, fontWeight: 700, color: C.textDark, letterSpacing: ".04em" }}>{symbol}</span>
         <span style={{ fontFamily: MONO, fontSize: 9, color: C.textDim }}>FP · {timeFrameMinutes}m</span>
         <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.buy, display: "inline-block", animation: "fp-pulse 1.6s ease-in-out infinite" }} />
-
-        {[["O", last.open], ["H", last.high], ["L", last.low], ["C", last.close]].map(([k, v]) => (
-          <div key={k} style={{ display: "flex", gap: 3, alignItems: "baseline" }}>
-            <span style={{ fontFamily: MONO, fontSize: 9, color: C.textDim }}>{k}</span>
-            <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 600, color: C.textDark }}>{fmt2(v ?? 0)}</span>
-          </div>
-        ))}
-
+        {/* last price + Δ% compact pill */}
+        <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 700, color: C.textDark }}>{fmt2(last.close ?? 0)}</span>
         <span style={{ fontFamily: MONO, fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 4, color: "#fff", background: chg >= 0 ? C.buy : C.sell }}>
           {chg >= 0 ? "+" : ""}{chg.toFixed(2)}%
         </span>
