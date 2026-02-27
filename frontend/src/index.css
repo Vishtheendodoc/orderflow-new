@@ -29,6 +29,9 @@ html, body, #root {
   font-size: 12px;
   line-height: 1.4;
   overflow: hidden;
+  /* Prevent iOS pull-to-refresh and Android overscroll glow */
+  overscroll-behavior: none;
+  overscroll-behavior-y: none;
 }
 
 /* ── Header ── */

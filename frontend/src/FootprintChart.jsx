@@ -893,13 +893,21 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     };
   }, [scheduleDraw]);
 
-  /* fullscreen */
+  /* fullscreen — native where supported, CSS overlay fallback for iOS Safari */
   const toggleFS = useCallback(() => {
     const el = rootRef.current; if (!el) return;
-    if (!document.fullscreenElement) el.requestFullscreen?.();
-    else document.exitFullscreen?.();
-  }, []);
+    if (document.fullscreenEnabled) {
+      // Desktop / Android Chrome: use native fullscreen API
+      if (!document.fullscreenElement) el.requestFullscreen?.();
+      else document.exitFullscreen?.();
+    } else {
+      // iOS Safari: no fullscreenEnabled — toggle CSS overlay instead
+      setIsFS(fs => !fs);
+      scheduleDraw();
+    }
+  }, [scheduleDraw]);
   useEffect(() => {
+    // Syncs isFS when native fullscreen is entered/exited (not triggered on iOS)
     const cb = () => { setIsFS(!!document.fullscreenElement); scheduleDraw(); };
     document.addEventListener("fullscreenchange",       cb);
     document.addEventListener("webkitfullscreenchange", cb);
@@ -942,7 +950,11 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   return (
     <div ref={rootRef} style={{
       display: "flex", flexDirection: "column",
-      width: "100%", height: isFS ? "100vh" : "100%", minHeight: 440,
+      /* When fullscreen: fixed overlay fills entire viewport (works on iOS Safari too) */
+      ...(isFS
+        ? { position: "fixed", inset: 0, width: "100%", height: "100%", zIndex: 9999 }
+        : { width: "100%", height: "100%", minHeight: 440 }
+      ),
       background: C.bgPanel,
       border: isFS ? "none" : `1.5px solid ${C.border}`,
       borderRadius: isFS ? 0 : 10, overflow: "hidden",
@@ -1020,8 +1032,9 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
         {/* canvas + price scale (marginLeft so chart aligns with bottom strip values) */}
         <div style={{ display: "flex", flex: 1, overflow: "hidden", minHeight: 0, marginLeft: LABEL_W }}>
-          <div style={{ flex: 1, overflow: "hidden", position: "relative", cursor: "crosshair" }}>
-            <canvas ref={canvasRef} style={{ display: "block" }} />
+          <div style={{ flex: 1, overflow: "hidden", position: "relative", cursor: "crosshair",
+                        touchAction: "none" /* prevent browser scroll/zoom intercepting chart gestures */ }}>
+            <canvas ref={canvasRef} style={{ display: "block", touchAction: "none" }} />
           </div>
 
           {/* price scale */}
@@ -1031,6 +1044,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
             borderLeft: `1.5px solid ${C.border}`,
             position: "relative", overflow: "hidden",
             cursor: "ns-resize",
+            touchAction: "none",
           }}>
             <div style={{
               position: "absolute", top: 0, left: 0, right: 0, textAlign: "center",
