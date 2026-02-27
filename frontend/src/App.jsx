@@ -369,7 +369,7 @@ function SubscribePanel({ onSubscribe, activeSymbols }) {
         segment: instrument.segment,
       }),
     });
-    onSubscribe(instrument.symbol, instrument.exchange);
+    onSubscribe(instrument); // pass full object so App can persist it
   };
 
   // Group by base name, filter, search
@@ -593,6 +593,33 @@ function TickerBar({ symbol, ltp, bid, ask, cvd, tickCount, totalVol, isDemo }) 
   );
 }
 
+// ─── Watchlist persistence ─────────────────────────────────────────────────────
+// Saved as: [{ symbol, security_id, exchange, segment }, ...]
+const WATCHLIST_KEY = "of_watchlist_v1";
+
+function loadWatchlist() {
+  try { return JSON.parse(localStorage.getItem(WATCHLIST_KEY) || "[]"); }
+  catch { return []; }
+}
+
+function saveToWatchlist(instrument) {
+  const list = loadWatchlist();
+  if (!list.find((s) => s.symbol === instrument.symbol)) {
+    list.push({
+      symbol:      instrument.symbol,
+      security_id: instrument.security_id,
+      exchange:    instrument.exchange,
+      segment:     instrument.segment,
+    });
+    localStorage.setItem(WATCHLIST_KEY, JSON.stringify(list));
+  }
+}
+
+function removeFromWatchlist(symbol) {
+  const list = loadWatchlist().filter((s) => s.symbol !== symbol);
+  localStorage.setItem(WATCHLIST_KEY, JSON.stringify(list));
+}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -604,6 +631,32 @@ export default function App() {
   const [symbolExchangeMap, setSymbolExchangeMap] = useState({}); // symbol -> exchange
   const wsRef = useRef(null);
   const pingRef = useRef(null);
+
+  /* ── Auto-subscribe saved watchlist on startup ── */
+  useEffect(() => {
+    const saved = loadWatchlist();
+    if (!saved.length) return;
+    // Pre-populate UI state immediately (charts appear once WS data arrives)
+    saved.forEach((inst) => {
+      setActiveSymbols((prev) => prev.includes(inst.symbol) ? prev : [...prev, inst.symbol]);
+      setSymbolExchangeMap((prev) => ({ ...prev, [inst.symbol]: inst.exchange }));
+    });
+    setActiveSymbol(saved[0].symbol);
+    // Call subscribe API for each saved instrument (sequentially, no flooding)
+    (async () => {
+      for (const inst of saved) {
+        try {
+          await fetch(`${API_URL}/api/subscribe`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(inst),
+          });
+        } catch (e) {
+          console.warn("Auto-subscribe failed:", inst.symbol, e);
+        }
+      }
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     fetch(`${API_URL}/api/health`)
@@ -713,11 +766,12 @@ export default function App() {
         {/* Sidebar */}
         <aside className={`sidebar${sidebarOpen ? " sidebar-open" : ""}`}>
           <SubscribePanel
-            onSubscribe={(sym, exchange) => {
-              setActiveSymbols((prev) => prev.includes(sym) ? prev : [...prev, sym]);
-              setSymbolExchangeMap((prev) => ({ ...prev, [sym]: exchange }));
-              setActiveSymbol(sym);
-              setSidebarOpen(false); // auto-close on mobile after subscribing
+            onSubscribe={(inst) => {
+              setActiveSymbols((prev) => prev.includes(inst.symbol) ? prev : [...prev, inst.symbol]);
+              setSymbolExchangeMap((prev) => ({ ...prev, [inst.symbol]: inst.exchange }));
+              setActiveSymbol(inst.symbol);
+              saveToWatchlist(inst);          // persist for next session
+              setSidebarOpen(false);          // auto-close on mobile
             }}
             activeSymbols={activeSymbols}
           />
