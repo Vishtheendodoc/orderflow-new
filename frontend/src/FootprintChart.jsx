@@ -388,6 +388,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const bs     = barsRef.current;
     const cw     = candleWRef.current;
     const slotW  = cw + NZW + GAP;
+    const nzHalf = Math.floor(NZW / 2); // sell zone LEFT of candle, buy zone RIGHT
     const pan    = panRef.current;
     const ts     = tickRef.current;
 
@@ -458,11 +459,12 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       /* current candle tint */
       if (i === bs.length - 1) {
         ctx.fillStyle = C.curBg;
-        ctx.fillRect(x - 1, 0, cw + NZW + 2, H);
+        ctx.fillRect(x, 0, slotW - GAP, H);
       }
 
       ctx.save();
-      ctx.beginPath(); ctx.rect(x, 0, cw, H); ctx.clip();
+      const cx0 = x + nzHalf;
+      ctx.beginPath(); ctx.rect(cx0, 0, cw, H); ctx.clip();
 
       for (const lv of getDisplayLevels(b.levels)) {
         const ly   = p2y(lv.price, H);
@@ -496,8 +498,9 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     /* ── PASS 3: wicks + narrow bodies ── */
     for (let i = 0; i < bs.length; i++) {
       const b = bs[i];
-      const x = i * slotW - pan;
-      if (x + cw < 0 || x > W) continue;
+      const x  = i * slotW - pan;
+      const cx = x + nzHalf; // candle body starts after left sell-zone
+      if (cx + cw < 0 || cx > W) continue;
 
       const open  = b.open  ?? b.close ?? 0;
       const close = b.close ?? b.open  ?? 0;
@@ -509,7 +512,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       const closeY = p2y(close, H);
       const highY  = p2y(high,  H);
       const lowY   = p2y(low,   H);
-      const midX   = Math.round(x + cw / 2);
+      const midX   = Math.round(cx + cw / 2); // centered on candle body
       const bodyT  = Math.min(openY, closeY);
       const bodyH  = Math.max(1, Math.abs(closeY - openY));
 
@@ -531,58 +534,57 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       ctx.fill(); ctx.stroke();
     }
 
-    /* ── PASS 4: numbers in fixed zone; reduced spacing; auto-adjust font to avoid overlap ── */
+    /* ── PASS 4: sell RIGHT of sell-zone (left of candle), buy LEFT of buy-zone (right of candle) ── */
     ctx.textBaseline = "middle";
-    const numZonePad = 1;
-    const minGap     = 3;
-    const availableW = NZW - 2 * numZonePad;
+    const numPad = 2; // gap between number text and candle edge
 
     for (let i = 0; i < bs.length; i++) {
-      const b = bs[i];
-      const x = i * slotW - pan;
-      const numZoneStart = x + cw;
-      if (numZoneStart + NZW < 0 || x > W) continue;
+      const b  = bs[i];
+      const x  = i * slotW - pan;
+      const cx = x + nzHalf;
+      if (x + slotW < 0 || x > W) continue;
 
       ctx.save();
-      ctx.beginPath(); ctx.rect(numZoneStart, 0, NZW, H); ctx.clip();
+      // clip to full slot (sell zone + candle + buy zone)
+      ctx.beginPath(); ctx.rect(x, 0, slotW - GAP, H); ctx.clip();
 
       for (const lv of getDisplayLevels(b.levels)) {
         const ly = p2y(lv.price, H);
         if (ly < -2 || ly > H + 2) continue;
 
         const sellTxt = fmtV(lv.sell_vol || 0);
-        const buyTxt  = fmtV(lv.buy_vol || 0);
+        const buyTxt  = fmtV(lv.buy_vol  || 0);
+
+        // auto-scale font to fit within nzHalf
         let fontSize = FONT_SZ;
         ctx.font = `600 ${fontSize}px ${MONO}`;
-        let sellW = ctx.measureText(sellTxt).width;
-        let buyW  = ctx.measureText(buyTxt).width;
-        if (sellW + buyW + minGap > availableW && fontSize > 8) {
-          fontSize = Math.max(8, Math.floor(availableW / (sellW + buyW + minGap) * fontSize));
+        const maxW = nzHalf - numPad;
+        const sw = ctx.measureText(sellTxt).width;
+        const bw = ctx.measureText(buyTxt).width;
+        if (Math.max(sw, bw) > maxW && fontSize > 7) {
+          fontSize = Math.max(7, Math.floor(maxW / Math.max(sw, bw) * fontSize));
           ctx.font = `600 ${fontSize}px ${MONO}`;
-          sellW = ctx.measureText(sellTxt).width;
-          buyW  = ctx.measureText(buyTxt).width;
         }
-        const sellX = numZoneStart + numZonePad;
-        const buyX  = numZoneStart + NZW - numZonePad;
-        const isImb = lv.highBuy || lv.highSell;
-        const boxPad = 1;
+
+        const isImb  = lv.highBuy || lv.highSell;
         const boxH   = fontSize + 2;
 
+        // sell: right-aligned, flush against left edge of candle body
         ctx.fillStyle = lv.highSell ? C.sell : C.sellMid;
-        ctx.textAlign = "left";
-        ctx.fillText(sellTxt, sellX, ly);
-
-        ctx.fillStyle = lv.highBuy ? C.buy : C.buyMid;
         ctx.textAlign = "right";
-        ctx.fillText(buyTxt, buyX, ly);
+        ctx.fillText(sellTxt, cx - numPad, ly);
+
+        // buy: left-aligned, flush against right edge of candle body
+        ctx.fillStyle = lv.highBuy ? C.buy : C.buyMid;
+        ctx.textAlign = "left";
+        ctx.fillText(buyTxt, cx + cw + numPad, ly);
 
         if (isImb) {
-          const boxL = sellX - boxPad;
-          const boxR = buyX + boxPad;
-          const boxY = ly - boxH / 2;
+          const sellDrawX = cx - numPad - ctx.measureText(sellTxt).width;
+          const buyDrawX  = cx + cw + numPad + ctx.measureText(buyTxt).width;
           ctx.strokeStyle = lv.highBuy ? C.buy : C.sell;
           ctx.lineWidth = 1;
-          ctx.strokeRect(boxL, boxY, boxR - boxL, boxH);
+          ctx.strokeRect(sellDrawX - 1, ly - boxH / 2, buyDrawX - sellDrawX + 2, boxH);
         }
       }
       ctx.restore();
@@ -692,13 +694,14 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     el.innerHTML = "";
     const bs = barsRef.current, cw = candleWRef.current, pan = panRef.current;
     if (!bs.length) return;
-    const slotW = cw + NZW + GAP;
+    const slotW  = cw + NZW + GAP;
+    const nzH    = Math.floor(NZW / 2);
     const W = (containerRef.current?.clientWidth || 800) - PS_W - LABEL_W;
     const minGap = 60;
     const step = Math.max(1, Math.ceil(minGap / slotW));
     for (let k = 0; k < bs.length; k += step) {
       const i    = Math.min(k, bs.length - 1);
-      const left = i * slotW + cw / 2 - pan;
+      const left = i * slotW + nzH + cw / 2 - pan; // centre of candle body
       if (left < 0 || left > W) continue;
       const showDate = isFirstBarOfDayIST(bs, i);
       const lbl = document.createElement("div");
@@ -741,26 +744,28 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     ctx.font = `600 9.5px ${MONO}`;
     ctx.textBaseline = "middle";
 
-    const slotW = cw + NZW + GAP;
+    const slotW  = cw + NZW + GAP;
+    const nzHBot = Math.floor(NZW / 2);
     for (let i = 0; i < bs.length; i++) {
-      const b = bs[i];
-      const x = i * slotW - pan;
-      if (x + cw < 0 || x > W) continue;
+      const b  = bs[i];
+      const x  = i * slotW - pan;
+      const cx = x + nzHBot;
+      if (cx + cw < 0 || cx > W) continue;
 
       /* current candle tint */
       if (i === bs.length - 1) {
         ctx.fillStyle = C.curBg;
-        ctx.fillRect(x, 0, cw, H);
+        ctx.fillRect(cx, 0, cw, H);
       }
       if (barsRef.current[i] === hoverBar) {
         ctx.fillStyle = "rgba(155,125,255,0.10)";
-        ctx.fillRect(x, 0, cw, H);
+        ctx.fillRect(cx, 0, cw, H);
       }
 
       const delta = b.delta ?? 0;
       const cvd   = b.cvd   ?? 0;
       const vol   = (b.buy_vol || 0) + (b.sell_vol || 0);
-      const midX  = x + cw / 2;
+      const midX  = cx + cw / 2; // centre of candle body
 
       ctx.textAlign = "center";
       ctx.fillStyle = delta >= 0 ? C.buy : C.sell;
@@ -1136,6 +1141,11 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           <button onClick={toggleFS} title="Fullscreen"
             style={{ ...btnStyle, fontSize: isMobile ? 15 : 13, padding: isMobile ? "2px 7px" : "2px 7px", minWidth: isMobile ? 36 : undefined }}
           >{isFS ? "⊠" : "⛶"}</button>
+          <button
+            title="Open full screen in new tab"
+            onClick={() => window.open(`${window.location.origin}/?symbol=${encodeURIComponent(symbol)}&view=fp`, "_blank")}
+            style={{ ...btnStyle, fontSize: isMobile ? 14 : 12, padding: isMobile ? "2px 7px" : "2px 7px", minWidth: isMobile ? 36 : undefined }}
+          >⧉</button>
         </div>
 
         {/* Row 2: hover info (desktop only — touch devices don't hover) */}

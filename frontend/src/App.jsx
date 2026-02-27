@@ -596,11 +596,17 @@ function TickerBar({ symbol, ltp, bid, ask, cvd, tickCount, totalVol, isDemo }) 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
+  /* ── detect ?symbol=X&view=fp URL params (opened by the ⧉ new-tab button) ── */
+  const urlParams   = new URLSearchParams(window.location.search);
+  const urlSymbol   = urlParams.get("symbol");   // e.g. "NIFTY MAR FUT"
+  const urlView     = urlParams.get("view");     // "fp" or null
+  const isFpTab     = !!(urlSymbol && urlView === "fp");
+
   const [flows, setFlows] = useState({}); // symbol -> state
-  const [activeSymbol, setActiveSymbol] = useState(null);
+  const [activeSymbol, setActiveSymbol] = useState(urlSymbol || null);
   const [wsStatus, setWsStatus] = useState("connecting");
   const [isDemo, setIsDemo] = useState(false);
-  const [activeSymbols, setActiveSymbols] = useState([]);
+  const [activeSymbols, setActiveSymbols] = useState(urlSymbol ? [urlSymbol] : []);
   const [symbolExchangeMap, setSymbolExchangeMap] = useState({}); // symbol -> exchange
   const wsRef = useRef(null);
   const pingRef = useRef(null);
@@ -611,6 +617,16 @@ export default function App() {
       .then((d) => setIsDemo(d.demo))
       .catch(() => {});
   }, []);
+
+  /* auto-subscribe when opened via ⧉ new-tab link */
+  useEffect(() => {
+    if (!urlSymbol) return;
+    fetch(`${API_URL}/api/subscribe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbol: urlSymbol }),
+    }).catch(() => {});
+  }, [urlSymbol]);
 
   const connect = useCallback(() => {
     const ws = new WebSocket(WS_URL);
@@ -675,6 +691,17 @@ export default function App() {
     () => aggregateCandles(candles, timeFrameMinutes, activeMarketOpenMs),
     [candles, timeFrameMinutes, activeMarketOpenMs]
   );
+
+  /* ── dedicated full-screen footprint tab (opened via ⧉) ── */
+  if (isFpTab) {
+    return (
+      <div style={{ width: "100vw", height: "100vh", display: "flex", flexDirection: "column", overflow: "hidden", background: "#f0f2f8" }}>
+        <ErrorBoundary>
+          <FootprintChart candles={displayCandles} symbol={urlSymbol} timeFrameMinutes={timeFrameMinutes} />
+        </ErrorBoundary>
+      </div>
+    );
+  }
 
   return (
     <div className="app">
