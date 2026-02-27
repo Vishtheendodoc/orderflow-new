@@ -1,65 +1,96 @@
-/* Theme overrides to modernize background and UI */
+/* Light theme - white background */
 
 :root {
-  --bg-override: linear-gradient(180deg, #071022 0%, #081424 40%, #071018 100%);
-  --panel-glass: rgba(255,255,255,0.02);
-  --panel-glass-2: rgba(255,255,255,0.01);
-  --accent-a: #60a5fa;
-  --accent-b: #a78bfa;
-  --muted-a: #9fb6c8;
-  --text-bright: #e6eef6;
+  --bg: #ffffff;
+  --bg1: #f8fafc;
+  --bg2: #f1f5f9;
+  --bg3: #e2e8f0;
+  --border: #cbd5e1;
+  --border2: #94a3b8;
+  --text: #1e293b;
+  --text-muted: #64748b;
+  --text-dim: #94a3b8;
+  --buy: #059669;
+  --sell: #dc2626;
+  --accent: #0284c7;
+  --accent2: #7c3aed;
+  --live: #d97706;
 }
 
 html, body, #root {
-  background: var(--bg-override) !important;
-  color: var(--text-bright) !important;
+  background: var(--bg) !important;
+  color: var(--text) !important;
 }
 
-/* Make header larger and glassy */
 .header {
-  background: transparent !important;
-  border-bottom: 1px solid rgba(255,255,255,0.04) !important;
-  height: 64px !important;
-  padding: 0 20px !important;
-  align-items: center !important;
+  background: var(--bg1) !important;
+  border-bottom: 1px solid var(--border) !important;
 }
 
-.logo-text { color: var(--text-bright) !important; }
-.logo-mark { color: var(--accent-a) !important; }
+.logo-text { color: var(--text) !important; }
+.logo-mark { color: var(--accent) !important; }
+.logo-sub { color: var(--text-muted) !important; }
 
-/* Sidebar glass panel */
 .sidebar {
-  background: linear-gradient(180deg, var(--panel-glass), var(--panel-glass-2)) !important;
-  border-right: 1px solid rgba(255,255,255,0.04) !important;
-  width: 260px !important;
+  background: var(--bg1) !important;
+  border-right: 1px solid var(--border) !important;
 }
 
-/* Canvas elevated card */
 .canvas {
-  background: linear-gradient(180deg, rgba(3,6,12,0.12), rgba(3,6,12,0.04)) !important;
-  margin: 12px !important;
-  border-radius: 8px !important;
-  padding: 12px !important;
-  box-shadow: 0 12px 40px rgba(2,6,16,0.6) !important;
+  background: var(--bg) !important;
 }
 
-/* Tab active style */
+.tab {
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+.tab:hover { border-color: var(--accent); color: var(--accent); }
 .tab-active {
-  background: linear-gradient(90deg, var(--accent-a), var(--accent-b)) !important;
-  color: #031024 !important;
-  font-weight: 700 !important;
-  box-shadow: 0 8px 24px rgba(12,40,80,0.35) !important;
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(2, 132, 199, 0.08);
 }
 
-/* Ticker sizing */
-.ticker-ltp { font-size: 24px !important; font-weight: 900 !important; }
+.ticker-ltp { color: var(--text) !important; }
+.ticker-detail b { color: var(--text); }
 
-/* Slightly larger fonts for readability */
-body, .inst-name, .tab, .search-input { font-size: 13px !important; }
+.search-wrap { background: var(--bg); border-color: var(--border); }
+.search-input { color: var(--text); }
+.search-input::placeholder { color: var(--text-dim); }
 
-/* Improve empty state contrast */
-.empty-state { color: rgba(255,255,255,0.65) !important; }
+.fp-candle, .cvd-chart, .legend, .chart-pane {
+  background: var(--bg1) !important;
+  border-color: var(--border) !important;
+}
 
-/* Smooth transitions globally */
-* { transition: background-color 0.12s ease, color 0.12s ease, transform 0.08s ease; }
+.fp-level { background: rgba(0,0,0,0.02) !important; }
+.fp-level:hover { background: rgba(0,0,0,0.04) !important; }
 
+.fp-level { border-bottom-color: var(--border) !important; }
+.fp-candle-header { background: var(--bg2) !important; border-bottom-color: var(--border) !important; }
+.delta-bar-bg { background: var(--bg3) !important; }
+
+.view-toggle, .candle-duration-bar { background: var(--bg2) !important; border-color: var(--border) !important; }
+.vt-btn, .cd-btn { border-color: var(--border); color: var(--text-muted); }
+.vt-btn:hover, .cd-btn:hover { border-color: var(--accent); color: var(--accent); }
+.vt-btn.active, .cd-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(2, 132, 199, 0.12); }
+
+.empty-state { color: var(--text-muted) !important; }
+.empty-sub { color: var(--text-dim) !important; }
+
+/* Delta/CVD boxes - high contrast for light theme */
+.delta-cvd-box.pos {
+  background: rgba(5, 150, 105, 0.2) !important;
+  color: #047857 !important;
+  border: 1px solid rgba(5, 150, 105, 0.4) !important;
+}
+.delta-cvd-box.neg {
+  background: rgba(220, 38, 38, 0.2) !important;
+  color: #b91c1c !important;
+  border: 1px solid rgba(220, 38, 38, 0.4) !important;
+}
+.delta-cvd-box.vol {
+  background: rgba(100, 116, 139, 0.15) !important;
+  color: var(--text) !important;
+  border: 1px solid rgba(100, 116, 139, 0.3) !important;
+}

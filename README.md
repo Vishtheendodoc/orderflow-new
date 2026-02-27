@@ -1,6 +1,6 @@
 # OrderFlow Engine
 
-Real-time footprint chart + delta + CVD powered by Dhan API.
+Real-time orderflow chart + delta + CVD powered by Dhan API. GoCharting & VR Trender style.
 
 ```
 Tick Classification → Footprint Candles → Delta Bars → CVD Line
@@ -11,9 +11,10 @@ Tick Classification → Footprint Candles → Delta Bars → CVD Line
 ## Features
 
 - **Footprint chart** — bid/ask volume at every price level per candle
+- **GoCharting-style chart** — price candlesticks, delta bars (baseline), cumulative delta
+- **Delta & CVD** — buy vol − sell vol per candle; cumulative delta over time
+- **Buy/Sell initiated** — VR Trender style initiative bars (IB/IS): color-coded bars showing who took control
 - **Imbalance detection** — highlights levels where buy/sell ratio ≥ 3×
-- **Delta bars** — per-candle buy vol − sell vol
-- **CVD line** — cumulative volume delta (trend of aggression)
 - **Lee-Ready tick rule** — classifies every trade as buyer or seller initiated
 - **Demo mode** — works without Dhan credentials (synthetic data)
 - **Multi-symbol** — watch Nifty, BankNifty, FinNifty simultaneously
@@ -50,7 +51,12 @@ In the sidebar, click any preset (Nifty/BankNifty) or enter:
 
 ---
 
-## Deploy to Render
+## Deploy to Render (24/7, memory-safe)
+
+The backend is designed for **all-day deployment**:
+- **Memory-bounded**: Candles capped at 200/symbol, levels at 500/candle, max 50 symbols
+- **Daily reset**: At IST midnight, all engines are cleared (candles, CVD) for a fresh trading day
+- **Periodic GC**: Runs every 10k ticks to prevent memory drift
 
 ### Option A — render.yaml (recommended)
 
@@ -61,6 +67,7 @@ In the sidebar, click any preset (Nifty/BankNifty) or enter:
    - `DHAN_CLIENT_ID` → your Dhan client ID
    - `DHAN_ACCESS_TOKEN` → your Dhan access token
 5. Update `render.yaml` → set `VITE_WS_URL` and `VITE_API_URL` to your actual backend URL
+6. **For 24/7 uptime**: Use a paid Render plan — free tier sleeps after 15 min inactivity
 
 ### Option B — manual
 
@@ -82,6 +89,15 @@ In the sidebar, click any preset (Nifty/BankNifty) or enter:
 
 ## Dhan API Notes
 
+**Official v2 docs:** [dhanhq.co/docs/v2](https://dhanhq.co/docs/v2) · [Live Market Feed](https://dhanhq.co/docs/v2/live-market-feed)
+
+| Endpoint | URL |
+|----------|-----|
+| Live Market Feed | `wss://api-feed.dhan.co?version=2&token=...&clientId=...&authType=2` |
+| REST API | `https://api.dhan.co/v2/` |
+| 20-level depth | `wss://depth-api-feed.dhan.co/twentydepth?token=...&clientId=...&authType=2` |
+| 200-level depth | `wss://full-depth-api.dhan.co/twohundreddepth?token=...&clientId=...&authType=2` |
+
 ### Getting Security IDs
 
 Download the Dhan instrument master:
@@ -101,6 +117,17 @@ The backend handles Dhan's v2 market feed format. It expects:
 If Dhan changes their feed format, update `handle_dhan_tick()` in `backend/main.py`.
 
 ---
+
+## 24/7 Memory & Reset (env vars)
+
+| Var | Default | Description |
+|-----|---------|-------------|
+| `MAX_CANDLES_PER_SYMBOL` | 200 | Candles kept per symbol (older dropped) |
+| `MAX_LEVELS_PER_CANDLE` | 500 | Price levels per candle (evicts lowest) |
+| `MAX_ENGINES` | 50 | Max subscribed symbols |
+| `GC_INTERVAL_TICKS` | 10000 | Run `gc.collect()` every N ticks |
+
+Daily reset runs at **IST midnight** (00:00 Asia/Kolkata). Health check includes `reset_date` and `clients`.
 
 ## Candle Granularity
 

@@ -1,4 +1,17 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, Component } from "react";
+import OrderflowChart from "./OrderflowChart";
+import FootprintChart from "./FootprintChart";
+
+class ErrorBoundary extends Component {
+  state = { hasError: false };
+  static getDerivedStateFromError() { return { hasError: true }; }
+  render() {
+    if (this.state.hasError) {
+      return <div className="fp-empty" style={{ padding: 24 }}>Footprint error. Try switching to Chart view.</div>;
+    }
+    return this.props.children;
+  }
+}
 
 const WS_URL = import.meta.env.VITE_WS_URL || `ws://${window.location.host}/ws`;
 const API_URL = import.meta.env.VITE_API_URL || "";
@@ -6,8 +19,96 @@ const API_URL = import.meta.env.VITE_API_URL || "";
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const fmt = (n, d = 2) => Number(n).toFixed(d);
-const fmtVol = (v) => v >= 1000 ? (v / 1000).toFixed(1) + "k" : String(Math.round(v));
+/* Only >= 1000 use K; 100–999 show as full number */
+const fmtVol = (v) => {
+  const n = Number(v);
+  if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, "") + "M";
+  if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "K";
+  return String(Math.round(n));
+};
 const clamp = (v, min, max) => Math.min(Math.max(v, min), max);
+
+/** Normalize timestamp to ms (backend may send seconds). */
+function toMs(t) {
+  if (t == null) return 0;
+  return t < 1e12 ? t * 1000 : t;
+}
+
+/**
+ * Market open offsets from midnight IST (Dhan timestamps are IST-epoch).
+ * NSE / BSE equity & F&O : 9:15 AM
+ * MCX commodities        : 9:00 AM
+ */
+const MARKET_OPEN_BY_EXCHANGE = {
+  NSE: (9 * 60 + 15) * 60 * 1000,  // 9:15 AM
+  BSE: (9 * 60 + 15) * 60 * 1000,  // 9:15 AM
+  MCX: (9 * 60 +  0) * 60 * 1000,  // 9:00 AM
+};
+const DEFAULT_MARKET_OPEN_MS = MARKET_OPEN_BY_EXCHANGE.NSE;
+
+/** Return the market-open offset (ms from midnight IST) for a given exchange string. */
+function marketOpenMs(exchange) {
+  return MARKET_OPEN_BY_EXCHANGE[String(exchange).toUpperCase()] ?? DEFAULT_MARKET_OPEN_MS;
+}
+
+/**
+ * Aggregate 1-min candles into N-min candles.
+ * Bucket boundaries are anchored to the market open of the same day so that
+ * e.g. 30m always starts at 9:15, 9:45, 10:15 … (NSE) or 9:00, 9:30 … (MCX).
+ */
+function aggregateCandles(candles, targetMinutes, openOffsetMs = DEFAULT_MARKET_OPEN_MS) {
+  if (!candles?.length || targetMinutes <= 1) return candles ?? [];
+  const sorted = [...candles].sort((a, b) => toMs(a.open_time) - toMs(b.open_time));
+  const bucketMs = targetMinutes * 60 * 1000;
+  const groups = {};
+  sorted.forEach((c) => {
+    const t          = toMs(c.open_time);
+    const dayStart   = Math.floor(t / 86400000) * 86400000;
+    const marketOpen = dayStart + openOffsetMs;
+    // Align bucket to market open, not to midnight
+    const bucket     = marketOpen + Math.floor((t - marketOpen) / bucketMs) * bucketMs;
+    if (!groups[bucket]) groups[bucket] = [];
+    groups[bucket].push(c);
+  });
+  let runningCvd = 0;
+  return Object.entries(groups)
+    .sort((a, b) => Number(a[0]) - Number(b[0]))
+    .map(([bucket, arr]) => {
+      arr.sort((a, b) => toMs(a.open_time) - toMs(b.open_time));
+      const first = arr[0];
+      const last = arr[arr.length - 1];
+      const merged = {
+        open_time: parseInt(bucket, 10),
+        open: first.open,
+        high: Math.max(...arr.map((x) => x.high ?? x.close ?? 0)),
+        low: Math.min(...arr.map((x) => x.low ?? x.open ?? 999999)),
+        close: last.close,
+        buy_vol: 0,
+        sell_vol: 0,
+        levels: {},
+        closed: last.closed,
+        initiative: null,
+      };
+      arr.forEach((c) => {
+        merged.buy_vol += c.buy_vol ?? 0;
+        merged.sell_vol += c.sell_vol ?? 0;
+        Object.entries(c.levels || {}).forEach(([p, lv]) => {
+          const price = Number(p);
+          const bv = lv.buy_vol ?? lv.buyVol ?? 0;
+          const sv = lv.sell_vol ?? lv.sellVol ?? 0;
+          if (!merged.levels[price]) merged.levels[price] = { price, buy_vol: 0, sell_vol: 0 };
+          merged.levels[price].buy_vol += bv;
+          merged.levels[price].sell_vol += sv;
+          merged.levels[price].total_vol = merged.levels[price].buy_vol + merged.levels[price].sell_vol;
+        });
+      });
+      merged.delta = merged.buy_vol - merged.sell_vol;
+      runningCvd += merged.delta;
+      merged.cvd = runningCvd;
+      merged.initiative = merged.delta > 0 ? "buy" : merged.delta < 0 ? "sell" : null;
+      return merged;
+    });
+}
 
 function getDeltaColor(delta, maxAbs) {
   const ratio = maxAbs > 0 ? clamp(Math.abs(delta) / maxAbs, 0, 1) : 0;
@@ -83,24 +184,78 @@ function CVDLine({ candles }) {
   );
 }
 
-function FootprintCandle({ candle, maxDelta, isLive }) {
+function DeltaCvdBox({ delta, cvd, isDelta }) {
+  const isPos = (isDelta ? delta : cvd) >= 0;
+  const val = isDelta ? delta : cvd;
+  return (
+    <div className={`delta-cvd-box ${isPos ? "pos" : "neg"}`}>
+      {val >= 0 ? "+" : ""}{fmtVol(val)}
+    </div>
+  );
+}
+
+function VolBox({ vol }) {
+  return (
+    <div className="delta-cvd-box vol">
+      {fmtVol(vol ?? 0)}
+    </div>
+  );
+}
+
+function DeltaCvdBoxRow({ candles }) {
+  if (!candles?.length) return null;
+  return (
+    <div className="delta-cvd-box-row">
+      <div className="dcbr-section">
+        <div className="dcbr-label">Tick Delta</div>
+        <div className="dcbr-boxes">
+          {candles.map((c) => (
+            <DeltaCvdBox key={c.open_time} delta={c.delta ?? 0} cvd={0} isDelta={true} />
+          ))}
+        </div>
+      </div>
+      <div className="dcbr-section">
+        <div className="dcbr-label">Cumulative Delta</div>
+        <div className="dcbr-boxes">
+          {candles.map((c) => (
+            <DeltaCvdBox key={c.open_time} delta={0} cvd={c.cvd ?? 0} isDelta={false} />
+          ))}
+        </div>
+      </div>
+      <div className="dcbr-section">
+        <div className="dcbr-label">Total Volume</div>
+        <div className="dcbr-boxes">
+          {candles.map((c) => (
+            <VolBox key={c.open_time} vol={(c.buy_vol ?? 0) + (c.sell_vol ?? 0)} />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FootprintCandle({ candle, maxDelta, isLive, cvd }) {
   const levels = Object.values(candle.levels || {}).sort((a, b) => b.price - a.price);
   const maxLevelVol = Math.max(...levels.map((l) => l.total_vol), 1);
+  // VR Trender: initiative (buy/sell initiated) styling
+  const initiative = candle.initiative;
+  const initiativeClass = initiative === "buy" ? "fp-init-buy" : initiative === "sell" ? "fp-init-sell" : "";
 
   return (
-    <div className={`fp-candle ${isLive ? "fp-candle-live" : ""}`}>
-      <div className="fp-candle-header">
-        <span className="fp-time">
-          {new Date(candle.open_time).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
-          {isLive && <span className="live-dot" />}
-        </span>
-        <span className={`fp-delta ${candle.delta >= 0 ? "pos" : "neg"}`}>
-          Δ {candle.delta >= 0 ? "+" : ""}{fmtVol(candle.delta)}
-        </span>
-        <span className="fp-vol">{fmtVol(candle.buy_vol + candle.sell_vol)}</span>
-      </div>
-      <DeltaBar delta={candle.delta} maxAbs={maxDelta} />
-      <div className="fp-levels">
+    <div className={`fp-candle-wrap ${isLive ? "fp-live" : ""}`}>
+      <div className={`fp-candle ${isLive ? "fp-candle-live" : ""} ${initiativeClass}`}>
+        <div className="fp-candle-header">
+          <span className="fp-time">
+            {new Date(toMs(candle.open_time)).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" })}
+            {isLive && <span className="live-dot" />}
+          </span>
+          <span className={`fp-delta ${candle.delta >= 0 ? "pos" : "neg"}`} title={`Δ min: ${candle.delta_min ?? 0} max: ${candle.delta_max ?? 0}`}>
+            Δ {candle.delta >= 0 ? "+" : ""}{fmtVol(candle.delta)}
+          </span>
+          <span className="fp-vol">{fmtVol(candle.buy_vol + candle.sell_vol)}</span>
+        </div>
+        <DeltaBar delta={candle.delta} maxAbs={maxDelta} />
+        <div className="fp-levels">
         {levels.map((lv) => {
           const volRatio = lv.total_vol / maxLevelVol;
           return (
@@ -118,6 +273,21 @@ function FootprintCandle({ candle, maxDelta, isLive }) {
             </div>
           );
         })}
+        </div>
+      </div>
+      <div className="fp-delta-cvd-boxes">
+        <div className="fp-box-row">
+          <span className="fp-box-label">Δ</span>
+          <DeltaCvdBox delta={candle.delta} cvd={0} isDelta={true} />
+        </div>
+        <div className="fp-box-row">
+          <span className="fp-box-label">CVD</span>
+          <DeltaCvdBox delta={0} cvd={candle.cvd ?? 0} isDelta={false} />
+        </div>
+        <div className="fp-box-row">
+          <span className="fp-box-label">Vol</span>
+          <VolBox vol={(candle.buy_vol ?? 0) + (candle.sell_vol ?? 0)} />
+        </div>
       </div>
     </div>
   );
@@ -139,12 +309,21 @@ function getBaseName(symbol) {
   return String(symbol).replace(/\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+FUT$/i, "").trim();
 }
 
+// Return expiry month for matching/sorting: "FEB", "APR", etc. "CURR" only if no match.
 function getExpiry(symbol) {
-  const m = String(symbol).match(/\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+FUT$/i);
+  const s = String(symbol).trim().replace(/\r/g, "");
+  const m = s.match(/\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+FUT$/i);
   return m ? m[1].toUpperCase() : "CURR";
 }
 
+// Display label for expiry pill: "FEB FUT" etc.
+function getExpiryLabel(symbol) {
+  const exp = getExpiry(symbol);
+  return exp === "CURR" ? (symbol || "CURR") : `${exp} FUT`;
+}
+
 const EXPIRY_ORDER = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+const POPULAR_INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"];
 
 function SubscribePanel({ onSubscribe, activeSymbols }) {
   const [allInstruments, setAllInstruments] = useState([]);
@@ -190,7 +369,7 @@ function SubscribePanel({ onSubscribe, activeSymbols }) {
         segment: instrument.segment,
       }),
     });
-    onSubscribe(instrument.symbol);
+    onSubscribe(instrument.symbol, instrument.exchange);
   };
 
   // Group by base name, filter, search
@@ -218,7 +397,14 @@ function SubscribePanel({ onSubscribe, activeSymbols }) {
     );
   });
 
-  const groups = Object.values(grouped).sort((a, b) => a.base.localeCompare(b.base));
+  const groups = Object.values(grouped).sort((a, b) => {
+    const aPopular = POPULAR_INDICES.indexOf(a.base);
+    const bPopular = POPULAR_INDICES.indexOf(b.base);
+    if (aPopular >= 0 && bPopular >= 0) return aPopular - bPopular;
+    if (aPopular >= 0) return -1;
+    if (bPopular >= 0) return 1;
+    return a.base.localeCompare(b.base);
+  });
 
   // Determine which symbols are active (any expiry of base)
   const activeBaseNames = new Set(
@@ -265,33 +451,42 @@ function SubscribePanel({ onSubscribe, activeSymbols }) {
         {!loading && groups.length === 0 && (
           <div className="inst-empty">No results for "{search}"</div>
         )}
+        {!loading && groups.some((g) => POPULAR_INDICES.includes(g.base)) && (
+          <div className="inst-section-label">Popular indices</div>
+        )}
         {groups.map((g) => {
           const expiries = g.rows.map(getExpiry);
           const curExp = selectedExpiry[g.base] || expiries[0];
           const selectedRow = g.rows.find((r) => getExpiry(r.symbol) === curExp) || g.rows[0];
           const isActive = activeBaseNames.has(g.base) || activeSymbols.includes(selectedRow?.symbol);
+          // Display full symbol (security + expiry) e.g. "GOLD FEB FUT" instead of just "GOLD"
+          const displayName = selectedRow?.symbol || `${g.base} ${curExp}`;
 
           return (
             <div key={g.base} className={`inst-row ${isActive ? "inst-active" : ""}`}>
               <div className="inst-main">
                 <div className="inst-info">
-                  <span className="inst-name">{g.base}</span>
+                  <span className="inst-name" title={displayName}>{displayName}</span>
                   <span className={`inst-badge ${g.exchange.toLowerCase()}`}>{g.exchange}</span>
                 </div>
                 <div className="inst-actions">
                   {/* Expiry selector */}
                   <div className="expiry-pills">
-                    {expiries.map((exp) => (
-                      <button
-                        key={exp}
-                        className={`expiry-pill ${curExp === exp ? "sel" : ""}`}
-                        onClick={() =>
-                          setSelectedExpiry((prev) => ({ ...prev, [g.base]: exp }))
-                        }
-                      >
-                        {exp}
-                      </button>
-                    ))}
+                    {g.rows.map((r) => {
+                      const exp = getExpiry(r.symbol);
+                      return (
+                        <button
+                          key={r.symbol}
+                          className={`expiry-pill ${curExp === exp ? "sel" : ""}`}
+                          onClick={() =>
+                            setSelectedExpiry((prev) => ({ ...prev, [g.base]: exp }))
+                          }
+                          title={r.symbol}
+                        >
+                          {getExpiryLabel(r.symbol)}
+                        </button>
+                      );
+                    })}
                   </div>
                   <button
                     className="inst-add-btn"
@@ -310,7 +505,76 @@ function SubscribePanel({ onSubscribe, activeSymbols }) {
   );
 }
 
-function TickerBar({ symbol, ltp, bid, ask, cvd, tickCount, isDemo }) {
+function InstrumentSelector({ symbols, value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const inputRef = useRef(null);
+  const listRef = useRef(null);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toUpperCase();
+    if (!q) return [...symbols].sort((a, b) => a.localeCompare(b));
+    return symbols.filter((s) => s.toUpperCase().includes(q)).sort((a, b) => a.localeCompare(b));
+  }, [symbols, search]);
+
+  useEffect(() => {
+    if (open) {
+      setSearch("");
+      setTimeout(() => inputRef.current?.focus(), 50);
+    }
+  }, [open]);
+
+  return (
+    <div className="instrument-selector">
+      <button
+        type="button"
+        className="inst-select-trigger"
+        onClick={() => setOpen((o) => !o)}
+        title="Select instrument"
+      >
+        <span className="inst-select-value">{value || "Select instrument"}</span>
+        <span className="inst-select-arrow">{open ? "▲" : "▼"}</span>
+      </button>
+      {open && (
+        <>
+          <div className="inst-select-backdrop" onClick={() => setOpen(false)} />
+          <div className="inst-select-dropdown" ref={listRef}>
+            <input
+              ref={inputRef}
+              type="text"
+              className="inst-select-search"
+              placeholder="Search..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => e.key === "Escape" && setOpen(false)}
+            />
+            <div className="inst-select-list">
+              {filtered.length === 0 ? (
+                <div className="inst-select-empty">No instruments</div>
+              ) : (
+                filtered.map((sym) => (
+                  <button
+                    key={sym}
+                    type="button"
+                    className={`inst-select-option ${value === sym ? "active" : ""}`}
+                    onClick={() => {
+                      onChange(sym);
+                      setOpen(false);
+                    }}
+                  >
+                    {sym}
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function TickerBar({ symbol, ltp, bid, ask, cvd, tickCount, totalVol, isDemo }) {
   const spread = ask - bid;
   return (
     <div className="ticker-bar">
@@ -321,6 +585,7 @@ function TickerBar({ symbol, ltp, bid, ask, cvd, tickCount, isDemo }) {
         <span>Ask <b>{fmt(ask)}</b></span>
         <span>Spread <b>{fmt(spread, 2)}</b></span>
         <span className={cvd >= 0 ? "pos" : "neg"}>CVD <b>{cvd >= 0 ? "+" : ""}{fmtVol(cvd)}</b></span>
+        <span>Vol <b>{fmtVol(totalVol ?? 0)}</b></span>
         <span>Ticks <b>{tickCount}</b></span>
         {isDemo && <span className="demo-badge">DEMO</span>}
       </div>
@@ -336,6 +601,7 @@ export default function App() {
   const [wsStatus, setWsStatus] = useState("connecting");
   const [isDemo, setIsDemo] = useState(false);
   const [activeSymbols, setActiveSymbols] = useState([]);
+  const [symbolExchangeMap, setSymbolExchangeMap] = useState({}); // symbol -> exchange
   const wsRef = useRef(null);
   const pingRef = useRef(null);
 
@@ -393,22 +659,46 @@ export default function App() {
   const maxDelta = Math.max(...candles.map((c) => Math.abs(c.delta)), 1);
   const closedCandles = candles.filter((c) => c.closed);
   const liveCandle = candles.find((c) => !c.closed);
+  const [viewMode, setViewMode] = useState("chart"); // "chart" | "footprint"
+  const [timeFrameMinutes, setTimeFrameMinutes] = useState(1); // TradingView-style: 1,5,10,15,30,45,60,120
+  const [sidebarOpen, setSidebarOpen] = useState(false); // mobile drawer
+
+  const CANDLE_MINUTES = [1, 5, 10, 15, 30, 45, 60, 120];
+
+
+  // Derive the correct market-open offset for the active symbol's exchange
+  const activeExchange     = activeSymbol ? (symbolExchangeMap[activeSymbol] ?? "NSE") : "NSE";
+  const activeMarketOpenMs = marketOpenMs(activeExchange);
+
+  // Client-side aggregation: bucket boundaries anchored to the correct market open
+  const displayCandles = useMemo(
+    () => aggregateCandles(candles, timeFrameMinutes, activeMarketOpenMs),
+    [candles, timeFrameMinutes, activeMarketOpenMs]
+  );
 
   return (
     <div className="app">
       {/* Header */}
       <header className="header">
+        {/* Hamburger — visible only on mobile */}
+        <button
+          className="menu-btn"
+          onClick={() => setSidebarOpen((o) => !o)}
+          aria-label="Toggle instruments panel"
+        >
+          {sidebarOpen ? "✕" : "☰"}
+        </button>
         <div className="logo">
           <span className="logo-mark">⬡</span>
           <span className="logo-text">ORDERFLOW</span>
-          <span className="logo-sub">ENGINE</span>
+          <span className="logo-sub logo-sub-desktop">ENGINE</span>
         </div>
         <div className="header-center">
           {Object.keys(flows).map((sym) => (
             <button
               key={sym}
               className={`tab ${activeSymbol === sym ? "tab-active" : ""}`}
-              onClick={() => setActiveSymbol(sym)}
+              onClick={() => { setActiveSymbol(sym); setSidebarOpen(false); }}
             >
               {sym}
             </button>
@@ -416,17 +706,24 @@ export default function App() {
         </div>
         <div className={`ws-indicator ${wsStatus}`}>
           <span className="ws-dot" />
-          {wsStatus.toUpperCase()}
+          <span className="ws-label">{wsStatus.toUpperCase()}</span>
         </div>
       </header>
 
       <div className="main-layout">
+        {/* Mobile backdrop */}
+        {sidebarOpen && (
+          <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />
+        )}
+
         {/* Sidebar */}
-        <aside className="sidebar">
+        <aside className={`sidebar${sidebarOpen ? " sidebar-open" : ""}`}>
           <SubscribePanel
-            onSubscribe={(sym) => {
+            onSubscribe={(sym, exchange) => {
               setActiveSymbols((prev) => prev.includes(sym) ? prev : [...prev, sym]);
+              setSymbolExchangeMap((prev) => ({ ...prev, [sym]: exchange }));
               setActiveSymbol(sym);
+              setSidebarOpen(false); // auto-close on mobile after subscribing
             }}
             activeSymbols={activeSymbols}
           />
@@ -439,6 +736,8 @@ export default function App() {
             <div className="legend-row"><span className="leg-sell">■</span> Sell aggressor</div>
             <div className="legend-row"><span className="leg-imb-b">▌</span> Buy imbalance (3×)</div>
             <div className="legend-row"><span className="leg-imb-s">▌</span> Sell imbalance (3×)</div>
+            <div className="legend-row"><span className="leg-init-b">▣</span> Buy initiated (IB)</div>
+            <div className="legend-row"><span className="leg-init-s">▣</span> Sell initiated (IS)</div>
           </div>
         </aside>
 
@@ -446,6 +745,13 @@ export default function App() {
         <main className="canvas">
           {flow ? (
             <>
+              <div className="chart-toolbar">
+                <InstrumentSelector
+                  symbols={Object.keys(flows)}
+                  value={activeSymbol}
+                  onChange={setActiveSymbol}
+                />
+              </div>
               <TickerBar
                 symbol={flow.symbol}
                 ltp={flow.ltp}
@@ -453,24 +759,61 @@ export default function App() {
                 ask={flow.ask}
                 cvd={flow.cvd}
                 tickCount={flow.tick_count}
+                totalVol={candles.reduce((s, c) => s + (c.buy_vol ?? 0) + (c.sell_vol ?? 0), 0)}
                 isDemo={isDemo}
               />
-              <div className="fp-scroll-wrap">
-                <div className="fp-row">
-                  {closedCandles.slice(-20).map((c) => (
-                    <FootprintCandle key={c.open_time} candle={c} maxDelta={maxDelta} isLive={false} />
-                  ))}
-                  {liveCandle && (
-                    <FootprintCandle candle={liveCandle} maxDelta={maxDelta} isLive={true} />
-                  )}
-                </div>
+              {/* View toggle: Chart (GoCharting) vs Footprint (VR Trender) */}
+              <div className="view-toggle">
+                <button
+                  className={`vt-btn ${viewMode === "chart" ? "active" : ""}`}
+                  onClick={() => setViewMode("chart")}
+                >
+                  Chart
+                </button>
+                <button
+                  className={`vt-btn ${viewMode === "footprint" ? "active" : ""}`}
+                  onClick={() => setViewMode("footprint")}
+                >
+                  Footprint
+                </button>
               </div>
+              {/* Timeframe selector (TradingView-style, client-side aggregation) */}
+              <div className="candle-duration-bar">
+                <span className="cd-label">Interval:</span>
+                {CANDLE_MINUTES.map((m) => (
+                  <button
+                    key={m}
+                    className={`cd-btn ${timeFrameMinutes === m ? "active" : ""}`}
+                    onClick={() => setTimeFrameMinutes(m)}
+                  >
+                    {m}m
+                  </button>
+                ))}
+              </div>
+              {viewMode === "chart" ? (
+                <div className="chart-view-wrap">
+                  <OrderflowChart
+                    candles={displayCandles}
+                    symbol={flow.symbol}
+                  />
+                </div>
+              ) : (
+                <ErrorBoundary>
+                  <FootprintChart candles={displayCandles} symbol={flow.symbol} timeFrameMinutes={timeFrameMinutes} />
+                </ErrorBoundary>
+              )}
             </>
+          ) : activeSymbol && !flows[activeSymbol] ? (
+            <div className="empty-state loading-state">
+              <div className="empty-icon">⬡</div>
+              <div>Loading {activeSymbol}…</div>
+              <div className="empty-sub">Waiting for first data from feed</div>
+            </div>
           ) : (
             <div className="empty-state">
               <div className="empty-icon">⬡</div>
               <div>Subscribe to an instrument to begin</div>
-              <div className="empty-sub">Real-time footprint + delta + CVD</div>
+              <div className="empty-sub">Live Dhan feed · Delta · CVD · Buy/Sell initiated</div>
             </div>
           )}
         </main>
