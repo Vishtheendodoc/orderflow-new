@@ -22,13 +22,25 @@
 }
 
 html, body, #root {
+  /* 100dvh shrinks/grows as mobile browser chrome (address bar, nav bar)
+     appears/disappears — prevents content being cut off at the bottom.
+     100% is the fallback for older browsers. */
   height: 100%;
+  height: 100dvh;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.4;
   overflow: hidden;
+}
+
+/* App shell: fills full dynamic height, stacks header + content */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  height: 100dvh;
 }
 
 /* ── Header ── */
@@ -54,13 +66,19 @@ html, body, #root {
 .logo-text { font-family: var(--font-display); font-size: 14px; font-weight: 800; letter-spacing: 0.1em; color: #e2e8f0; }
 .logo-sub { font-size: 9px; color: var(--text-muted); letter-spacing: 0.15em; }
 
-.header-center {
-  flex: 1;
-  display: flex;
-  gap: 4px;
-  overflow-x: auto;
-  scrollbar-width: none;
+.header-active-sym {
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+  flex-shrink: 1;
 }
+.header-spacer { flex: 1; }
 
 .tab {
   background: none;
@@ -100,7 +118,8 @@ html, body, #root {
 /* ── Layout ── */
 .main-layout {
   display: flex;
-  height: calc(100vh - 48px);
+  flex: 1;          /* fills remaining height after the header (no calc needed) */
+  min-height: 0;    /* allow flex children to shrink below natural size */
   overflow: hidden;
 }
 
@@ -612,7 +631,7 @@ html, body, #root {
   display: block;
 }
 
-/* ── Fullscreen overlay ── */
+/* ── Fullscreen overlays (CSS-based — works on iOS Safari too) ── */
 .of-fullscreen {
   position: fixed !important;
   inset: 0 !important;
@@ -620,6 +639,15 @@ html, body, #root {
   border-radius: 0 !important;
   background: var(--bg) !important;
   padding: 12px !important;
+}
+.fp-fullscreen {
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 9999;
+  border-radius: 0 !important;
+  min-height: 0 !important;
+  height: 100dvh !important;
+  height: 100vh !important;      /* fallback */
 }
 
 /* Delta/CVD box row below chart: adjusts with chart width and visible range ── */
@@ -1458,14 +1486,13 @@ html, body, #root {
   .ws-label { display: none; }          /* show only the dot on mobile */
 
   /* ── Sidebar: slide-in drawer ── */
-  .main-layout { height: calc(100vh - 44px); }
-
   .sidebar {
     position: fixed;
     top: 44px;
     left: -260px;
     width: 260px;
-    height: calc(100vh - 44px);
+    height: calc(100dvh - 44px);
+    height: calc(100vh - 44px); /* fallback */
     z-index: 300;
     transition: left 0.25s ease;
     box-shadow: none;
@@ -1480,6 +1507,8 @@ html, body, #root {
     display: block;
     position: fixed;
     inset: 44px 0 0 0;
+    /* safe-area bottom for notched phones */
+    padding-bottom: env(safe-area-inset-bottom, 0);
     background: rgba(0,0,0,0.55);
     z-index: 299;
   }
@@ -1513,6 +1542,11 @@ html, body, #root {
   }
   .candle-duration-bar::-webkit-scrollbar { display: none; }
   .cd-btn { padding: 4px 10px; font-size: 10px; }
+
+  /* Safe-area bottom padding (iPhone notch / home indicator) */
+  .canvas {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
 
   /* ── Chart area ── */
   .orderflow-chart { padding: 6px; }
