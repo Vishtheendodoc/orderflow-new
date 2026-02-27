@@ -20,18 +20,18 @@ const C = {
   grid:     "#eaecf2",
   gridTick: "#d8dce8",
   border:   "#dde1ea",
-  buy:      "#26a69a",
-  buyMid:   "rgba(38,166,154,0.72)",
-  buyHL:    "rgba(38,166,154,0.18)",
-  buyLine:  "rgba(38,166,154,0.50)",
-  sell:     "#ef5350",
-  sellMid:  "rgba(239,83,80,0.72)",
-  sellHL:   "rgba(239,83,80,0.18)",
-  sellLine: "rgba(239,83,80,0.50)",
-  bodyBull: "rgba(38,166,154,0.65)",
-  brdBull:  "#26a69a",
-  bodyBear: "rgba(239,83,80,0.65)",
-  brdBear:  "#ef5350",
+  buy:      "#00695c",   // Teal 700 – imbalance highlight (~5.9:1 on white)
+  buyMid:   "#00897b",   // Teal 600 – regular volume  (~4.2:1 on white)
+  buyHL:    "rgba(0,137,123,0.18)",
+  buyLine:  "rgba(0,137,123,0.50)",
+  sell:     "#c62828",   // Red 800  – imbalance highlight (~5.3:1 on white)
+  sellMid:  "#e53935",   // Red 600  – regular volume  (~4.1:1 on white)
+  sellHL:   "rgba(229,57,53,0.18)",
+  sellLine: "rgba(229,57,53,0.50)",
+  bodyBull: "rgba(0,137,123,0.65)",
+  brdBull:  "#00897b",
+  bodyBear: "rgba(198,40,40,0.65)",
+  brdBear:  "#c62828",
   textDark: "#1a2035",
   textMid:  "#6870a0",
   textDim:  "#a8b0c8",
@@ -408,7 +408,9 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     /* row height: auto-adjust for current visible range */
     const pxPerTick = ts > 0 ? H * ts / vr : ROW_PREF;
     const LEVEL_H   = Math.max(8, Math.min(ROW_MAX, pxPerTick));
-    const FONT_SZ   = Math.max(9, Math.min(13, Math.floor(LEVEL_H * 0.65)));
+    const FONT_SZ   = isMobile
+      ? Math.max(8,  Math.min(12, Math.floor(LEVEL_H * 0.62)))
+      : Math.max(10, Math.min(14, Math.floor(LEVEL_H * 0.72)));
 
     /**
      * Dynamic aggregation: when zoomed out (pxPerTick < ROW_MIN), bucket price levels
