@@ -693,11 +693,17 @@ export default function App() {
           <span className="logo-text">ORDERFLOW</span>
           <span className="logo-sub logo-sub-desktop">ENGINE</span>
         </div>
-        {/* Active symbol shown here on desktop as a quick reference — no scrolling tabs */}
-        {activeSymbol && (
-          <span className="header-active-sym">{activeSymbol}</span>
-        )}
-        <div className="header-spacer" />
+        <div className="header-center">
+          {Object.keys(flows).map((sym) => (
+            <button
+              key={sym}
+              className={`tab ${activeSymbol === sym ? "tab-active" : ""}`}
+              onClick={() => { setActiveSymbol(sym); setSidebarOpen(false); }}
+            >
+              {sym}
+            </button>
+          ))}
+        </div>
         <div className={`ws-indicator ${wsStatus}`}>
           <span className="ws-dot" />
           <span className="ws-label">{wsStatus.toUpperCase()}</span>

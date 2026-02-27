@@ -893,19 +893,11 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     };
   }, [scheduleDraw]);
 
-  /* fullscreen
-     — Native API where supported (Android Chrome, desktop).
-     — CSS overlay fallback where requestFullscreen is unavailable (iOS Safari). */
+  /* fullscreen */
   const toggleFS = useCallback(() => {
     const el = rootRef.current; if (!el) return;
-    if (document.fullscreenEnabled) {
-      // Native fullscreen: state driven by fullscreenchange event below
-      if (!document.fullscreenElement) el.requestFullscreen?.().catch(() => setIsFS(true));
-      else document.exitFullscreen?.();
-    } else {
-      // CSS overlay fallback (iOS Safari)
-      setIsFS(fs => !fs);
-    }
+    if (!document.fullscreenElement) el.requestFullscreen?.();
+    else document.exitFullscreen?.();
   }, []);
   useEffect(() => {
     const cb = () => { setIsFS(!!document.fullscreenElement); scheduleDraw(); };
@@ -948,9 +940,9 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
   /* ════════════════ RENDER ════════════════ */
   return (
-    <div ref={rootRef} className={isFS ? "fp-fullscreen" : ""} style={{
+    <div ref={rootRef} style={{
       display: "flex", flexDirection: "column",
-      width: "100%", height: "100%", minHeight: isFS ? 0 : 440,
+      width: "100%", height: isFS ? "100vh" : "100%", minHeight: 440,
       background: C.bgPanel,
       border: isFS ? "none" : `1.5px solid ${C.border}`,
       borderRadius: isFS ? 0 : 10, overflow: "hidden",
