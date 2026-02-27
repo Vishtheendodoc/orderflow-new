@@ -1097,25 +1097,53 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
       {/* ── HEADER ── */}
       <div style={{
-        display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
-        padding: isMobile ? "0 8px" : "0 14px", height: HDR_H_EFF, minHeight: HDR_H_EFF,
+        display: "flex", flexDirection: "column",
         background: "#fff", borderBottom: `1.5px solid ${C.border}`,
         flexShrink: 0, boxShadow: "0 1px 6px rgba(0,0,0,0.06)",
       }}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: C.textDark, letterSpacing: ".04em" }}>{symbol}</span>
-        <span style={{ fontFamily: MONO, fontSize: 9, color: C.textDim }}>FP · {timeFrameMinutes}m</span>
-        <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.buy, display: "inline-block", animation: "fp-pulse 1.6s ease-in-out infinite" }} />
-        {/* last price + Δ% compact pill */}
-        <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 700, color: C.textDark }}>{fmt2(last.close ?? 0)}</span>
-        <span style={{ fontFamily: MONO, fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 4, color: "#fff", background: chg >= 0 ? C.buy : C.sell }}>
-          {chg >= 0 ? "+" : ""}{chg.toFixed(2)}%
-        </span>
+        {/* Row 1: info left | action buttons right */}
+        <div style={{
+          display: "flex", alignItems: "center", gap: isMobile ? 6 : 10,
+          padding: isMobile ? "4px 8px" : "0 14px",
+          height: isMobile ? 32 : HDR_H_EFF, minHeight: isMobile ? 32 : HDR_H_EFF,
+        }}>
+          {/* ── info ── */}
+          <span style={{ fontSize: isMobile ? 11 : 13, fontWeight: 700, color: C.textDark, letterSpacing: ".04em", whiteSpace: "nowrap" }}>{symbol}</span>
+          <span style={{ fontFamily: MONO, fontSize: 9, color: C.textDim, whiteSpace: "nowrap" }}>{timeFrameMinutes}m</span>
+          <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.buy, display: "inline-block", flexShrink: 0, animation: "fp-pulse 1.6s ease-in-out infinite" }} />
+          <span style={{ fontFamily: MONO, fontSize: isMobile ? 10 : 11, fontWeight: 700, color: C.textDark, whiteSpace: "nowrap" }}>{fmt2(last.close ?? 0)}</span>
+          <span style={{ fontFamily: MONO, fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 4, color: "#fff", background: chg >= 0 ? C.buy : C.sell, flexShrink: 0 }}>
+            {chg >= 0 ? "+" : ""}{chg.toFixed(2)}%
+          </span>
 
-        {(hoverBar || hoverPrice != null) && (
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ flex: 1 }} />
+
+          {/* ── action buttons – always visible ── */}
+          {!followLatest.current && (
+            <button
+              onClick={() => { followLatest.current = true; scheduleDraw(); }}
+              style={{ ...btnStyle, borderColor: C.buy, color: C.buy, fontSize: 9, padding: isMobile ? "3px 6px" : "2px 8px", minWidth: isMobile ? 36 : undefined }}
+            >▶</button>
+          )}
+          <button
+            onClick={() => setShowLines(v => !v)}
+            title="Toggle imbalance lines"
+            style={{ ...btnStyle, background: showLines ? "rgba(38,166,154,0.10)" : "none", borderColor: showLines ? C.buy : C.border, color: showLines ? C.buy : C.textMid, padding: isMobile ? "3px 7px" : "2px 8px", minWidth: isMobile ? 36 : undefined }}
+          >⟷</button>
+          <button onClick={handleFit} title="Fit all candles [A]"
+            style={{ ...btnStyle, padding: isMobile ? "3px 7px" : "2px 8px", minWidth: isMobile ? 36 : undefined }}
+          >{isMobile ? "⊡" : "Fit"}</button>
+          <button onClick={toggleFS} title="Fullscreen"
+            style={{ ...btnStyle, fontSize: isMobile ? 15 : 13, padding: isMobile ? "2px 7px" : "2px 7px", minWidth: isMobile ? 36 : undefined }}
+          >{isFS ? "⊠" : "⛶"}</button>
+        </div>
+
+        {/* Row 2: hover info (desktop only — touch devices don't hover) */}
+        {!isMobile && (hoverBar || hoverPrice != null) && (
+          <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "2px 14px 4px", flexShrink: 0 }}>
             {hoverPrice != null && (
               <span style={{ fontFamily: MONO, fontSize: 10, fontWeight: 600, color: C.textDark }}>
-                Price {fmtP(hoverPrice)}
+                {fmtP(hoverPrice)}
               </span>
             )}
             {hoverBar && (
@@ -1131,27 +1159,6 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
             )}
           </div>
         )}
-
-        <div style={{ flex: 1 }} />
-
-        {/* follow latest indicator */}
-        {!followLatest.current && (
-          <button
-            onClick={() => { followLatest.current = true; scheduleDraw(); }}
-            style={{ ...btnStyle, borderColor: C.buy, color: C.buy, fontSize: 9 }}
-          >
-            ▶ Latest
-          </button>
-        )}
-
-        <button
-          onClick={() => setShowLines(v => !v)}
-          title="Toggle imbalance lines (L)"
-          style={{ ...btnStyle, background: showLines ? "rgba(38,166,154,0.10)" : "none", borderColor: showLines ? C.buy : C.border, color: showLines ? C.buy : C.textMid }}
-        >⟷ Lines</button>
-
-        <button onClick={handleFit} style={btnStyle}>Fit [A]</button>
-        <button onClick={toggleFS} style={{ ...btnStyle, fontSize: 13, padding: "2px 7px" }}>{isFS ? "⊠" : "⛶"}</button>
       </div>
 
       {/* ── BODY ── */}
