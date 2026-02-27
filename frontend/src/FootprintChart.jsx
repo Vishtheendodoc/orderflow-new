@@ -41,7 +41,7 @@ const C = {
 const MONO = "'JetBrains Mono','Fira Mono','Consolas',monospace";
 const SANS = "'IBM Plex Sans','Segoe UI',sans-serif";
 const GAP         = 2;
-const NZW  = 80; // default numbers-zone width (shadowed inside component for mobile/desktop)
+const NZW  = 80; // default numbers-zone width – shadowed per-device inside component
 const PS_W     = 60;   // price scale width
 const LABEL_W  = 52;   // bottom strip label column width (chart must start here to align)
 const HDR_H    = 48;
@@ -219,7 +219,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   const TIME_H_EFF = isMobile ? 18 : TIME_H;
   const BOT_H_EFF  = isMobile ? 52 : BOT_H;
   // eslint-disable-next-line no-shadow
-  const NZW  = isMobile ? 20 : 80;  // numbers-zone width per candle slot (40px per side on desktop)
+  const NZW  = isMobile ? 40 : 80;  // numbers-zone width per candle slot (20px/40px per side)
   // eslint-disable-next-line no-shadow
   const RPAD = isMobile ? 12 : 30;  // padding after last candle
 
