@@ -752,16 +752,7 @@ export default function App() {
                   onChange={setActiveSymbol}
                 />
               </div>
-              <TickerBar
-                symbol={flow.symbol}
-                ltp={flow.ltp}
-                bid={flow.bid}
-                ask={flow.ask}
-                cvd={flow.cvd}
-                tickCount={flow.tick_count}
-                totalVol={candles.reduce((s, c) => s + (c.buy_vol ?? 0) + (c.sell_vol ?? 0), 0)}
-                isDemo={isDemo}
-              />
+              {/* TickerBar removed — data visible in chart header */}
               {/* View toggle: Chart (GoCharting) vs Footprint (VR Trender) */}
               <div className="view-toggle">
                 <button
