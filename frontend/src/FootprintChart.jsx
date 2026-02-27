@@ -238,6 +238,10 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   const dragY          = useRef(0);
   const panStart       = useRef(0);
   const priceOffStart  = useRef(0);
+  /* pinch-to-zoom */
+  const activePointers = useRef(new Map()); // pointerId → {x,y}
+  const pinchDist0     = useRef(0);
+  const pinchCW0       = useRef(32);
   const psDragY0   = useRef(null);
   const psScale0   = useRef(1.0); // price scale factor at start of drag
   const rafId     = useRef(null);
@@ -778,58 +782,104 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     return () => ro.disconnect();
   }, [scheduleDraw]);
 
-  /* canvas pointer */
+  /* canvas pointer — single-finger drag + two-finger pinch zoom */
   useEffect(() => {
-    const cv = canvasRef.current; if (!cv) return;
+    const cv  = canvasRef.current; if (!cv) return;
+    const pts = activePointers.current;
+
     const onDown = e => {
-      dragging.current = true;
-      dragX.current = e.clientX;
-      dragY.current = e.clientY;
-      panStart.current = panRef.current;
-      priceOffStart.current = priceOffRef.current;
-      followLatest.current = false;
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
       cv.setPointerCapture?.(e.pointerId);
-      cv.style.cursor = "grabbing";
-    };
-    const onGMove = e => {
-      if (!dragging.current) return;
-      panRef.current = Math.max(0, Math.min(getMaxPan(), panStart.current - (e.clientX - dragX.current)));
-      const h = getCanvasH(), vr = getVisRange();
-      if (h > 0 && vr > 0) {
-        const dy = e.clientY - dragY.current;
-        priceOffRef.current = priceOffStart.current - dy * (vr / h);
+
+      if (pts.size === 1) {
+        // single-finger: start horizontal + vertical drag
+        dragging.current      = true;
+        dragX.current         = e.clientX;
+        dragY.current         = e.clientY;
+        panStart.current      = panRef.current;
+        priceOffStart.current = priceOffRef.current;
+        followLatest.current  = false;
+        cv.style.cursor       = "grabbing";
+      } else if (pts.size === 2) {
+        // second finger landed → switch to pinch; cancel the drag
+        dragging.current  = false;
+        cv.style.cursor   = "crosshair";
+        const [a, b]      = [...pts.values()];
+        pinchDist0.current = Math.hypot(b.x - a.x, b.y - a.y);
+        pinchCW0.current   = candleWRef.current;
       }
-      scheduleDraw();
     };
+
     const onMove = e => {
-      if (dragging.current) return;
-      const rect = cv.getBoundingClientRect();
-      const mx   = e.clientX - rect.left + panRef.current;
-      const my   = e.clientY - rect.top;
+      if (pts.has(e.pointerId)) pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+      if (pts.size >= 2) {
+        // ── pinch zoom: adjust candle width ──
+        const [a, b] = [...pts.values()];
+        const dist   = Math.hypot(b.x - a.x, b.y - a.y);
+        if (pinchDist0.current > 0) {
+          candleWRef.current = Math.max(W_MIN, Math.min(W_MAX,
+            pinchCW0.current * (dist / pinchDist0.current)));
+          scheduleDraw();
+        }
+        return;
+      }
+
+      if (dragging.current) {
+        // ── single-finger drag: pan horizontally + vertically ──
+        panRef.current = Math.max(0, Math.min(getMaxPan(),
+          panStart.current - (e.clientX - dragX.current)));
+        const h = getCanvasH(), vr = getVisRange();
+        if (h > 0 && vr > 0) {
+          const dy = e.clientY - dragY.current;
+          // +dy: drag down → see higher prices (natural "grab-and-move" feel)
+          priceOffRef.current = priceOffStart.current + dy * (vr / h);
+        }
+        scheduleDraw();
+        return;
+      }
+
+      // ── no drag: hover crosshair ──
+      const rect  = cv.getBoundingClientRect();
+      const mx    = e.clientX - rect.left + panRef.current;
+      const my    = e.clientY - rect.top;
       const slotW = candleWRef.current + NUM_ZONE_W + GAP;
-      const idx  = Math.floor(mx / slotW);
-      const bs   = barsRef.current;
+      const idx   = Math.floor(mx / slotW);
+      const bs    = barsRef.current;
       setHoverBar(idx >= 0 && idx < bs.length ? bs[idx] : null);
       const H = getCanvasH();
       if (H > 0) {
         const vr = getVisRange(), vm = getVisPMin();
-        const price = vm + vr * (1 - my / H);
-        setHoverPrice(isFinite(price) ? price : null);
+        setHoverPrice(isFinite(vm + vr * (1 - my / H)) ? vm + vr * (1 - my / H) : null);
       } else setHoverPrice(null);
     };
-    const onUp    = () => { dragging.current = false; cv.style.cursor = "crosshair"; };
+
+    const onUp = e => {
+      pts.delete(e.pointerId);
+      if (pts.size === 0) {
+        dragging.current   = false;
+        pinchDist0.current = 0;
+        cv.style.cursor    = "crosshair";
+      } else if (pts.size === 1) {
+        // One finger lifted during pinch — reset; don't resume drag immediately
+        pinchDist0.current = 0;
+        dragging.current   = false;
+      }
+    };
+
     const onLeave = () => { setHoverBar(null); setHoverPrice(null); };
-    cv.addEventListener("pointerdown",  onDown);
-    cv.addEventListener("pointermove",  onMove);
-    cv.addEventListener("pointerleave", onLeave);
-    window.addEventListener("pointermove", onGMove);
-    window.addEventListener("pointerup",   onUp);
+
+    cv.addEventListener("pointerdown",   onDown);
+    cv.addEventListener("pointermove",   onMove);
+    cv.addEventListener("pointerup",     onUp);
+    cv.addEventListener("pointercancel", onUp);
+    cv.addEventListener("pointerleave",  onLeave);
     return () => {
-      cv.removeEventListener("pointerdown",  onDown);
-      cv.removeEventListener("pointermove",  onMove);
-      cv.removeEventListener("pointerleave", onLeave);
-      window.removeEventListener("pointermove", onGMove);
-      window.removeEventListener("pointerup",   onUp);
+      cv.removeEventListener("pointerdown",   onDown);
+      cv.removeEventListener("pointermove",   onMove);
+      cv.removeEventListener("pointerup",     onUp);
+      cv.removeEventListener("pointercancel", onUp);
+      cv.removeEventListener("pointerleave",  onLeave);
     };
   }, [getMaxPan, getCanvasH, getVisRange, getVisPMin, scheduleDraw]);
 
@@ -890,6 +940,45 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       psEl.removeEventListener("pointermove",  onMove);
       psEl.removeEventListener("pointerup",    onUp);
       psEl.removeEventListener("pointerleave", onLeave);
+    };
+  }, [scheduleDraw]);
+
+  /* time axis: scroll wheel OR horizontal drag adjusts candle width (horizontal zoom) */
+  useEffect(() => {
+    const el = timeRef.current; if (!el) return;
+    let dragStartX = null, dragStartCW = 32;
+
+    const onWheel = e => {
+      e.preventDefault();
+      candleWRef.current = Math.max(W_MIN, Math.min(W_MAX,
+        candleWRef.current + (e.deltaY > 0 ? -3 : 3)));
+      scheduleDraw();
+    };
+    const onDown = e => {
+      dragStartX  = e.clientX;
+      dragStartCW = candleWRef.current;
+      el.setPointerCapture?.(e.pointerId);
+    };
+    const onMove = e => {
+      if (dragStartX === null) return;
+      // drag right → wider candles; drag left → narrower candles
+      const dx = e.clientX - dragStartX;
+      candleWRef.current = Math.max(W_MIN, Math.min(W_MAX, dragStartCW + dx * 0.4));
+      scheduleDraw();
+    };
+    const onUp = () => { dragStartX = null; };
+
+    el.addEventListener("wheel",        onWheel, { passive: false });
+    el.addEventListener("pointerdown",  onDown);
+    el.addEventListener("pointermove",  onMove);
+    el.addEventListener("pointerup",    onUp);
+    el.addEventListener("pointercancel", onUp);
+    return () => {
+      el.removeEventListener("wheel",        onWheel);
+      el.removeEventListener("pointerdown",  onDown);
+      el.removeEventListener("pointermove",  onMove);
+      el.removeEventListener("pointerup",    onUp);
+      el.removeEventListener("pointercancel", onUp);
     };
   }, [scheduleDraw]);
 
@@ -1073,6 +1162,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           borderTop: `1.5px solid ${C.border}`,
           position: "relative", overflow: "hidden",
           flexShrink: 0, marginLeft: LABEL_W, marginRight: PS_W,
+          touchAction: "none",
+          cursor: "ew-resize",
         }} />
 
         {/* ── BOTTOM STRIP ── */}
