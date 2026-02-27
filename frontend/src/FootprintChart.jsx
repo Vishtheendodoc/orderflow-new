@@ -213,6 +213,12 @@ function processCandles(candles, maxLevelsCap) {
    COMPONENT
 ════════════════════════════════════════════ */
 export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMinutes = 1 }) {
+  /* compact layout for narrow/mobile screens */
+  const isMobile   = typeof window !== "undefined" && window.innerWidth <= 768;
+  const HDR_H_EFF  = isMobile ? 36 : HDR_H;
+  const TIME_H_EFF = isMobile ? 18 : TIME_H;
+  const BOT_H_EFF  = isMobile ? 52 : BOT_H;
+
   const rootRef      = useRef(null);
   const containerRef = useRef(null);
   const canvasRef    = useRef(null);
@@ -242,6 +248,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   const activePointers = useRef(new Map()); // pointerId → {x,y}
   const pinchDist0     = useRef(0);
   const pinchCW0       = useRef(32);
+  /* true once user manually changes candle width; suppresses auto-fit reset */
+  const userZoomedW    = useRef(false);
   const psDragY0   = useRef(null);
   const psScale0   = useRef(1.0); // price scale factor at start of drag
   const rafId     = useRef(null);
@@ -354,7 +362,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
   const getCanvasH = useCallback(() => {
     const tot = containerRef.current?.clientHeight || 600;
-    return Math.max(200, tot - TIME_H - BOT_H);
+    return Math.max(100, tot - TIME_H_EFF - BOT_H_EFF);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* ══════════════════════════════════════════════════════
@@ -683,7 +692,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const cv = botCanvasRef.current, ct = containerRef.current;
     if (!cv || !ct) return;
     const W   = ct.clientWidth - PS_W - LABEL_W;
-    const H   = BOT_H;
+    const H   = BOT_H_EFF;
     const bs  = barsRef.current;
     const cw  = candleWRef.current;
     const pan = panRef.current;
@@ -748,6 +757,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   const handleFit = useCallback(() => {
     const bs = barsRef.current;
     if (!bs.length || !containerRef.current) return;
+    userZoomedW.current = false; // allow auto-fit again
     const wrapW = (containerRef.current.clientWidth || 800) - PS_W - LABEL_W;
     const slotBase = NUM_ZONE_W + GAP;
     const w = (wrapW + GAP - RIGHT_PAD) / bs.length - slotBase;
@@ -758,13 +768,18 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     scheduleDraw();
   }, [scheduleDraw]);
 
-  /* initial fit on data change; auto-scale always on unless user has manually zoomed price axis */
+  /* reset user zoom flag when chart instrument/timeframe changes (new chart → re-fit) */
+  useEffect(() => { userZoomedW.current = false; }, [symbol, timeFrameMinutes]);
+
+  /* initial fit on data change; skips candle-width reset if user has manually zoomed */
   useEffect(() => {
     if (!bars.length || !containerRef.current) return;
-    const wrapW = (containerRef.current.clientWidth || 800) - PS_W - LABEL_W;
-    const slotBase = NUM_ZONE_W + GAP;
-    const w = (wrapW + GAP - RIGHT_PAD) / bars.length - slotBase;
-    candleWRef.current = Math.round(Math.max(W_MIN, Math.min(W_MAX, w)));
+    if (!userZoomedW.current) {
+      const wrapW = (containerRef.current.clientWidth || 800) - PS_W - LABEL_W;
+      const slotBase = NUM_ZONE_W + GAP;
+      const w = (wrapW + GAP - RIGHT_PAD) / bars.length - slotBase;
+      candleWRef.current = Math.round(Math.max(W_MIN, Math.min(W_MAX, w)));
+    }
     scheduleDraw();
   }, [bars, scheduleDraw]);
 
@@ -772,7 +787,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const el = containerRef.current; if (!el) return;
     const updateHeight = () => {
       const tot = el.clientHeight || 0;
-      const h = Math.max(200, tot - TIME_H - BOT_H);
+      const h = Math.max(100, tot - TIME_H_EFF - BOT_H_EFF);
       setChartAreaHeight((prev) => (prev !== h ? h : prev));
       scheduleDraw();
     };
@@ -818,6 +833,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         const [a, b] = [...pts.values()];
         const dist   = Math.hypot(b.x - a.x, b.y - a.y);
         if (pinchDist0.current > 0) {
+          userZoomedW.current = true;
           candleWRef.current = Math.max(W_MIN, Math.min(W_MAX,
             pinchCW0.current * (dist / pinchDist0.current)));
           scheduleDraw();
@@ -889,6 +905,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const onWheel = e => {
       e.preventDefault();
       if (e.ctrlKey || e.metaKey) {
+        userZoomedW.current = true;
         candleWRef.current = Math.max(W_MIN, Math.min(W_MAX, candleWRef.current + (e.deltaY > 0 ? -5 : 5)));
       } else if (e.shiftKey) {
         // shift+scroll on chart = price scale (down=zoom out/shrink, up=zoom in/expand)
@@ -910,6 +927,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const onWheel = e => {
       e.preventDefault();
       if (e.shiftKey) {
+        userZoomedW.current = true;
         candleWRef.current = Math.max(W_MIN, Math.min(W_MAX, candleWRef.current + (e.deltaY > 0 ? -4 : 4)));
       } else {
         // scroll down = zoom out (prices shrink, more range visible)
@@ -950,6 +968,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
     const onWheel = e => {
       e.preventDefault();
+      userZoomedW.current = true;
       candleWRef.current = Math.max(W_MIN, Math.min(W_MAX,
         candleWRef.current + (e.deltaY > 0 ? -3 : 3)));
       scheduleDraw();
@@ -963,6 +982,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       if (dragStartX === null) return;
       // drag right → wider candles; drag left → narrower candles
       const dx = e.clientX - dragStartX;
+      userZoomedW.current = true;
       candleWRef.current = Math.max(W_MIN, Math.min(W_MAX, dragStartCW + dx * 0.4));
       scheduleDraw();
     };
@@ -1042,7 +1062,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       /* When fullscreen: fixed overlay fills entire viewport (works on iOS Safari too) */
       ...(isFS
         ? { position: "fixed", inset: 0, width: "100%", height: "100%", zIndex: 9999 }
-        : { width: "100%", height: "100%", minHeight: 440 }
+        : { width: "100%", flex: 1, minHeight: 0 }
       ),
       background: C.bgPanel,
       border: isFS ? "none" : `1.5px solid ${C.border}`,
@@ -1054,7 +1074,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       {/* ── HEADER ── */}
       <div style={{
         display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
-        padding: "0 14px", height: HDR_H, minHeight: HDR_H,
+        padding: isMobile ? "0 8px" : "0 14px", height: HDR_H_EFF, minHeight: HDR_H_EFF,
         background: "#fff", borderBottom: `1.5px solid ${C.border}`,
         flexShrink: 0, boxShadow: "0 1px 6px rgba(0,0,0,0.06)",
       }}>
@@ -1158,7 +1178,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
         {/* time axis (align with chart) */}
         <div ref={timeRef} style={{
-          height: TIME_H, background: "#f4f5f8",
+          height: TIME_H_EFF, background: "#f4f5f8",
           borderTop: `1.5px solid ${C.border}`,
           position: "relative", overflow: "hidden",
           flexShrink: 0, marginLeft: LABEL_W, marginRight: PS_W,
@@ -1168,7 +1188,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
         {/* ── BOTTOM STRIP ── */}
         <div style={{
-          height: BOT_H, background: "#fff",
+          height: BOT_H_EFF, background: "#fff",
           borderTop: `1.5px solid ${C.border}`,
           flexShrink: 0, overflow: "hidden",
           position: "relative",
