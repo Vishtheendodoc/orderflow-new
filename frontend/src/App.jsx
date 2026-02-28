@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, useCallback, useMemo, Component } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, Component } from "react";
+import { createPortal } from "react-dom";
 import OrderflowChart from "./OrderflowChart";
 import FootprintChart from "./FootprintChart";
 import LiquidityHeatmap from "./LiquidityHeatmap";
@@ -616,12 +617,31 @@ export default function App() {
   const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true });
   const [featMenuOpen, setFeatMenuOpen] = useState(false);
   const featMenuRef = useRef(null);
-  /* close dropdown on outside click */
+  const featBtnRef = useRef(null);
+  const featDropdownRef = useRef(null);
+  const [featDropdownPos, setFeatDropdownPos] = useState({ top: 0, left: 0 });
+  /* position dropdown below button (portal avoids overflow clipping on mobile) */
+  useLayoutEffect(() => {
+    if (!featMenuOpen || !featBtnRef.current) return;
+    const rect = featBtnRef.current.getBoundingClientRect();
+    const left = Math.max(8, Math.min(rect.left, (typeof window !== "undefined" ? window.innerWidth : 400) - 220));
+    setFeatDropdownPos({ top: rect.bottom + 6, left });
+  }, [featMenuOpen]);
+  /* close dropdown on outside click (mousedown + touchstart for mobile) */
   useEffect(() => {
     if (!featMenuOpen) return;
-    const handler = (e) => { if (featMenuRef.current && !featMenuRef.current.contains(e.target)) setFeatMenuOpen(false); };
+    const handler = (e) => {
+      const wrap = featMenuRef.current;
+      const dd = featDropdownRef.current;
+      if (wrap?.contains(e.target) || dd?.contains(e.target)) return;
+      setFeatMenuOpen(false);
+    };
     document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    document.addEventListener("touchstart", handler, { passive: true });
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("touchstart", handler);
+    };
   }, [featMenuOpen]);
 
   useEffect(() => {
@@ -838,14 +858,26 @@ export default function App() {
                 {/* ── Features dropdown ── */}
                 <div className="feat-menu-wrap" ref={featMenuRef}>
                   <button
+                    ref={featBtnRef}
                     className={`cd-btn feat-btn${featMenuOpen ? " active" : ""}`}
                     onClick={() => setFeatMenuOpen((o) => !o)}
                     title="Toggle chart features"
                   >
                     ⚙ Features
                   </button>
-                  {featMenuOpen && (
-                    <div className="feat-dropdown">
+                  {featMenuOpen && createPortal(
+                    <div
+                      ref={featDropdownRef}
+                      className="feat-dropdown feat-dropdown-portal"
+                      style={{
+                        position: "fixed",
+                        top: featDropdownPos.top,
+                        left: featDropdownPos.left,
+                        minWidth: 200,
+                        maxWidth: "calc(100vw - 16px)",
+                        zIndex: 9999,
+                      }}
+                    >
                       <div className="feat-dropdown-title">Chart Features</div>
                       {[
                         { key: "showOI",   label: "Open Interest (OI)" },
@@ -861,7 +893,8 @@ export default function App() {
                           {label}
                         </label>
                       ))}
-                    </div>
+                    </div>,
+                    document.body
                   )}
                 </div>
               </div>
