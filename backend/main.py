@@ -371,7 +371,10 @@ depth_snapshots: Dict[str, deque] = {}
 
 # ── GEX cache ─────────────────────────────────────────────────────────────────
 # index_name → {computed_at, spot, expiry, strikes:[...], flip_point, ...}
+# gex_cache keyed by "{INDEX_NAME}:{YYYY-MM-DD}" so multiple expiries are cached independently
 gex_cache: Dict[str, dict] = {}
+# expiry_list_cache keyed by index_name -> list of expiry date strings
+expiry_list_cache: Dict[str, list] = {}
 
 
 # ─────────────────────────────────────────────
@@ -764,8 +767,11 @@ async def _fetch_gex_once(index_name: str, underlying_scrip: str, expiry: str) -
             if resp.status_code == 429:
                 logger.warning(f"Options chain 429 [{index_name}] — rate limited, backing off")
                 return False
-            if not resp.ok:
-                logger.warning(f"Options chain {resp.status_code} [{index_name}]: {resp.text[:200]}")
+            if not resp.is_success:   # httpx attr (not requests' .ok)
+                logger.warning(
+                    f"Options chain {resp.status_code} [{index_name}] "
+                    f"expiry={expiry} | {resp.text[:300]}"
+                )
                 return False
             data = resp.json()
 
@@ -823,17 +829,19 @@ async def _fetch_gex_once(index_name: str, underlying_scrip: str, expiry: str) -
         results.sort(key=lambda x: x["strike"])
         flip = _find_gex_flip(results, spot)
 
-        gex_cache[index_name] = {
-            "computed_at":   int(time.time() * 1000),
-            "spot":          spot,
-            "expiry":        expiry,
-            "lot_size":      lot_size,
-            "strikes":       results,
-            "flip_point":    flip,
+        cache_key = f"{index_name}:{expiry}"
+        gex_cache[cache_key] = {
+            "computed_at":    int(time.time() * 1000),
+            "index":          index_name,
+            "spot":           spot,
+            "expiry":         expiry,
+            "lot_size":       lot_size,
+            "strikes":        results,
+            "flip_point":     flip,
             "total_call_gex": round(sum(r["call_gex"] for r in results), 2),
             "total_put_gex":  round(sum(r["put_gex"]  for r in results), 2),
         }
-        logger.info(f"GEX [{index_name}] updated: spot={spot}, strikes={len(results)}, flip={flip}")
+        logger.info(f"GEX [{index_name}:{expiry}] updated: spot={spot}, strikes={len(results)}, flip={flip}")
         return True
 
     except Exception as e:
@@ -852,6 +860,10 @@ async def options_poller_task():
         logger.info("DHAN_TOKEN_OPTIONS not set — options/GEX poller inactive")
         return
     logger.info(f"Starting options/GEX poller (cycle={OPTIONS_POLL_SEC}s, gap=5s/index)…")
+    # Pre-fetch expiry lists so the frontend dropdown is populated immediately
+    for idx_name in UNDERLYING_IDS:
+        await _fetch_expiry_list(idx_name)
+        await asyncio.sleep(5)
     while True:
         expiry = _nearest_weekly_expiry()
         rate_limited = False
@@ -1204,23 +1216,94 @@ def get_heatmap(symbol: str, n: int = 300):
     return {"symbol": symbol, "snapshots": list(snaps)[-n:]}
 
 
-@app.get("/api/gex/{symbol}")
-def get_gex(symbol: str):
-    """Return current GEX data for a NIFTY / BANKNIFTY index.
-    Accepts both index name (e.g. 'NIFTY') and full futures symbol.
-    """
-    symbol = symbol.upper()
+def _resolve_index(symbol: str) -> Optional[str]:
+    """Return canonical index name (e.g. 'NIFTY') from any symbol string."""
+    s = symbol.upper()
     for idx_name in UNDERLYING_IDS:
-        if idx_name in symbol:
-            data = gex_cache.get(idx_name)
-            if data:
-                return data
+        if idx_name in s:
+            return idx_name
+    return None
+
+
+async def _fetch_expiry_list(index_name: str) -> list:
+    """Fetch available expiry dates for an index from Dhan and cache them."""
+    if not DHAN_TOKEN_OPTIONS:
+        return []
+    uid = UNDERLYING_IDS.get(index_name, "")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{DHAN_API_BASE}/optionchain/expirylist",
+                headers={
+                    "access-token": DHAN_TOKEN_OPTIONS,
+                    "client-id":    DHAN_CLIENT_ID,
+                    "Content-Type": "application/json",
+                    "Accept":       "application/json",
+                },
+                json={"UnderlyingScrip": int(uid), "UnderlyingSeg": UNDERLYING_SEG},
+            )
+            if not resp.is_success:
+                logger.warning(f"Expiry list {resp.status_code} [{index_name}]: {resp.text[:200]}")
+                return []
+            data = resp.json()
+        expiries = data.get("data", [])
+        if expiries:
+            expiry_list_cache[index_name] = expiries
+            logger.info(f"Expiry list [{index_name}]: {len(expiries)} dates")
+        return expiries
+    except Exception as e:
+        logger.warning(f"Expiry list error [{index_name}]: {e}")
+        return []
+
+
+@app.get("/api/gex/{symbol}/expiries")
+async def get_expiries(symbol: str):
+    """Return available option expiry dates for a NIFTY/BANKNIFTY index.
+    Refreshes from Dhan each call (cached for 5 min server-side).
+    """
+    idx = _resolve_index(symbol)
+    if not idx:
+        return JSONResponse({"error": f"Unknown index: {symbol}"}, 400)
+
+    cached = expiry_list_cache.get(idx)
+    if cached:
+        return {"index": idx, "expiries": cached}
+
+    expiries = await _fetch_expiry_list(idx)
+    if not expiries:
+        return JSONResponse({"error": "Could not fetch expiries — check DHAN_TOKEN_OPTIONS"}, 202)
+    return {"index": idx, "expiries": expiries}
+
+
+@app.get("/api/gex/{symbol}")
+async def get_gex(symbol: str, expiry: str = ""):
+    """Return GEX data for a NIFTY / BANKNIFTY index.
+    Optional query param: ?expiry=YYYY-MM-DD  (defaults to nearest weekly expiry).
+    If the requested expiry is not in cache yet, fetches it on-demand.
+    """
+    idx = _resolve_index(symbol)
+    if not idx:
+        return JSONResponse({"error": f"Unknown index: {symbol}"}, 400)
+
+    target_expiry = expiry.strip() or _nearest_weekly_expiry()
+    cache_key = f"{idx}:{target_expiry}"
+
+    data = gex_cache.get(cache_key)
+    if data:
+        return data
+
+    # Not in cache — fetch on-demand (user selected a different expiry)
+    if DHAN_TOKEN_OPTIONS:
+        ok = await _fetch_gex_once(idx, UNDERLYING_IDS[idx], target_expiry)
+        if ok:
+            return gex_cache.get(cache_key, {})
+
     return JSONResponse({"error": "GEX data not available — check DHAN_TOKEN_OPTIONS"}, 202)
 
 
 @app.get("/api/gex")
 def list_gex():
-    """Return GEX for all available indices."""
+    """Return GEX for all cached index:expiry combinations."""
     return {k: v for k, v in gex_cache.items()}
 
 

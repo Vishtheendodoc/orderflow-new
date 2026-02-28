@@ -13,8 +13,8 @@
 
 import { useRef, useEffect, useCallback, useState } from "react";
 
-const POLL_MS      = 60_000;   // GEX changes slowly; poll every 60 s
-const MAX_STRIKES  = 40;       // show ±20 strikes around ATM
+const POLL_MS      = 60_000;
+const MAX_STRIKES  = 40;
 const BAR_H_MIN    = 6;
 const BAR_H_MAX    = 22;
 
@@ -26,20 +26,49 @@ function fmtGex(v) {
   return String(Math.round(v));
 }
 
+function resolveIdx(symbol) {
+  return (
+    ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]
+      .find(n => symbol.toUpperCase().includes(n)) || symbol.toUpperCase()
+  );
+}
+
 export default function GexChart({ symbol, apiBase, height = 480 }) {
   const canvasRef = useRef(null);
   const dataRef   = useRef(null);
   const rafRef    = useRef(null);
-  const [info, setInfo] = useState("waiting…");
 
-  /* ── fetch ──────────────────────────────────────────────────── */
+  const [info,       setInfo]       = useState("waiting…");
+  const [expiries,   setExpiries]   = useState([]);       // all available expiry dates
+  const [selExpiry,  setSelExpiry]  = useState("");       // user-selected expiry ("" = default)
+
+  /* ── fetch available expiries ────────────────────────────────── */
+  useEffect(() => {
+    if (!symbol || !apiBase) return;
+    const idx = resolveIdx(symbol);
+    fetch(`${apiBase}/api/gex/${encodeURIComponent(idx)}/expiries`)
+      .then(r => r.json())
+      .then(j => {
+        if (Array.isArray(j.expiries) && j.expiries.length) {
+          setExpiries(j.expiries);
+          // default to nearest (first in list that is >= today)
+          const today = new Date().toISOString().slice(0, 10);
+          const nearest = j.expiries.find(e => e >= today) || j.expiries[0];
+          setSelExpiry(prev => prev || nearest);
+        }
+      })
+      .catch(() => {});
+  }, [symbol, apiBase]);
+
+  /* ── fetch GEX for selected expiry ──────────────────────────── */
   const fetchData = useCallback(async () => {
     if (!symbol || !apiBase) return;
-    // Accept both "NIFTY" and "NIFTY25MARFUT" etc.
-    const idx = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]
-      .find(n => symbol.toUpperCase().includes(n)) || symbol.toUpperCase();
+    const idx = resolveIdx(symbol);
+    const url = selExpiry
+      ? `${apiBase}/api/gex/${encodeURIComponent(idx)}?expiry=${selExpiry}`
+      : `${apiBase}/api/gex/${encodeURIComponent(idx)}`;
     try {
-      const res = await fetch(`${apiBase}/api/gex/${encodeURIComponent(idx)}`);
+      const res  = await fetch(url);
       const json = await res.json();
       if (json.error) { setInfo(json.error); return; }
       dataRef.current = json;
@@ -50,7 +79,7 @@ export default function GexChart({ symbol, apiBase, height = 480 }) {
     } catch {
       setInfo("fetch error");
     }
-  }, [symbol, apiBase]);
+  }, [symbol, apiBase, selExpiry]);
 
   /* ── draw ───────────────────────────────────────────────────── */
   const draw = useCallback(() => {
@@ -249,23 +278,50 @@ export default function GexChart({ symbol, apiBase, height = 480 }) {
 
   return (
     <div style={{ position: "relative", width: "100%", background: "#0d1117", borderRadius: 6 }}>
+      {/* ── top bar ── */}
       <div style={{
-        position: "absolute", top: 6, right: 8, fontSize: 11,
-        color: "#888", zIndex: 2, pointerEvents: "none",
+        display: "flex", alignItems: "center", gap: 10,
+        padding: "5px 8px", borderBottom: "1px solid #1e2530",
+        flexWrap: "wrap",
       }}>
-        {info}
+        {/* Legend */}
+        <div style={{ display: "flex", gap: 12, fontSize: 11 }}>
+          <span style={{ color: "rgba(0,180,130,0.9)" }}>■ Call GEX</span>
+          <span style={{ color: "rgba(210,50,50,0.9)" }}>■ Put GEX</span>
+          <span style={{ color: "#00e676" }}>■ Net+</span>
+          <span style={{ color: "#ff5252" }}>■ Net−</span>
+          <span style={{ color: "#ffeb3b" }}>– Flip pt</span>
+        </div>
+
+        {/* Expiry selector */}
+        {expiries.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
+            <span style={{ fontSize: 11, color: "#888" }}>Expiry:</span>
+            <select
+              value={selExpiry}
+              onChange={e => setSelExpiry(e.target.value)}
+              style={{
+                background: "#1a2030", color: "#ccc", border: "1px solid #333",
+                borderRadius: 4, padding: "2px 6px", fontSize: 12, cursor: "pointer",
+              }}
+            >
+              {expiries.map(exp => (
+                <option key={exp} value={exp}>{exp}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {/* Status */}
+        <span style={{ fontSize: 10, color: "#555", marginLeft: expiries.length ? 0 : "auto" }}>
+          {info}
+        </span>
       </div>
-      <div style={{
-        position: "absolute", top: 6, left: 4, display: "flex", gap: 14,
-        fontSize: 11, zIndex: 2, pointerEvents: "none",
-      }}>
-        <span style={{ color: "rgba(0,180,130,0.9)" }}>■ Call GEX</span>
-        <span style={{ color: "rgba(210,50,50,0.9)" }}>■ Put GEX</span>
-        <span style={{ color: "#00e676" }}>■ Net+</span>
-        <span style={{ color: "#ff5252" }}>■ Net−</span>
-        <span style={{ color: "#ffeb3b" }}>– Flip pt</span>
-      </div>
-      <canvas ref={canvasRef} style={{ display: "block", width: "100%", height }} />
+
+      <canvas
+        ref={canvasRef}
+        style={{ display: "block", width: "100%", height }}
+      />
     </div>
   );
 }
