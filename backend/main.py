@@ -326,6 +326,9 @@ _tick_counter: int = 0  # For periodic gc
 _last_reset_date: Optional[str] = None  # IST date "YYYY-MM-DD" of last daily reset
 # Rate-limiter: last time each symbol was broadcast (monotonic seconds)
 _last_broadcast: Dict[str, float] = {}
+# Token expiry / reconnect state
+_dhan_reconnect_delay: int = 5          # seconds; doubles on auth failure, resets on success
+_dhan_token_event: asyncio.Event = asyncio.Event()  # set when token is updated via API
 
 
 # ─────────────────────────────────────────────
@@ -490,8 +493,27 @@ def build_dhan_subscription(security_ids: List[str]) -> dict:
     }
 
 
+def _is_auth_error(exc: Exception) -> bool:
+    """Return True if the exception looks like a token rejection (401/403/invalid token)."""
+    s = str(exc)
+    for marker in ("401", "403", "unauthorized", "forbidden", "invalid token",
+                   "token expired", "authentication failed", "rejected"):
+        if marker in s.lower():
+            return True
+    # websockets raises InvalidStatusCode; check status_code attribute
+    code = getattr(exc, "status_code", getattr(exc, "status", None))
+    return code in (401, 403)
+
+
 async def dhan_feed_task():
-    """Background task: connect to Dhan feed and process ticks."""
+    """Background task: connect to Dhan feed and process ticks.
+
+    Reconnect strategy:
+    - Network / server errors  → retry after 5 s (fixed)
+    - Auth failure (401/403)   → exponential backoff (5 s → 10 → 20 → … → 1800 s max)
+                                  immediately wakes up when token is updated via POST /api/token
+    """
+    global _dhan_reconnect_delay
     logger.info("Starting Dhan feed task...")
 
     while True:
@@ -504,49 +526,59 @@ async def dhan_feed_task():
             await demo_feed_task()
             return
 
-        # Use raw websocket (dhanhq client conflicts with FastAPI's asyncio event loop)
         url = f"{DHAN_WS_URL}?version=2&token={DHAN_ACCESS_TOKEN}&clientId={DHAN_CLIENT_ID}&authType=2"
 
         try:
             async with websockets.connect(url, ping_interval=20) as ws:
+                _dhan_reconnect_delay = 5          # reset backoff on successful connect
                 logger.info("Connected to Dhan WebSocket (v2)")
 
-                # Build subscription objects using stored exchange_segment
-                instruments = []
-                for sym, info in subscribed_symbols.items():
-                    instruments.append({"ExchangeSegment": info.get("exchange_segment", "NSE_FO"), "SecurityId": info.get("security_id")})
-
-                # If there are >0 instruments, send subscription (split into batches of 100 if needed)
+                instruments = [
+                    {"ExchangeSegment": info.get("exchange_segment", "NSE_FO"),
+                     "SecurityId": info.get("security_id")}
+                    for info in subscribed_symbols.values()
+                ]
                 for i in range(0, len(instruments), 100):
                     batch = instruments[i : i + 100]
-                    packet = {
-                        "RequestCode": 17,  # Quote: Volume, TotalBuyQty, TotalSellQty
+                    await ws.send(json.dumps({
+                        "RequestCode": 17,
                         "InstrumentCount": len(batch),
                         "InstrumentList": batch,
-                    }
-                    await ws.send(json.dumps(packet))
+                    }))
                     await asyncio.sleep(0.1)
 
                 async for raw in ws:
                     try:
-                        # Dhan sends binary market packets. Handle bytes and text both.
                         if isinstance(raw, (bytes, bytearray)):
                             parsed = parse_dhan_binary(raw)
                             if parsed:
                                 await handle_dhan_tick(parsed)
                         else:
-                            # Some informational messages may arrive as text/JSON
                             try:
-                                msg = json.loads(raw)
-                                await handle_dhan_tick(msg)
+                                await handle_dhan_tick(json.loads(raw))
                             except Exception:
                                 pass
                     except Exception as e:
                         logger.error(f"Tick parse error: {e}")
 
         except Exception as e:
-            logger.error(f"Dhan WS error: {e}. Reconnecting in 5s...")
-            await asyncio.sleep(5)
+            if _is_auth_error(e):
+                logger.error(
+                    f"⚠️  Dhan token REJECTED ({e}) — token likely expired.\n"
+                    f"    Update via POST /api/token or set DHAN_ACCESS_TOKEN env var.\n"
+                    f"    Backing off {_dhan_reconnect_delay}s before next attempt."
+                )
+                # Wait up to _dhan_reconnect_delay seconds, but wake immediately on token update
+                _dhan_token_event.clear()
+                try:
+                    await asyncio.wait_for(_dhan_token_event.wait(), timeout=_dhan_reconnect_delay)
+                    logger.info("Token updated via API — reconnecting now.")
+                    _dhan_reconnect_delay = 5      # reset after manual token update
+                except asyncio.TimeoutError:
+                    _dhan_reconnect_delay = min(_dhan_reconnect_delay * 2, 1800)
+            else:
+                logger.error(f"Dhan WS error: {e}. Reconnecting in 5s...")
+                await asyncio.sleep(5)
 
 
 def parse_dhan_binary(raw: bytes) -> Optional[dict]:
@@ -759,12 +791,29 @@ def health():
         "demo": not bool(DHAN_ACCESS_TOKEN),
         "reset_date": _last_reset_date,
         "clients": len(connected_clients),
+        "reconnect_backoff_sec": _dhan_reconnect_delay,
     }
 
 
 @app.get("/api/settings")
 def get_settings():
     return {"candle_seconds": CANDLE_SECONDS, "candle_options": CANDLE_OPTIONS}
+
+
+@app.post("/api/token")
+async def update_token(payload: dict):
+    """Update Dhan access token at runtime — no restart needed.
+    Payload: { "access_token": "<new JWT>" }
+    Immediately wakes the feed task so it reconnects with the new token.
+    """
+    global DHAN_ACCESS_TOKEN
+    token = (payload.get("access_token") or "").strip()
+    if not token:
+        raise HTTPException(400, "access_token required")
+    DHAN_ACCESS_TOKEN = token
+    _dhan_token_event.set()   # wake feed task immediately (cancels backoff sleep)
+    logger.info("Dhan access token updated via API. Feed task will reconnect.")
+    return {"status": "ok", "message": "Token updated. WebSocket reconnecting."}
 
 
 @app.post("/api/settings")
