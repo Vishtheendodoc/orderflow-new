@@ -1210,9 +1210,9 @@ def get_heatmap(symbol: str, n: int = 300):
 
 
 def _resolve_index(symbol: str) -> Optional[str]:
-    """Return canonical index name (e.g. 'NIFTY') from any symbol string."""
+    """Return canonical index name. Check longer names first (BANKNIFTY before NIFTY)."""
     s = symbol.upper()
-    for idx_name in UNDERLYING_IDS:
+    for idx_name in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTY"):
         if idx_name in s:
             return idx_name
     return None
