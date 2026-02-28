@@ -10,15 +10,17 @@ load_dotenv()
 import asyncio
 import gc
 import json
+import math
 import os
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from typing import Dict, List, Optional, Set
 import logging
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import httpx
@@ -66,6 +68,28 @@ GC_INTERVAL_TICKS = int(os.getenv("GC_INTERVAL_TICKS", "10000"))  # Run gc every
 # Without this, every tick triggers a full JSON serialize + WS send, saturating the event loop
 # and causing 5-10s lag queues. 0.1 = 10 updates/sec max; plenty for a footprint chart.
 BROADCAST_MIN_INTERVAL = float(os.getenv("BROADCAST_MIN_INTERVAL", "0.1"))
+
+# ── Liquidity Heatmap (200-level order book) ─────────────────────────────────
+# Separate Dhan token — avoids rate-limiting the main feed token.
+DHAN_TOKEN_DEPTH    = os.getenv("DHAN_TOKEN_DEPTH", "")
+DEPTH_ENDPOINT      = os.getenv("DEPTH_ENDPOINT", "/v2/marketfeed/full")  # update when 200-lvl URL is known
+DEPTH_POLL_SEC      = float(os.getenv("DEPTH_POLL_SEC", "1.0"))           # poll every 1 s
+HEATMAP_SNAPSHOTS   = int(os.getenv("HEATMAP_SNAPSHOTS", "300"))          # keep 5 min @ 1/s
+
+# ── Options GEX ──────────────────────────────────────────────────────────────
+DHAN_TOKEN_OPTIONS  = os.getenv("DHAN_TOKEN_OPTIONS", "")
+OPTIONS_POLL_SEC    = float(os.getenv("OPTIONS_POLL_SEC", "60"))          # poll every 60 s
+# Underlying security IDs (NSE index) used for options chain
+UNDERLYING_IDS = {
+    "NIFTY":      "13",
+    "BANKNIFTY":  "25",
+    "FINNIFTY":   "36",
+    "MIDCPNIFTY": "442",
+}
+# F&O lot sizes (shares per lot) — update when SEBI revises
+LOT_SIZES = {
+    "NIFTY": 25, "BANKNIFTY": 15, "FINNIFTY": 40, "MIDCPNIFTY": 75,
+}
 
 # ─────────────────────────────────────────────
 # Data Structures
@@ -343,6 +367,14 @@ _last_broadcast: Dict[str, float] = {}
 _dhan_reconnect_delay: int = 5          # seconds; doubles on auth failure, resets on success
 _dhan_token_event: asyncio.Event = asyncio.Event()  # set when token is updated via API
 
+# ── Heatmap: rolling order-book snapshots ────────────────────────────────────
+# symbol → deque of {ts, ltp, bids:[{p,q}], asks:[{p,q}]}
+depth_snapshots: Dict[str, deque] = {}
+
+# ── GEX cache ─────────────────────────────────────────────────────────────────
+# index_name → {computed_at, spot, expiry, strikes:[...], flip_point, ...}
+gex_cache: Dict[str, dict] = {}
+
 
 # ─────────────────────────────────────────────
 # Daily reset (IST midnight) for 24/7 deployment
@@ -506,6 +538,235 @@ def build_dhan_subscription(security_ids: List[str]) -> dict:
         "InstrumentCount": len(instruments),
         "InstrumentList": instruments,
     }
+
+
+# ─────────────────────────────────────────────
+# Liquidity Heatmap — market depth poller
+# ─────────────────────────────────────────────
+
+def _index_future_symbols() -> Dict[str, str]:
+    """Return {symbol: security_id} for NIFTY/BANKNIFTY/FINNIFTY index futures."""
+    result = {}
+    for sym, info in subscribed_symbols.items():
+        for idx in UNDERLYING_IDS:
+            if idx in sym.upper() and "FUT" in sym.upper():
+                result[sym] = info.get("security_id", "")
+                break
+    return result
+
+
+async def _fetch_depth_once(syms: Dict[str, str]):
+    """One REST call to Dhan depth endpoint; updates depth_snapshots."""
+    # Group by exchange segment
+    by_seg: Dict[str, List[str]] = defaultdict(list)
+    for sym, sid in syms.items():
+        seg = subscribed_symbols.get(sym, {}).get("exchange_segment", "NSE_FO")
+        by_seg[seg].append(sid)
+
+    if not any(by_seg.values()):
+        return
+
+    payload = {seg: ids for seg, ids in by_seg.items() if ids}
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.post(
+                f"{DHAN_API_BASE}{DEPTH_ENDPOINT}",
+                headers={
+                    "access-token": DHAN_TOKEN_DEPTH,
+                    "client-id": DHAN_CLIENT_ID,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                json=payload,
+            )
+            data = resp.json()
+
+        ts = int(time.time() * 1000)
+        market = data.get("data", {})
+        # Dhan wraps response differently depending on endpoint version
+        if "data" in market:
+            market = market["data"]
+
+        for seg_data in market.values() if isinstance(market, dict) else []:
+            if not isinstance(seg_data, dict):
+                continue
+            for sec_id, info in seg_data.items():
+                # Resolve symbol
+                symbol = next(
+                    (s for s, sid in syms.items() if str(sid) == str(sec_id)), None
+                )
+                if not symbol:
+                    continue
+
+                ltp = float(info.get("last_price", info.get("LTP", 0)) or 0)
+                depth = info.get("depth", {})
+                raw_bids = depth.get("buy",  info.get("buyDepth",  []))
+                raw_asks = depth.get("sell", info.get("sellDepth", []))
+
+                bids = [{"p": round(float(l.get("price", 0)), 2),
+                         "q": int(l.get("quantity", 0))}
+                        for l in raw_bids if l.get("price", 0) > 0]
+                asks = [{"p": round(float(l.get("price", 0)), 2),
+                         "q": int(l.get("quantity", 0))}
+                        for l in raw_asks if l.get("price", 0) > 0]
+
+                if symbol not in depth_snapshots:
+                    depth_snapshots[symbol] = deque(maxlen=HEATMAP_SNAPSHOTS)
+                depth_snapshots[symbol].append(
+                    {"ts": ts, "ltp": ltp, "bids": bids, "asks": asks}
+                )
+    except Exception as e:
+        logger.debug(f"Depth poll error: {e}")
+
+
+async def depth_poller_task():
+    """Background: poll market depth for index futures every DEPTH_POLL_SEC seconds."""
+    if not DHAN_TOKEN_DEPTH:
+        logger.info("DHAN_TOKEN_DEPTH not set — depth/heatmap poller inactive")
+        return
+    logger.info("Starting depth poller (heatmap)…")
+    while True:
+        syms = _index_future_symbols()
+        if syms:
+            await _fetch_depth_once(syms)
+        await asyncio.sleep(DEPTH_POLL_SEC)
+
+
+# ─────────────────────────────────────────────
+# Options GEX — options chain poller
+# ─────────────────────────────────────────────
+
+def _bs_gamma(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    """Black-Scholes gamma for a European option."""
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    try:
+        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+        return math.exp(-0.5 * d1 ** 2) / (math.sqrt(2 * math.pi) * S * sigma * math.sqrt(T))
+    except Exception:
+        return 0.0
+
+
+def _nearest_weekly_expiry() -> str:
+    """Next Thursday (NIFTY/BANKNIFTY weekly expiry) as YYYY-MM-DD."""
+    today = date.today()
+    days = (3 - today.weekday()) % 7  # Thursday = weekday 3
+    if days == 0:
+        days = 7
+    return (today + timedelta(days=days)).strftime("%Y-%m-%d")
+
+
+def _find_gex_flip(strikes: list, spot: float) -> Optional[float]:
+    """Cumulative GEX from lowest strike upward; return strike where sign flips near spot."""
+    sorted_s = sorted(strikes, key=lambda x: x["strike"])
+    cum = 0.0
+    flip = None
+    for row in sorted_s:
+        prev, cum = cum, cum + row["net_gex"]
+        if prev != 0 and prev * cum < 0:
+            if flip is None or abs(row["strike"] - spot) < abs(flip - spot):
+                flip = row["strike"]
+    return flip
+
+
+async def _fetch_gex_once(index_name: str, underlying_id: str, expiry: str):
+    """Fetch options chain from Dhan and compute GEX for one index."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{DHAN_API_BASE}/optionchain",
+                headers={
+                    "access-token": DHAN_TOKEN_OPTIONS,
+                    "client-id": DHAN_CLIENT_ID,
+                    "Accept": "application/json",
+                },
+                params={"UnderlyingId": underlying_id, "ExpiryDate": expiry},
+            )
+            data = resp.json()
+
+        chain = data.get("data", {})
+        spot = float(
+            chain.get("last_price", chain.get("underlyingSpot",
+            chain.get("underlying_last_price", 0))) or 0
+        )
+        if spot <= 0:
+            logger.debug(f"GEX [{index_name}]: spot price missing in response")
+            return
+
+        oc_rows = chain.get("oc", chain.get("optionData", chain.get("data", [])))
+        if not oc_rows:
+            return
+
+        lot_size = LOT_SIZES.get(index_name, 25)
+        r        = 0.065   # India ~6.5% risk-free
+        exp_date = date.fromisoformat(expiry)
+        T        = max(1, (exp_date - date.today()).days) / 365
+
+        results = []
+        for row in oc_rows:
+            strike = float(
+                row.get("strikePrice", row.get("strike_price", row.get("strike", 0))) or 0
+            )
+            if strike <= 0:
+                continue
+
+            ce = row.get("callOptions", row.get("call_options", row.get("CE", {}))) or {}
+            pe = row.get("putOptions",  row.get("put_options",  row.get("PE", {}))) or {}
+
+            call_oi = float(ce.get("oi", ce.get("open_interest", 0)) or 0)
+            put_oi  = float(pe.get("oi", pe.get("open_interest", 0)) or 0)
+            call_iv = float(ce.get("iv", ce.get("impliedVolatility", 20)) or 20) / 100
+            put_iv  = float(pe.get("iv", pe.get("impliedVolatility", 20)) or 20) / 100
+
+            if call_iv <= 0: call_iv = 0.20
+            if put_iv  <= 0: put_iv  = 0.20
+
+            cg = _bs_gamma(spot, strike, T, r, call_iv)
+            pg = _bs_gamma(spot, strike, T, r, put_iv)
+
+            # Dealer GEX: long calls (+γ), short puts (−γ)
+            call_gex = cg * call_oi * lot_size * spot ** 2 / 100
+            put_gex  = pg * put_oi  * lot_size * spot ** 2 / 100
+            net_gex  = call_gex - put_gex
+
+            results.append({
+                "strike":   strike,
+                "call_oi":  call_oi,  "put_oi":  put_oi,
+                "call_gex": round(call_gex, 2),
+                "put_gex":  round(put_gex, 2),
+                "net_gex":  round(net_gex, 2),
+            })
+
+        results.sort(key=lambda x: x["strike"])
+        flip = _find_gex_flip(results, spot)
+
+        gex_cache[index_name] = {
+            "computed_at":     int(time.time() * 1000),
+            "spot":            spot,
+            "expiry":          expiry,
+            "lot_size":        lot_size,
+            "strikes":         results,
+            "flip_point":      flip,
+            "total_call_gex":  round(sum(r["call_gex"] for r in results), 2),
+            "total_put_gex":   round(sum(r["put_gex"]  for r in results), 2),
+        }
+        logger.info(f"GEX [{index_name}] updated: spot={spot}, strikes={len(results)}, flip={flip}")
+
+    except Exception as e:
+        logger.warning(f"Options poll error [{index_name}]: {e}")
+
+
+async def options_poller_task():
+    """Background: poll options chain and recompute GEX every OPTIONS_POLL_SEC seconds."""
+    if not DHAN_TOKEN_OPTIONS:
+        logger.info("DHAN_TOKEN_OPTIONS not set — options/GEX poller inactive")
+        return
+    logger.info("Starting options/GEX poller…")
+    while True:
+        expiry = _nearest_weekly_expiry()
+        for idx_name, uid in UNDERLYING_IDS.items():
+            await _fetch_gex_once(idx_name, uid, expiry)
+        await asyncio.sleep(OPTIONS_POLL_SEC)
 
 
 def _is_auth_error(exc: Exception) -> bool:
@@ -828,6 +1089,44 @@ def get_settings():
     return {"candle_seconds": CANDLE_SECONDS, "candle_options": CANDLE_OPTIONS}
 
 
+@app.get("/api/heatmap/{symbol}")
+def get_heatmap(symbol: str, n: int = 300):
+    """Return last *n* depth snapshots for the given index-future symbol.
+    Used by the Liquidity Heatmap canvas component on the frontend.
+    """
+    symbol = symbol.upper()
+    # Allow partial match: "NIFTY" matches "NIFTY25MARFUT" etc.
+    snaps = depth_snapshots.get(symbol)
+    if snaps is None:
+        for key in depth_snapshots:
+            if symbol in key.upper():
+                snaps = depth_snapshots[key]
+                break
+    if not snaps:
+        return {"symbol": symbol, "snapshots": []}
+    return {"symbol": symbol, "snapshots": list(snaps)[-n:]}
+
+
+@app.get("/api/gex/{symbol}")
+def get_gex(symbol: str):
+    """Return current GEX data for a NIFTY / BANKNIFTY index.
+    Accepts both index name (e.g. 'NIFTY') and full futures symbol.
+    """
+    symbol = symbol.upper()
+    for idx_name in UNDERLYING_IDS:
+        if idx_name in symbol:
+            data = gex_cache.get(idx_name)
+            if data:
+                return data
+    return JSONResponse({"error": "GEX data not available — check DHAN_TOKEN_OPTIONS"}, 202)
+
+
+@app.get("/api/gex")
+def list_gex():
+    """Return GEX for all available indices."""
+    return {k: v for k, v in gex_cache.items()}
+
+
 @app.post("/api/token")
 async def update_token(payload: dict):
     """Update Dhan access token at runtime — no restart needed.
@@ -1015,6 +1314,8 @@ async def startup():
     asyncio.create_task(dhan_feed_task())
     asyncio.create_task(_daily_reset_task())
     asyncio.create_task(_snapshot_task())
+    asyncio.create_task(depth_poller_task())
+    asyncio.create_task(options_poller_task())
     logger.info("OrderFlow Engine started (daily reset at IST midnight, disk snapshots every 5 min)")
 
 

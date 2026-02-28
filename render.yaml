@@ -35,6 +35,22 @@ services:
         value: "1000"         # send full stored history to clients (matches MAX_CANDLES_PER_SYMBOL)
       - key: SNAPSHOT_DIR
         value: /data/snapshots
+      # ── Liquidity Heatmap token (separate Dhan account) ──────────────────────
+      # Polls /v2/marketfeed/full every 1 s for NIFTY/BANKNIFTY order book.
+      # Leave blank to disable the depth poller (heatmap tab will show "no data").
+      - key: DHAN_TOKEN_DEPTH
+        sync: false             # set manually in Render dashboard
+      - key: DEPTH_POLL_SEC
+        value: "1.0"
+      - key: HEATMAP_SNAPSHOTS
+        value: "300"            # 5 min of rolling order-book history
+      # ── Options GEX token (separate Dhan account) ────────────────────────────
+      # Polls /v2/optionchain every 60 s for NIFTY/BANKNIFTY options chain.
+      # Leave blank to disable the GEX poller (GEX tab will show "no data").
+      - key: DHAN_TOKEN_OPTIONS
+        sync: false             # set manually in Render dashboard
+      - key: OPTIONS_POLL_SEC
+        value: "60"
     healthCheckPath: /api/health
 
   # Frontend static site

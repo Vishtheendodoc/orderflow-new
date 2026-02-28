@@ -435,6 +435,14 @@ html, body, #root {
   min-height: 0;
   overflow: hidden;
 }
+.heatmap-view-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 4px;
+}
 .chart-area-fill {
   display: flex;
   flex-direction: column;

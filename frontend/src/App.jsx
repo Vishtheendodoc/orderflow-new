@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useMemo, Component } from "react";
 import OrderflowChart from "./OrderflowChart";
 import FootprintChart from "./FootprintChart";
+import LiquidityHeatmap from "./LiquidityHeatmap";
+import GexChart from "./GexChart";
 
 class ErrorBoundary extends Component {
   state = { hasError: false };
@@ -686,7 +688,13 @@ export default function App() {
   const maxDelta = Math.max(...candles.map((c) => Math.abs(c.delta)), 1);
   const closedCandles = candles.filter((c) => c.closed);
   const liveCandle = candles.find((c) => !c.closed);
-  const [viewMode, setViewMode] = useState("chart"); // "chart" | "footprint"
+  const [viewMode, setViewMode] = useState("chart"); // "chart" | "footprint" | "heatmap" | "gex"
+
+  // True when the active symbol is a NIFTY / BANKNIFTY / FINNIFTY index future
+  const isIndexFuture = useMemo(() => {
+    const s = (activeSymbol || "").toUpperCase();
+    return ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"].some(n => s.includes(n));
+  }, [activeSymbol]);
   const [timeFrameMinutes, setTimeFrameMinutes] = useState(1); // TradingView-style: 1,5,10,15,30,45,60,120
   const [sidebarOpen, setSidebarOpen] = useState(false); // mobile drawer
 
@@ -782,7 +790,7 @@ export default function App() {
                 />
               </div>
               {/* TickerBar removed — data visible in chart header */}
-              {/* View toggle: Chart (GoCharting) vs Footprint (VR Trender) */}
+              {/* View toggle */}
               <div className="view-toggle">
                 <button
                   className={`vt-btn ${viewMode === "chart" ? "active" : ""}`}
@@ -796,6 +804,24 @@ export default function App() {
                 >
                   Footprint
                 </button>
+                {isIndexFuture && (
+                  <button
+                    className={`vt-btn ${viewMode === "heatmap" ? "active" : ""}`}
+                    onClick={() => setViewMode("heatmap")}
+                    title="Liquidity Heatmap — 200-level order book (DHAN_TOKEN_DEPTH required)"
+                  >
+                    Heatmap
+                  </button>
+                )}
+                {isIndexFuture && (
+                  <button
+                    className={`vt-btn ${viewMode === "gex" ? "active" : ""}`}
+                    onClick={() => setViewMode("gex")}
+                    title="Gamma Exposure — dealer GEX by strike (DHAN_TOKEN_OPTIONS required)"
+                  >
+                    GEX
+                  </button>
+                )}
               </div>
               {/* Timeframe selector + Feature toggles */}
               <div className="candle-duration-bar">
@@ -847,11 +873,25 @@ export default function App() {
                     features={features}
                   />
                 </div>
-              ) : (
+              ) : viewMode === "footprint" ? (
                 <ErrorBoundary>
                   <FootprintChart candles={displayCandles} symbol={flow.symbol} timeFrameMinutes={timeFrameMinutes} features={features} />
                 </ErrorBoundary>
-              )}
+              ) : viewMode === "heatmap" ? (
+                <div className="heatmap-view-wrap">
+                  <LiquidityHeatmap
+                    symbol={activeSymbol}
+                    apiBase={API_URL || window.location.origin}
+                  />
+                </div>
+              ) : viewMode === "gex" ? (
+                <div className="heatmap-view-wrap">
+                  <GexChart
+                    symbol={activeSymbol}
+                    apiBase={API_URL || window.location.origin}
+                  />
+                </div>
+              ) : null}
             </>
           ) : activeSymbol && !flows[activeSymbol] ? (
             <div className="empty-state loading-state">
