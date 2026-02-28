@@ -84,8 +84,6 @@ UNDERLYING_IDS = {
     "FINNIFTY":   "27",
     "MIDCPNIFTY": "442",
 }
-# Monthly-only indices (no weekly options) — NIFTY has both weekly + monthly
-MONTHLY_ONLY_INDICES = {"BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
 # F&O lot sizes (shares per lot) — update when SEBI revises
 LOT_SIZES = {
     "NIFTY": 25, "BANKNIFTY": 15, "FINNIFTY": 40, "MIDCPNIFTY": 75,
@@ -717,41 +715,6 @@ async def depth_poller_task():
 # UnderlyingSeg for index options — "IDX_I" per Dhan annexure
 UNDERLYING_SEG = "IDX_I"
 
-def _last_weekday_of_month(year: int, month: int, weekday: int) -> date:
-    """Last occurrence of weekday (0=Mon..4=Fri) in the given month."""
-    from calendar import monthrange
-    last_day = monthrange(year, month)[1]
-    d = date(year, month, last_day)
-    while d.weekday() != weekday:
-        d -= timedelta(days=1)
-    return d
-
-
-def _nearest_expiry_for_index(index_name: str) -> str:
-    """Nearest option expiry as YYYY-MM-DD.
-    NIFTY: weekly (next Thursday).
-    BANKNIFTY/FINNIFTY/MIDCPNIFTY: monthly only (last Wed/Tue/Mon of month).
-    """
-    today = date.today()
-    if index_name in MONTHLY_ONLY_INDICES:
-        # Monthly: last Wed (BANKNIFTY), last Tue (FINNIFTY), last Mon (MIDCPNIFTY)
-        weekday_map = {"BANKNIFTY": 2, "FINNIFTY": 1, "MIDCPNIFTY": 0}
-        wd = weekday_map.get(index_name, 2)
-        exp = _last_weekday_of_month(today.year, today.month, wd)
-        if today > exp:
-            # Move to next month
-            if today.month == 12:
-                exp = _last_weekday_of_month(today.year + 1, 1, wd)
-            else:
-                exp = _last_weekday_of_month(today.year, today.month + 1, wd)
-        return exp.strftime("%Y-%m-%d")
-    # NIFTY: weekly Thursday
-    days = (3 - today.weekday()) % 7
-    if days == 0:
-        days = 7
-    return (today + timedelta(days=days)).strftime("%Y-%m-%d")
-
-
 def _find_gex_flip(strikes: list, spot: float) -> Optional[float]:
     """Cumulative GEX from lowest strike upward; return strike where sign flips near spot."""
     sorted_s = sorted(strikes, key=lambda x: x["strike"])
@@ -895,7 +858,9 @@ async def options_poller_task():
     while True:
         rate_limited = False
         for idx_name, uid in UNDERLYING_IDS.items():
-            expiry = _nearest_expiry_for_index(idx_name)
+            expiry = await _default_expiry_from_api(idx_name)
+            if not expiry:
+                continue  # skip if no expiries (token not set or API error)
             ok = await _fetch_gex_once(idx_name, uid, expiry)
             if not ok:
                 rate_limited = True
@@ -1284,6 +1249,22 @@ async def _fetch_expiry_list(index_name: str) -> list:
         return []
 
 
+async def _default_expiry_from_api(index_name: str) -> str:
+    """Get default expiry for an index by fetching from Dhan API.
+    Returns first expiry date >= today, or first in list if none in future.
+    """
+    expiries = expiry_list_cache.get(index_name)
+    if not expiries:
+        expiries = await _fetch_expiry_list(index_name)
+    if not expiries:
+        return ""  # fallback: caller must handle
+    today_str = date.today().strftime("%Y-%m-%d")
+    for exp in expiries:
+        if exp >= today_str:
+            return exp
+    return expiries[0]  # all past — use nearest (first)
+
+
 @app.get("/api/gex/{symbol}/expiries")
 async def get_expiries(symbol: str):
     """Return available option expiry dates for a NIFTY/BANKNIFTY index.
@@ -1313,7 +1294,9 @@ async def get_gex(symbol: str, expiry: str = ""):
     if not idx:
         return JSONResponse({"error": f"Unknown index: {symbol}"}, 400)
 
-    target_expiry = expiry.strip() or _nearest_expiry_for_index(idx)
+    target_expiry = expiry.strip() or await _default_expiry_from_api(idx)
+    if not target_expiry:
+        return JSONResponse({"error": "Could not fetch expiry list — check DHAN_TOKEN_OPTIONS"}, 202)
     cache_key = f"{idx}:{target_expiry}"
 
     data = gex_cache.get(cache_key)
