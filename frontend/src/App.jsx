@@ -1,5 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, Component } from "react";
-import { createPortal } from "react-dom";
+import { useState, useEffect, useRef, useCallback, useMemo, Component } from "react";
 import OrderflowChart from "./OrderflowChart";
 import FootprintChart from "./FootprintChart";
 import LiquidityHeatmap from "./LiquidityHeatmap";
@@ -617,23 +616,11 @@ export default function App() {
   const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true });
   const [featMenuOpen, setFeatMenuOpen] = useState(false);
   const featMenuRef = useRef(null);
-  const featBtnRef = useRef(null);
-  const featDropdownRef = useRef(null);
-  const [featDropdownPos, setFeatDropdownPos] = useState({ top: 0, left: 0 });
-  /* position dropdown below button (portal avoids overflow clipping on mobile) */
-  useLayoutEffect(() => {
-    if (!featMenuOpen || !featBtnRef.current) return;
-    const rect = featBtnRef.current.getBoundingClientRect();
-    const left = Math.max(8, Math.min(rect.left, (typeof window !== "undefined" ? window.innerWidth : 400) - 220));
-    setFeatDropdownPos({ top: rect.bottom + 6, left });
-  }, [featMenuOpen]);
-  /* close dropdown on outside click (mousedown + touchstart for mobile) */
+  /* close dropdown on outside click */
   useEffect(() => {
     if (!featMenuOpen) return;
     const handler = (e) => {
-      const wrap = featMenuRef.current;
-      const dd = featDropdownRef.current;
-      if (wrap?.contains(e.target) || dd?.contains(e.target)) return;
+      if (featMenuRef.current?.contains(e.target)) return;
       setFeatMenuOpen(false);
     };
     document.addEventListener("mousedown", handler);
@@ -808,6 +795,36 @@ export default function App() {
                   value={activeSymbol}
                   onChange={setActiveSymbol}
                 />
+                {/* Features dropdown — next to instrument selector, above chart */}
+                <div className="feat-menu-wrap" ref={featMenuRef}>
+                  <button
+                    ref={featBtnRef}
+                    className={`cd-btn feat-btn${featMenuOpen ? " active" : ""}`}
+                    onClick={() => setFeatMenuOpen((o) => !o)}
+                    title="Toggle chart features"
+                  >
+                    ⚙ Features
+                  </button>
+                  {featMenuOpen && (
+                    <div className="feat-dropdown">
+                      <div className="feat-dropdown-title">Chart Features</div>
+                      {[
+                        { key: "showOI",   label: "Open Interest (OI)" },
+                        { key: "showVWAP", label: "VWAP (session)" },
+                        { key: "showVP",   label: "Volume Profile (VPOC / VAH / VAL)" },
+                      ].map(({ key, label }) => (
+                        <label key={key} className="feat-row">
+                          <input
+                            type="checkbox"
+                            checked={features[key] ?? true}
+                            onChange={(e) => setFeatures((f) => ({ ...f, [key]: e.target.checked }))}
+                          />
+                          {label}
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
               {/* TickerBar removed — data visible in chart header */}
               {/* View toggle */}
@@ -855,60 +872,6 @@ export default function App() {
                     {m}m
                   </button>
                 ))}
-                {/* ── Features dropdown ── */}
-                <div className="feat-menu-wrap" ref={featMenuRef}>
-                  <button
-                    ref={featBtnRef}
-                    className={`cd-btn feat-btn${featMenuOpen ? " active" : ""}`}
-                    onClick={() => setFeatMenuOpen((o) => !o)}
-                    title="Toggle chart features"
-                  >
-                    ⚙ Features
-                  </button>
-                  {featMenuOpen && createPortal(
-                    <>
-                      <div
-                        aria-hidden
-                        style={{
-                          position: "fixed",
-                          inset: 0,
-                          zIndex: 99998,
-                          background: "rgba(0,0,0,0.12)",
-                        }}
-                        onClick={() => setFeatMenuOpen(false)}
-                      />
-                      <div
-                        ref={featDropdownRef}
-                        className="feat-dropdown feat-dropdown-portal"
-                        style={{
-                          position: "fixed",
-                          top: featDropdownPos.top,
-                          left: featDropdownPos.left,
-                          minWidth: 200,
-                          maxWidth: "calc(100vw - 16px)",
-                          zIndex: 99999,
-                        }}
-                      >
-                      <div className="feat-dropdown-title">Chart Features</div>
-                      {[
-                        { key: "showOI",   label: "Open Interest (OI)" },
-                        { key: "showVWAP", label: "VWAP (session)" },
-                        { key: "showVP",   label: "Volume Profile (VPOC / VAH / VAL)" },
-                      ].map(({ key, label }) => (
-                        <label key={key} className="feat-row">
-                          <input
-                            type="checkbox"
-                            checked={features[key] ?? true}
-                            onChange={(e) => setFeatures((f) => ({ ...f, [key]: e.target.checked }))}
-                          />
-                          {label}
-                        </label>
-                      ))}
-                      </div>
-                    </>,
-                    document.body
-                  )}
-                </div>
               </div>
               {viewMode === "chart" ? (
                 <div className="chart-view-wrap">
