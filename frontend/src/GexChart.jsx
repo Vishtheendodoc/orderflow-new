@@ -42,6 +42,14 @@ export default function GexChart({ symbol, apiBase, height = 480 }) {
   const [expiries,   setExpiries]   = useState([]);       // all available expiry dates
   const [selExpiry,  setSelExpiry]  = useState("");       // user-selected expiry ("" = default)
 
+  /* ── clear stale data when symbol changes ───────────────────── */
+  useEffect(() => {
+    dataRef.current = null;
+    setInfo("waiting…");
+    setExpiries([]);
+    setSelExpiry("");
+  }, [symbol]);
+
   /* ── fetch available expiries ────────────────────────────────── */
   useEffect(() => {
     if (!symbol || !apiBase) return;
