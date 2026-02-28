@@ -38,12 +38,11 @@ services:
       # ── Liquidity Heatmap token (separate Dhan account) ──────────────────────
       # Polls /v2/marketfeed/full every 1 s for NIFTY/BANKNIFTY order book.
       # Leave blank to disable the depth poller (heatmap tab will show "no data").
+      # 200-level depth WebSocket — wss://full-depth-api.dhan.co/twohundreddepth
       - key: DHAN_TOKEN_DEPTH
         sync: false             # set manually in Render dashboard
-      - key: DEPTH_POLL_SEC
-        value: "1.0"
       - key: HEATMAP_SNAPSHOTS
-        value: "300"            # 5 min of rolling order-book history
+        value: "300"            # rolling snapshots kept per symbol (≈5 min of depth history)
       # ── Options GEX token (separate Dhan account) ────────────────────────────
       # Polls /v2/optionchain every 60 s for NIFTY/BANKNIFTY options chain.
       # Leave blank to disable the GEX poller (GEX tab will show "no data").

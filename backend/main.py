@@ -72,9 +72,7 @@ BROADCAST_MIN_INTERVAL = float(os.getenv("BROADCAST_MIN_INTERVAL", "0.1"))
 # ── Liquidity Heatmap (200-level order book) ─────────────────────────────────
 # Separate Dhan token — avoids rate-limiting the main feed token.
 DHAN_TOKEN_DEPTH    = os.getenv("DHAN_TOKEN_DEPTH", "")
-DEPTH_ENDPOINT      = os.getenv("DEPTH_ENDPOINT", "/v2/marketfeed/full")  # update when 200-lvl URL is known
-DEPTH_POLL_SEC      = float(os.getenv("DEPTH_POLL_SEC", "1.0"))           # poll every 1 s
-HEATMAP_SNAPSHOTS   = int(os.getenv("HEATMAP_SNAPSHOTS", "300"))          # keep 5 min @ 1/s
+HEATMAP_SNAPSHOTS   = int(os.getenv("HEATMAP_SNAPSHOTS", "300"))   # rolling snapshots per symbol (300 = 5 min)
 
 # ── Options GEX ──────────────────────────────────────────────────────────────
 DHAN_TOKEN_OPTIONS  = os.getenv("DHAN_TOKEN_OPTIONS", "")
@@ -541,8 +539,14 @@ def build_dhan_subscription(security_ids: List[str]) -> dict:
 
 
 # ─────────────────────────────────────────────
-# Liquidity Heatmap — market depth poller
+# Liquidity Heatmap — 200-level depth WebSocket
+# wss://full-depth-api.dhan.co/twohundreddepth?token=...&clientId=...&authType=2
 # ─────────────────────────────────────────────
+
+DHAN_DEPTH_WS_BASE = os.getenv(
+    "DHAN_DEPTH_WS_BASE", "wss://full-depth-api.dhan.co/twohundreddepth"
+)
+
 
 def _index_future_symbols() -> Dict[str, str]:
     """Return {symbol: security_id} for NIFTY/BANKNIFTY/FINNIFTY index futures."""
@@ -555,81 +559,148 @@ def _index_future_symbols() -> Dict[str, str]:
     return result
 
 
-async def _fetch_depth_once(syms: Dict[str, str]):
-    """One REST call to Dhan depth endpoint; updates depth_snapshots."""
-    # Group by exchange segment
-    by_seg: Dict[str, List[str]] = defaultdict(list)
-    for sym, sid in syms.items():
-        seg = subscribed_symbols.get(sym, {}).get("exchange_segment", "NSE_FO")
-        by_seg[seg].append(sid)
+def _sid_to_symbol(sid: str) -> Optional[str]:
+    """Reverse-lookup symbol from security_id."""
+    for sym, info in subscribed_symbols.items():
+        if str(info.get("security_id", "")) == str(sid):
+            return sym
+    return None
 
-    if not any(by_seg.values()):
-        return
 
-    payload = {seg: ids for seg, ids in by_seg.items() if ids}
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.post(
-                f"{DHAN_API_BASE}{DEPTH_ENDPOINT}",
-                headers={
-                    "access-token": DHAN_TOKEN_DEPTH,
-                    "client-id": DHAN_CLIENT_ID,
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
-                json=payload,
-            )
-            data = resp.json()
+def _parse_depth_message(msg) -> Optional[dict]:
+    """
+    Parse one depth message from the 200-level WebSocket.
 
-        ts = int(time.time() * 1000)
-        market = data.get("data", {})
-        # Dhan wraps response differently depending on endpoint version
-        if "data" in market:
-            market = market["data"]
+    Dhan sends JSON messages.  Two observed shapes:
+      Shape A (full depth list):
+        {
+          "type": "depth",
+          "securityId": "49081",
+          "ltp": 24520.0,
+          "bids": [{"price": 24519, "quantity": 150}, ...],   # up to 200 levels
+          "asks": [{"price": 24521, "quantity": 100}, ...]
+        }
+      Shape B (flat keys):
+        {
+          "securityId": "49081",
+          "LTP": 24520.0,
+          "buyDepth": [{"price": 24519, "quantity": 150}, ...],
+          "sellDepth": [{"price": 24521, "quantity": 100}, ...]
+        }
+    We try both shapes.
+    """
+    if isinstance(msg, (bytes, bytearray)):
+        try:
+            msg = json.loads(msg.decode())
+        except Exception:
+            return None
 
-        for seg_data in market.values() if isinstance(market, dict) else []:
-            if not isinstance(seg_data, dict):
-                continue
-            for sec_id, info in seg_data.items():
-                # Resolve symbol
-                symbol = next(
-                    (s for s, sid in syms.items() if str(sid) == str(sec_id)), None
-                )
-                if not symbol:
-                    continue
+    if isinstance(msg, str):
+        try:
+            msg = json.loads(msg)
+        except Exception:
+            return None
 
-                ltp = float(info.get("last_price", info.get("LTP", 0)) or 0)
-                depth = info.get("depth", {})
-                raw_bids = depth.get("buy",  info.get("buyDepth",  []))
-                raw_asks = depth.get("sell", info.get("sellDepth", []))
+    if not isinstance(msg, dict):
+        return None
 
-                bids = [{"p": round(float(l.get("price", 0)), 2),
-                         "q": int(l.get("quantity", 0))}
-                        for l in raw_bids if l.get("price", 0) > 0]
-                asks = [{"p": round(float(l.get("price", 0)), 2),
-                         "q": int(l.get("quantity", 0))}
-                        for l in raw_asks if l.get("price", 0) > 0]
+    sec_id = str(msg.get("securityId", msg.get("security_id", msg.get("SecurityId", ""))))
+    if not sec_id:
+        return None
 
-                if symbol not in depth_snapshots:
-                    depth_snapshots[symbol] = deque(maxlen=HEATMAP_SNAPSHOTS)
-                depth_snapshots[symbol].append(
-                    {"ts": ts, "ltp": ltp, "bids": bids, "asks": asks}
-                )
-    except Exception as e:
-        logger.debug(f"Depth poll error: {e}")
+    ltp = float(msg.get("ltp", msg.get("LTP", msg.get("last_price", 0))) or 0)
+
+    raw_bids = msg.get("bids", msg.get("buyDepth",  msg.get("BuyDepth",  [])))
+    raw_asks = msg.get("asks", msg.get("sellDepth", msg.get("SellDepth", [])))
+
+    def norm(levels):
+        out = []
+        for lv in levels:
+            p = float(lv.get("price", lv.get("Price", 0)) or 0)
+            q = int(lv.get("quantity", lv.get("Quantity", lv.get("qty", 0))) or 0)
+            if p > 0:
+                out.append({"p": round(p, 2), "q": q})
+        return out
+
+    return {
+        "sec_id": sec_id,
+        "ltp":    ltp,
+        "bids":   norm(raw_bids),
+        "asks":   norm(raw_asks),
+    }
 
 
 async def depth_poller_task():
-    """Background: poll market depth for index futures every DEPTH_POLL_SEC seconds."""
+    """
+    Connect to Dhan 200-level depth WebSocket, subscribe to all index futures,
+    and stream order-book snapshots into depth_snapshots.
+    Reconnects automatically on disconnection.
+    """
     if not DHAN_TOKEN_DEPTH:
-        logger.info("DHAN_TOKEN_DEPTH not set — depth/heatmap poller inactive")
+        logger.info("DHAN_TOKEN_DEPTH not set — 200-level depth feed inactive")
         return
-    logger.info("Starting depth poller (heatmap)…")
+
+    logger.info("Starting 200-level depth WebSocket feed…")
+    retry_delay = 5
+
     while True:
         syms = _index_future_symbols()
-        if syms:
-            await _fetch_depth_once(syms)
-        await asyncio.sleep(DEPTH_POLL_SEC)
+        if not syms:
+            logger.info("Depth WS: no index futures subscribed yet — retrying in 30s")
+            await asyncio.sleep(30)
+            continue
+
+        ws_url = (
+            f"{DHAN_DEPTH_WS_BASE}"
+            f"?token={DHAN_TOKEN_DEPTH}"
+            f"&clientId={DHAN_CLIENT_ID}"
+            f"&authType=2"
+        )
+
+        try:
+            async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10) as ws:
+                logger.info(f"Depth WS connected — subscribing {len(syms)} instruments")
+                retry_delay = 5  # reset on success
+
+                # Build subscription message (same JSON schema as main feed)
+                instruments = [
+                    {
+                        "ExchangeSegment": subscribed_symbols.get(sym, {}).get(
+                            "exchange_segment", "NSE_FO"
+                        ),
+                        "SecurityId": sid,
+                    }
+                    for sym, sid in syms.items()
+                ]
+                sub_msg = {
+                    "RequestCode": 21,        # Full market depth (Dhan code for depth)
+                    "InstrumentCount": len(instruments),
+                    "InstrumentList": instruments,
+                }
+                await ws.send(json.dumps(sub_msg))
+
+                async for raw in ws:
+                    parsed = _parse_depth_message(raw)
+                    if not parsed:
+                        continue
+
+                    symbol = _sid_to_symbol(parsed["sec_id"])
+                    if not symbol:
+                        continue
+
+                    if symbol not in depth_snapshots:
+                        depth_snapshots[symbol] = deque(maxlen=HEATMAP_SNAPSHOTS)
+                    depth_snapshots[symbol].append({
+                        "ts":   int(time.time() * 1000),
+                        "ltp":  parsed["ltp"],
+                        "bids": parsed["bids"],
+                        "asks": parsed["asks"],
+                    })
+
+        except Exception as e:
+            logger.warning(f"Depth WS error: {e} — reconnecting in {retry_delay}s")
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 120)
 
 
 # ─────────────────────────────────────────────
@@ -673,14 +744,16 @@ async def _fetch_gex_once(index_name: str, underlying_id: str, expiry: str):
     """Fetch options chain from Dhan and compute GEX for one index."""
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(
+            # Dhan v2 options chain uses POST with JSON body
+            resp = await client.post(
                 f"{DHAN_API_BASE}/optionchain",
                 headers={
                     "access-token": DHAN_TOKEN_OPTIONS,
                     "client-id": DHAN_CLIENT_ID,
+                    "Content-Type": "application/json",
                     "Accept": "application/json",
                 },
-                params={"UnderlyingId": underlying_id, "ExpiryDate": expiry},
+                json={"UnderlyingId": underlying_id, "ExpiryDate": expiry},
             )
             data = resp.json()
 
