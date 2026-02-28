@@ -76,7 +76,7 @@ HEATMAP_SNAPSHOTS   = int(os.getenv("HEATMAP_SNAPSHOTS", "300"))   # rolling sna
 
 # ── Options GEX ──────────────────────────────────────────────────────────────
 DHAN_TOKEN_OPTIONS  = os.getenv("DHAN_TOKEN_OPTIONS", "")
-OPTIONS_POLL_SEC    = float(os.getenv("OPTIONS_POLL_SEC", "60"))          # poll every 60 s
+OPTIONS_POLL_SEC    = float(os.getenv("OPTIONS_POLL_SEC", "300"))         # poll every 5 min (4 indices × 300s = well within rate limit)
 # Underlying security IDs (NSE index) used for options chain
 UNDERLYING_IDS = {
     "NIFTY":      "13",
@@ -705,18 +705,12 @@ async def depth_poller_task():
 
 # ─────────────────────────────────────────────
 # Options GEX — options chain poller
+# Dhan docs: https://dhanhq.co/docs/v2/option-chain/
+# Rate limit: 1 unique request per 3 seconds
 # ─────────────────────────────────────────────
 
-def _bs_gamma(S: float, K: float, T: float, r: float, sigma: float) -> float:
-    """Black-Scholes gamma for a European option."""
-    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
-        return 0.0
-    try:
-        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
-        return math.exp(-0.5 * d1 ** 2) / (math.sqrt(2 * math.pi) * S * sigma * math.sqrt(T))
-    except Exception:
-        return 0.0
-
+# UnderlyingSeg for index options — "IDX_I" per Dhan annexure
+UNDERLYING_SEG = "IDX_I"
 
 def _nearest_weekly_expiry() -> str:
     """Next Thursday (NIFTY/BANKNIFTY weekly expiry) as YYYY-MM-DD."""
@@ -740,71 +734,87 @@ def _find_gex_flip(strikes: list, spot: float) -> Optional[float]:
     return flip
 
 
-async def _fetch_gex_once(index_name: str, underlying_id: str, expiry: str):
-    """Fetch options chain from Dhan and compute GEX for one index."""
+async def _fetch_gex_once(index_name: str, underlying_scrip: str, expiry: str) -> bool:
+    """Fetch options chain from Dhan REST API and compute GEX for one index.
+
+    Correct request body per Dhan v2 docs:
+        {"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I", "Expiry": "2024-10-31"}
+
+    Response: data.last_price = spot, data.oc = {strike_str: {ce:{...}, pe:{...}}}
+    Greeks (including gamma) are provided directly — no Black-Scholes needed.
+
+    Returns True on success, False on rate-limit / error (caller backs off).
+    """
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            # Dhan v2 options chain uses POST with JSON body
             resp = await client.post(
                 f"{DHAN_API_BASE}/optionchain",
                 headers={
                     "access-token": DHAN_TOKEN_OPTIONS,
-                    "client-id": DHAN_CLIENT_ID,
+                    "client-id":    DHAN_CLIENT_ID,
                     "Content-Type": "application/json",
-                    "Accept": "application/json",
+                    "Accept":       "application/json",
                 },
-                json={"UnderlyingId": underlying_id, "ExpiryDate": expiry},
+                json={
+                    "UnderlyingScrip": int(underlying_scrip),  # must be int
+                    "UnderlyingSeg":   UNDERLYING_SEG,          # "IDX_I" for indices
+                    "Expiry":          expiry,                  # "YYYY-MM-DD"
+                },
             )
+            if resp.status_code == 429:
+                logger.warning(f"Options chain 429 [{index_name}] — rate limited, backing off")
+                return False
+            if not resp.ok:
+                logger.warning(f"Options chain {resp.status_code} [{index_name}]: {resp.text[:200]}")
+                return False
             data = resp.json()
 
-        chain = data.get("data", {})
-        spot = float(
-            chain.get("last_price", chain.get("underlyingSpot",
-            chain.get("underlying_last_price", 0))) or 0
-        )
-        if spot <= 0:
-            logger.debug(f"GEX [{index_name}]: spot price missing in response")
-            return
+        if data.get("status") != "success":
+            logger.warning(f"Options chain non-success [{index_name}]: {data}")
+            return False
 
-        oc_rows = chain.get("oc", chain.get("optionData", chain.get("data", [])))
-        if not oc_rows:
-            return
+        chain = data.get("data", {})
+        spot  = float(chain.get("last_price", 0) or 0)
+        if spot <= 0:
+            logger.debug(f"GEX [{index_name}]: spot missing in response")
+            return False
+
+        # data.oc is a dict: {"25650.000000": {"ce": {...}, "pe": {...}}, ...}
+        oc = chain.get("oc", {})
+        if not oc:
+            logger.debug(f"GEX [{index_name}]: empty oc in response")
+            return False
 
         lot_size = LOT_SIZES.get(index_name, 25)
-        r        = 0.065   # India ~6.5% risk-free
-        exp_date = date.fromisoformat(expiry)
-        T        = max(1, (exp_date - date.today()).days) / 365
+        results  = []
 
-        results = []
-        for row in oc_rows:
-            strike = float(
-                row.get("strikePrice", row.get("strike_price", row.get("strike", 0))) or 0
-            )
-            if strike <= 0:
+        for strike_str, sides in oc.items():
+            try:
+                strike = float(strike_str)
+            except ValueError:
                 continue
 
-            ce = row.get("callOptions", row.get("call_options", row.get("CE", {}))) or {}
-            pe = row.get("putOptions",  row.get("put_options",  row.get("PE", {}))) or {}
+            ce = sides.get("ce", {}) or {}
+            pe = sides.get("pe", {}) or {}
 
-            call_oi = float(ce.get("oi", ce.get("open_interest", 0)) or 0)
-            put_oi  = float(pe.get("oi", pe.get("open_interest", 0)) or 0)
-            call_iv = float(ce.get("iv", ce.get("impliedVolatility", 20)) or 20) / 100
-            put_iv  = float(pe.get("iv", pe.get("impliedVolatility", 20)) or 20) / 100
-
-            if call_iv <= 0: call_iv = 0.20
-            if put_iv  <= 0: put_iv  = 0.20
-
-            cg = _bs_gamma(spot, strike, T, r, call_iv)
-            pg = _bs_gamma(spot, strike, T, r, put_iv)
+            call_oi    = float(ce.get("oi", 0) or 0)
+            put_oi     = float(pe.get("oi", 0) or 0)
+            # Dhan provides greeks directly — use them instead of Black-Scholes
+            call_gamma = float((ce.get("greeks") or {}).get("gamma", 0) or 0)
+            put_gamma  = float((pe.get("greeks") or {}).get("gamma", 0) or 0)
 
             # Dealer GEX: long calls (+γ), short puts (−γ)
-            call_gex = cg * call_oi * lot_size * spot ** 2 / 100
-            put_gex  = pg * put_oi  * lot_size * spot ** 2 / 100
+            # GEX = gamma × OI × lot_size × spot² / 100
+            call_gex = call_gamma * call_oi * lot_size * spot ** 2 / 100
+            put_gex  = put_gamma  * put_oi  * lot_size * spot ** 2 / 100
             net_gex  = call_gex - put_gex
 
             results.append({
                 "strike":   strike,
-                "call_oi":  call_oi,  "put_oi":  put_oi,
+                "call_oi":  call_oi,
+                "put_oi":   put_oi,
+                "call_iv":  float(ce.get("implied_volatility", 0) or 0),
+                "put_iv":   float(pe.get("implied_volatility", 0) or 0),
                 "call_gex": round(call_gex, 2),
                 "put_gex":  round(put_gex, 2),
                 "net_gex":  round(net_gex, 2),
@@ -814,32 +824,46 @@ async def _fetch_gex_once(index_name: str, underlying_id: str, expiry: str):
         flip = _find_gex_flip(results, spot)
 
         gex_cache[index_name] = {
-            "computed_at":     int(time.time() * 1000),
-            "spot":            spot,
-            "expiry":          expiry,
-            "lot_size":        lot_size,
-            "strikes":         results,
-            "flip_point":      flip,
-            "total_call_gex":  round(sum(r["call_gex"] for r in results), 2),
-            "total_put_gex":   round(sum(r["put_gex"]  for r in results), 2),
+            "computed_at":   int(time.time() * 1000),
+            "spot":          spot,
+            "expiry":        expiry,
+            "lot_size":      lot_size,
+            "strikes":       results,
+            "flip_point":    flip,
+            "total_call_gex": round(sum(r["call_gex"] for r in results), 2),
+            "total_put_gex":  round(sum(r["put_gex"]  for r in results), 2),
         }
         logger.info(f"GEX [{index_name}] updated: spot={spot}, strikes={len(results)}, flip={flip}")
+        return True
 
     except Exception as e:
         logger.warning(f"Options poll error [{index_name}]: {e}")
+        return False
 
 
 async def options_poller_task():
-    """Background: poll options chain and recompute GEX every OPTIONS_POLL_SEC seconds."""
+    """Background: poll Dhan options chain and recompute GEX.
+
+    Rate limit per Dhan docs: 1 unique request per 3 seconds.
+    We use 5 s gap between each index (safe margin) and OPTIONS_POLL_SEC between full cycles.
+    On 429 → skip remaining indices this cycle and add an extra cool-down.
+    """
     if not DHAN_TOKEN_OPTIONS:
         logger.info("DHAN_TOKEN_OPTIONS not set — options/GEX poller inactive")
         return
-    logger.info("Starting options/GEX poller…")
+    logger.info(f"Starting options/GEX poller (cycle={OPTIONS_POLL_SEC}s, gap=5s/index)…")
     while True:
         expiry = _nearest_weekly_expiry()
+        rate_limited = False
         for idx_name, uid in UNDERLYING_IDS.items():
-            await _fetch_gex_once(idx_name, uid, expiry)
-        await asyncio.sleep(OPTIONS_POLL_SEC)
+            ok = await _fetch_gex_once(idx_name, uid, expiry)
+            if not ok:
+                rate_limited = True
+                break                   # abort remaining indices this cycle
+            await asyncio.sleep(5)      # 5 s between requests > Dhan's 3 s minimum
+
+        extra = OPTIONS_POLL_SEC if rate_limited else 0
+        await asyncio.sleep(OPTIONS_POLL_SEC + extra)
 
 
 def _is_auth_error(exc: Exception) -> bool:
