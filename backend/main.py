@@ -56,7 +56,9 @@ CANDLE_OPTIONS = [60, 300, 600, 900, 1800, 2700, 3600, 7200]  # seconds: 1,5,10,
 # Memory bounds for 24/7 deployment (500 = full trading day ~375 for 1-min)
 MAX_CANDLES_PER_SYMBOL = int(os.getenv("MAX_CANDLES_PER_SYMBOL", "500"))
 # Cap candles sent over WebSocket to avoid payload size limits (some clients fail with huge messages)
-BROADCAST_CANDLES_LIMIT = int(os.getenv("BROADCAST_CANDLES_LIMIT", "50"))
+BROADCAST_CANDLES_LIMIT = int(os.getenv("BROADCAST_CANDLES_LIMIT", "200"))
+# Persistent snapshot directory — mount a Render Disk at this path so data survives restarts
+SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", "/data/snapshots")
 MAX_LEVELS_PER_CANDLE = int(os.getenv("MAX_LEVELS_PER_CANDLE", "500"))
 MAX_ENGINES = int(os.getenv("MAX_ENGINES", "1000"))  # No trim: all instruments from CSV
 GC_INTERVAL_TICKS = int(os.getenv("GC_INTERVAL_TICKS", "10000"))  # Run gc every N ticks
@@ -352,8 +354,16 @@ def _do_daily_reset():
         eng.prev_volume = 0.0
         eng.prev_total_buy = 0.0
         eng.prev_total_sell = 0.0
+    # Also wipe yesterday's snapshot files so they don't get reloaded next restart
+    if os.path.isdir(SNAPSHOT_DIR):
+        for fname in os.listdir(SNAPSHOT_DIR):
+            if fname.endswith(".json"):
+                try:
+                    os.remove(os.path.join(SNAPSHOT_DIR, fname))
+                except Exception:
+                    pass
     gc.collect()
-    logger.info(f"Daily reset at IST midnight. Date: {today}. Engines cleared.")
+    logger.info(f"Daily reset at IST midnight. Date: {today}. Engines + snapshots cleared.")
 
 
 async def _daily_reset_task():
@@ -361,6 +371,106 @@ async def _daily_reset_task():
     while True:
         await asyncio.sleep(300)  # 5 min
         _do_daily_reset()
+
+
+# ─────────────────────────────────────────────
+# Disk persistence — survives Render spin-down/restart
+# Mount a Render Disk at /data so these files outlive container restarts.
+# ─────────────────────────────────────────────
+
+def _ist_midnight_ms() -> int:
+    """Unix ms for the start of today in IST (used to discard yesterday's snapshots)."""
+    now = datetime.now(IST)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return int(midnight.timestamp() * 1000)
+
+
+def save_symbol_snapshot(symbol: str):
+    """Atomically write the closed candles for one symbol to a JSON file on disk."""
+    eng = engines.get(symbol)
+    if not eng or not eng.candles:
+        return
+    try:
+        os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+        path = os.path.join(SNAPSHOT_DIR, f"{symbol}.json")
+        tmp  = path + ".tmp"
+        candle_dicts = [c.to_dict() for c in eng.candles]
+        with open(tmp, "w") as fh:
+            json.dump(candle_dicts, fh)
+        os.replace(tmp, path)   # atomic rename — never leaves a half-written file
+    except Exception as e:
+        logger.warning(f"Snapshot save failed [{symbol}]: {e}")
+
+
+def load_all_snapshots():
+    """
+    On startup: restore today's closed candles from disk into the already-created engines.
+    Call this AFTER auto_subscribe (engines exist) and AFTER _do_daily_reset (CVD/prev cleared).
+    Candles older than today's IST midnight are silently discarded.
+    """
+    if not os.path.isdir(SNAPSHOT_DIR):
+        logger.info("Snapshot dir not found — starting with empty history (no Render Disk mounted?)")
+        return
+    today_start = _ist_midnight_ms()
+    loaded = 0
+    for fname in os.listdir(SNAPSHOT_DIR):
+        if not fname.endswith(".json"):
+            continue
+        symbol = fname[:-5]
+        if symbol not in engines:
+            continue
+        path = os.path.join(SNAPSHOT_DIR, fname)
+        try:
+            with open(path) as fh:
+                candle_dicts = json.load(fh)
+            restored = []
+            for cd in candle_dicts:
+                if not cd.get("closed"):
+                    continue                        # skip any open candle — it'll be rebuilt live
+                if cd.get("open_time", 0) < today_start:
+                    continue                        # discard yesterday's candles
+                c = FootprintCandle(
+                    open_time   = cd["open_time"],
+                    open        = cd["open"],
+                    high        = cd["high"],
+                    low         = cd["low"],
+                    close       = cd["close"],
+                    buy_vol     = cd.get("buy_vol", 0),
+                    sell_vol    = cd.get("sell_vol", 0),
+                    delta_open  = cd.get("delta_open", 0),
+                    delta_min   = cd.get("delta_min", 0),
+                    delta_max   = cd.get("delta_max", 0),
+                    initiative  = cd.get("initiative"),
+                    closed      = True,
+                )
+                for p_str, lv in cd.get("levels", {}).items():
+                    p = float(p_str)
+                    c.levels[p] = FootprintLevel(
+                        price     = p,
+                        buy_vol   = lv.get("buy_vol", 0),
+                        sell_vol  = lv.get("sell_vol", 0),
+                    )
+                restored.append(c)
+            if restored:
+                restored = restored[-MAX_CANDLES_PER_SYMBOL:]
+                engines[symbol].candles = restored
+                engines[symbol].cvd     = sum(c.delta for c in restored)
+                loaded += 1
+                logger.info(f"  Restored {len(restored)} candles for {symbol}")
+        except Exception as e:
+            logger.warning(f"Snapshot load failed [{symbol}]: {e}")
+    logger.info(f"Snapshot restore complete: {loaded} symbols loaded from {SNAPSHOT_DIR}")
+
+
+async def _snapshot_task():
+    """Background task: save all symbols to disk every 5 minutes."""
+    while True:
+        await asyncio.sleep(300)
+        syms = list(engines.keys())
+        for sym in syms:
+            save_symbol_snapshot(sym)
+        if syms:
+            logger.info(f"Periodic snapshot saved for {len(syms)} symbols")
 
 
 # ─────────────────────────────────────────────
@@ -823,10 +933,12 @@ async def startup():
             logger.error(f"Auto-subscribe failed: {e}")
 
     auto_subscribe_from_csv()
-    _do_daily_reset()  # Reset on startup (handles deploy across midnight)
+    _do_daily_reset()       # sets _last_reset_date = today; clears stale state
+    load_all_snapshots()    # restore today's candles from disk (no-op if no disk mounted)
     asyncio.create_task(dhan_feed_task())
     asyncio.create_task(_daily_reset_task())
-    logger.info("OrderFlow Engine started (daily reset at IST midnight, memory-bounded)")
+    asyncio.create_task(_snapshot_task())
+    logger.info("OrderFlow Engine started (daily reset at IST midnight, disk snapshots every 5 min)")
 
 
 # Serve frontend build (for production deployment)

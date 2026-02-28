@@ -5,8 +5,13 @@ services:
     runtime: python
     rootDir: backend
     region: singapore     # Closest Render region to NSE/Dhan servers (Mumbai). Cuts ~200ms vs US.
+    plan: starter         # Starter required for Render Disk + no spin-down on inactivity
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    disk:
+      name: orderflow-data
+      mountPath: /data
+      sizeGB: 1             # 1 GB ~ $0.25/month; holds years of candle snapshots
     envVars:
       - key: DHAN_CLIENT_ID
         sync: false
@@ -26,6 +31,10 @@ services:
         value: "10000"
       - key: BROADCAST_MIN_INTERVAL
         value: "0.1"          # 100ms = 10 updates/sec max per symbol
+      - key: BROADCAST_CANDLES_LIMIT
+        value: "200"          # send full stored history to clients (was 50)
+      - key: SNAPSHOT_DIR
+        value: /data/snapshots
     healthCheckPath: /api/health
 
   # Frontend static site
