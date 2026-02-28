@@ -199,19 +199,19 @@ export default function OrderflowChart({ candles, symbol }) {
       const vol   = (c.buy_vol ?? 0) + (c.sell_vol ?? 0);
 
       /* ── Row 0: Tick Delta ── */
-      ctx.fillStyle = delta >= 0 ? "rgba(0,210,110,0.22)" : "rgba(255,70,70,0.22)";
+      ctx.fillStyle = delta >= 0 ? "rgba(7, 156, 84, 0.62)" : "rgba(255, 70, 70, 0.6)";
       ctx.fillRect(bx, 2, bw, ROW_H - 4);
       ctx.fillStyle = delta >= 0 ? "#00d26e" : "#ff4646";
       ctx.fillText(fmtVol(delta), cx, ROW_H * 0.5);
 
       /* ── Row 1: Cumulative Delta (CVD) ── */
-      ctx.fillStyle = cvd >= 0 ? "rgba(0,210,110,0.22)" : "rgba(255,70,70,0.22)";
+      ctx.fillStyle = cvd >= 0 ? "rgba(7, 156, 84, 0.62)" : "rgba(255, 70, 70, 0.6)";
       ctx.fillRect(bx, ROW_H + 2, bw, ROW_H - 4);
       ctx.fillStyle = cvd >= 0 ? "#00d26e" : "#ff4646";
       ctx.fillText(fmtVol(cvd), cx, ROW_H * 1.5);
 
       /* ── Row 2: Total Volume ── */
-      ctx.fillStyle = "rgba(100,116,139,0.18)";
+      ctx.fillStyle = "rgba(184, 191, 201, 0.8)";
       ctx.fillRect(bx, ROW_H * 2 + 2, bw, ROW_H - 4);
       ctx.fillStyle = "#94a3b8";
       ctx.fillText(fmtVol(vol), cx, ROW_H * 2.5);

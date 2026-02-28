@@ -53,10 +53,10 @@ CANDLE_SECONDS = int(os.getenv("CANDLE_SECONDS", "60"))
 IMBALANCE_RATIO = float(os.getenv("IMBALANCE_RATIO", "3.0"))
 CANDLE_OPTIONS = [60, 300, 600, 900, 1800, 2700, 3600, 7200]  # seconds: 1,5,10,15,30,45,60,120 min
 
-# Memory bounds for 24/7 deployment (500 = full trading day ~375 for 1-min)
-MAX_CANDLES_PER_SYMBOL = int(os.getenv("MAX_CANDLES_PER_SYMBOL", "500"))
-# Cap candles sent over WebSocket to avoid payload size limits (some clients fail with huge messages)
-BROADCAST_CANDLES_LIMIT = int(os.getenv("BROADCAST_CANDLES_LIMIT", "200"))
+# Memory bounds — MCX trades 9AM-11:55PM IST (~895 min); NSE 9:15AM-3:30PM (~375 min)
+MAX_CANDLES_PER_SYMBOL = int(os.getenv("MAX_CANDLES_PER_SYMBOL", "1000"))
+# Send full stored history to every client on connect/broadcast
+BROADCAST_CANDLES_LIMIT = int(os.getenv("BROADCAST_CANDLES_LIMIT", "1000"))
 # Persistent snapshot directory — mount a Render Disk at this path so data survives restarts
 SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", "/data/snapshots")
 MAX_LEVELS_PER_CANDLE = int(os.getenv("MAX_LEVELS_PER_CANDLE", "500"))

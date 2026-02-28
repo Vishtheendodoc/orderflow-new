@@ -22,7 +22,7 @@ services:
       - key: IMBALANCE_RATIO
         value: "3.0"
       - key: MAX_CANDLES_PER_SYMBOL
-        value: "200"
+        value: "1000"         # ~895 candles = full MCX day (9AM-11:55PM) at 1-min; NSE needs ~375
       - key: MAX_LEVELS_PER_CANDLE
         value: "500"
       - key: MAX_ENGINES
@@ -32,7 +32,7 @@ services:
       - key: BROADCAST_MIN_INTERVAL
         value: "0.1"          # 100ms = 10 updates/sec max per symbol
       - key: BROADCAST_CANDLES_LIMIT
-        value: "200"          # send full stored history to clients (was 50)
+        value: "1000"         # send full stored history to clients (matches MAX_CANDLES_PER_SYMBOL)
       - key: SNAPSHOT_DIR
         value: /data/snapshots
     healthCheckPath: /api/health
