@@ -81,9 +81,11 @@ OPTIONS_POLL_SEC    = float(os.getenv("OPTIONS_POLL_SEC", "300"))         # poll
 UNDERLYING_IDS = {
     "NIFTY":      "13",
     "BANKNIFTY":  "25",
-    "FINNIFTY":   "36",
+    "FINNIFTY":   "27",
     "MIDCPNIFTY": "442",
 }
+# Monthly-only indices (no weekly options) — NIFTY has both weekly + monthly
+MONTHLY_ONLY_INDICES = {"BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
 # F&O lot sizes (shares per lot) — update when SEBI revises
 LOT_SIZES = {
     "NIFTY": 25, "BANKNIFTY": 15, "FINNIFTY": 40, "MIDCPNIFTY": 75,
@@ -715,14 +717,36 @@ async def depth_poller_task():
 # UnderlyingSeg for index options — "IDX_I" per Dhan annexure
 UNDERLYING_SEG = "IDX_I"
 
-def _nearest_weekly_expiry(index_name: str = "NIFTY") -> str:
-    """Nearest weekly expiry as YYYY-MM-DD.
-    NIFTY/FINNIFTY/MIDCPNIFTY: Thursday (weekday 3)
-    BANKNIFTY: Wednesday (weekday 2)
+def _last_weekday_of_month(year: int, month: int, weekday: int) -> date:
+    """Last occurrence of weekday (0=Mon..4=Fri) in the given month."""
+    from calendar import monthrange
+    last_day = monthrange(year, month)[1]
+    d = date(year, month, last_day)
+    while d.weekday() != weekday:
+        d -= timedelta(days=1)
+    return d
+
+
+def _nearest_expiry_for_index(index_name: str) -> str:
+    """Nearest option expiry as YYYY-MM-DD.
+    NIFTY: weekly (next Thursday).
+    BANKNIFTY/FINNIFTY/MIDCPNIFTY: monthly only (last Wed/Tue/Mon of month).
     """
     today = date.today()
-    target_weekday = 2 if index_name == "BANKNIFTY" else 3  # Wed vs Thu
-    days = (target_weekday - today.weekday()) % 7
+    if index_name in MONTHLY_ONLY_INDICES:
+        # Monthly: last Wed (BANKNIFTY), last Tue (FINNIFTY), last Mon (MIDCPNIFTY)
+        weekday_map = {"BANKNIFTY": 2, "FINNIFTY": 1, "MIDCPNIFTY": 0}
+        wd = weekday_map.get(index_name, 2)
+        exp = _last_weekday_of_month(today.year, today.month, wd)
+        if today > exp:
+            # Move to next month
+            if today.month == 12:
+                exp = _last_weekday_of_month(today.year + 1, 1, wd)
+            else:
+                exp = _last_weekday_of_month(today.year, today.month + 1, wd)
+        return exp.strftime("%Y-%m-%d")
+    # NIFTY: weekly Thursday
+    days = (3 - today.weekday()) % 7
     if days == 0:
         days = 7
     return (today + timedelta(days=days)).strftime("%Y-%m-%d")
@@ -871,7 +895,7 @@ async def options_poller_task():
     while True:
         rate_limited = False
         for idx_name, uid in UNDERLYING_IDS.items():
-            expiry = _nearest_weekly_expiry(idx_name)
+            expiry = _nearest_expiry_for_index(idx_name)
             ok = await _fetch_gex_once(idx_name, uid, expiry)
             if not ok:
                 rate_limited = True
@@ -1289,7 +1313,7 @@ async def get_gex(symbol: str, expiry: str = ""):
     if not idx:
         return JSONResponse({"error": f"Unknown index: {symbol}"}, 400)
 
-    target_expiry = expiry.strip() or _nearest_weekly_expiry(idx)
+    target_expiry = expiry.strip() or _nearest_expiry_for_index(idx)
     cache_key = f"{idx}:{target_expiry}"
 
     data = gex_cache.get(cache_key)
