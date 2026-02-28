@@ -757,15 +757,6 @@ export default function App() {
           {flow && (
             <CVDLine candles={candles} />
           )}
-          <div className="legend">
-            <div className="legend-title">LEGEND</div>
-            <div className="legend-row"><span className="leg-buy">■</span> Buy aggressor</div>
-            <div className="legend-row"><span className="leg-sell">■</span> Sell aggressor</div>
-            <div className="legend-row"><span className="leg-imb-b">▌</span> Buy imbalance (3×)</div>
-            <div className="legend-row"><span className="leg-imb-s">▌</span> Sell imbalance (3×)</div>
-            <div className="legend-row"><span className="leg-init-b">▣</span> Buy initiated (IB)</div>
-            <div className="legend-row"><span className="leg-init-s">▣</span> Sell initiated (IS)</div>
-          </div>
         </aside>
 
         {/* Main canvas */}

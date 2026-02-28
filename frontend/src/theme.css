@@ -58,7 +58,7 @@ html, body, #root {
 .search-input { color: var(--text); }
 .search-input::placeholder { color: var(--text-dim); }
 
-.fp-candle, .cvd-chart, .legend, .chart-pane {
+.fp-candle, .cvd-chart, .chart-pane {
   background: var(--bg1) !important;
   border-color: var(--border) !important;
 }

@@ -314,36 +314,6 @@ html, body, #root {
 }
 .cvd-chart svg { display: block; }
 
-/* ── Legend ── */
-.legend {
-  margin: 0 12px 12px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 8px;
-  background: var(--bg);
-}
-.legend-title {
-  font-size: 9px;
-  letter-spacing: 0.2em;
-  color: var(--text-muted);
-  margin-bottom: 8px;
-  font-family: var(--font-display);
-  font-weight: 700;
-}
-.legend-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 10px;
-  color: var(--text-muted);
-  margin-bottom: 4px;
-}
-.leg-buy { color: var(--buy); }
-.leg-sell { color: var(--sell); }
-.leg-imb-b { color: var(--buy); font-size: 14px; }
-.leg-imb-s { color: var(--sell); font-size: 14px; }
-.leg-init-b { color: var(--buy); font-size: 12px; }
-.leg-init-s { color: var(--sell); font-size: 12px; }
 
 /* ── View toggle ── */
 .view-toggle {
