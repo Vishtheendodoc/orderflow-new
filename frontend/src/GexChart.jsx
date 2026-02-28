@@ -26,11 +26,14 @@ function fmtGex(v) {
   return String(Math.round(v));
 }
 
+// Order matters: BANKNIFTY contains "NIFTY", so check longer names first
 function resolveIdx(symbol) {
-  return (
-    ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]
-      .find(n => symbol.toUpperCase().includes(n)) || symbol.toUpperCase()
-  );
+  const s = symbol.toUpperCase();
+  if (s.includes("BANKNIFTY")) return "BANKNIFTY";
+  if (s.includes("FINNIFTY")) return "FINNIFTY";
+  if (s.includes("MIDCPNIFTY")) return "MIDCPNIFTY";
+  if (s.includes("NIFTY")) return "NIFTY";
+  return s;
 }
 
 export default function GexChart({ symbol, apiBase, height = 480 }) {

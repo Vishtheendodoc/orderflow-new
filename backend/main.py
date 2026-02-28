@@ -715,10 +715,14 @@ async def depth_poller_task():
 # UnderlyingSeg for index options — "IDX_I" per Dhan annexure
 UNDERLYING_SEG = "IDX_I"
 
-def _nearest_weekly_expiry() -> str:
-    """Next Thursday (NIFTY/BANKNIFTY weekly expiry) as YYYY-MM-DD."""
+def _nearest_weekly_expiry(index_name: str = "NIFTY") -> str:
+    """Nearest weekly expiry as YYYY-MM-DD.
+    NIFTY/FINNIFTY/MIDCPNIFTY: Thursday (weekday 3)
+    BANKNIFTY: Wednesday (weekday 2)
+    """
     today = date.today()
-    days = (3 - today.weekday()) % 7  # Thursday = weekday 3
+    target_weekday = 2 if index_name == "BANKNIFTY" else 3  # Wed vs Thu
+    days = (target_weekday - today.weekday()) % 7
     if days == 0:
         days = 7
     return (today + timedelta(days=days)).strftime("%Y-%m-%d")
@@ -865,9 +869,9 @@ async def options_poller_task():
         await _fetch_expiry_list(idx_name)
         await asyncio.sleep(5)
     while True:
-        expiry = _nearest_weekly_expiry()
         rate_limited = False
         for idx_name, uid in UNDERLYING_IDS.items():
+            expiry = _nearest_weekly_expiry(idx_name)
             ok = await _fetch_gex_once(idx_name, uid, expiry)
             if not ok:
                 rate_limited = True
@@ -1285,7 +1289,7 @@ async def get_gex(symbol: str, expiry: str = ""):
     if not idx:
         return JSONResponse({"error": f"Unknown index: {symbol}"}, 400)
 
-    target_expiry = expiry.strip() or _nearest_weekly_expiry()
+    target_expiry = expiry.strip() or _nearest_weekly_expiry(idx)
     cache_key = f"{idx}:{target_expiry}"
 
     data = gex_cache.get(cache_key)
