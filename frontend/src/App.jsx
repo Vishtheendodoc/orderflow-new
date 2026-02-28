@@ -866,18 +866,29 @@ export default function App() {
                     ⚙ Features
                   </button>
                   {featMenuOpen && createPortal(
-                    <div
-                      ref={featDropdownRef}
-                      className="feat-dropdown feat-dropdown-portal"
-                      style={{
-                        position: "fixed",
-                        top: featDropdownPos.top,
-                        left: featDropdownPos.left,
-                        minWidth: 200,
-                        maxWidth: "calc(100vw - 16px)",
-                        zIndex: 9999,
-                      }}
-                    >
+                    <>
+                      <div
+                        aria-hidden
+                        style={{
+                          position: "fixed",
+                          inset: 0,
+                          zIndex: 99998,
+                          background: "rgba(0,0,0,0.12)",
+                        }}
+                        onClick={() => setFeatMenuOpen(false)}
+                      />
+                      <div
+                        ref={featDropdownRef}
+                        className="feat-dropdown feat-dropdown-portal"
+                        style={{
+                          position: "fixed",
+                          top: featDropdownPos.top,
+                          left: featDropdownPos.left,
+                          minWidth: 200,
+                          maxWidth: "calc(100vw - 16px)",
+                          zIndex: 99999,
+                        }}
+                      >
                       <div className="feat-dropdown-title">Chart Features</div>
                       {[
                         { key: "showOI",   label: "Open Interest (OI)" },
@@ -893,7 +904,8 @@ export default function App() {
                           {label}
                         </label>
                       ))}
-                    </div>,
+                      </div>
+                    </>,
                     document.body
                   )}
                 </div>
