@@ -611,7 +611,7 @@ export default function App() {
   const wsRef = useRef(null);
   const pingRef = useRef(null);
   /* ── Feature toggles ── */
-  const [features, setFeatures] = useState({ showOI: true });
+  const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true });
   const [featMenuOpen, setFeatMenuOpen] = useState(false);
   const featMenuRef = useRef(null);
   /* close dropdown on outside click */
@@ -823,6 +823,8 @@ export default function App() {
                       <div className="feat-dropdown-title">Chart Features</div>
                       {[
                         { key: "showOI",   label: "Open Interest (OI)" },
+                        { key: "showVWAP", label: "VWAP (session)" },
+                        { key: "showVP",   label: "Volume Profile (VPOC / VAH / VAL)" },
                       ].map(({ key, label }) => (
                         <label key={key} className="feat-row">
                           <input

@@ -213,7 +213,9 @@ function processCandles(candles, maxLevelsCap) {
    COMPONENT
 ════════════════════════════════════════════ */
 export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMinutes = 1, features = {} }) {
-  const showOI = features.showOI ?? true;
+  const showOI   = features.showOI   ?? true;
+  const showVWAP = features.showVWAP ?? true;
+  const showVP   = features.showVP   ?? true;
   /* compact layout for narrow/mobile screens */
   const isMobile   = typeof window !== "undefined" && window.innerWidth <= 768;
   const HDR_H_EFF  = isMobile ? 36 : HDR_H;
@@ -627,11 +629,127 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       }
     }
 
+    /* ── PASS 5: Session VWAP line ── */
+    if (showVWAP && bs.length > 0) {
+      let cumPV = 0, cumV = 0;
+      ctx.save();
+      ctx.strokeStyle = "#f39c12";
+      ctx.lineWidth   = 1.5;
+      ctx.globalAlpha = 0.90;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      let wStarted = false;
+      for (let i = 0; i < bs.length; i++) {
+        const b   = bs[i];
+        const vol = (b.buy_vol || 0) + (b.sell_vol || 0);
+        const tp  = ((b.high || b.close || 0) + (b.low || b.close || 0) + (b.close || 0)) / 3;
+        if (vol > 0 && tp > 0) { cumPV += tp * vol; cumV += vol; }
+        const vwap = cumV > 0 ? cumPV / cumV : 0;
+        if (vwap <= 0) continue;
+        const cx = i * slotW - pan + nzHalf;
+        const midX = cx + cw / 2;
+        const y    = p2y(vwap, H);
+        if (!wStarted) { ctx.moveTo(midX, y); wStarted = true; }
+        else ctx.lineTo(midX, y);
+      }
+      ctx.stroke();
+      /* VWAP label */
+      if (cumV > 0) {
+        const finalY = p2y(cumPV / cumV, H);
+        if (finalY >= 4 && finalY <= H - 4) {
+          ctx.fillStyle = "#f39c12";
+          ctx.font = `700 8px ${MONO}`;
+          ctx.textAlign = "left";
+          ctx.textBaseline = "middle";
+          ctx.fillText("VWAP", 4, finalY - 8);
+        }
+      }
+      ctx.restore();
+    }
+
+    /* ── PASS 6: Volume Profile histogram (VPOC / VAH / VAL) ── */
+    if (showVP && bs.length > 0) {
+      /* aggregate all closed + open levels → price → total volume */
+      const profile = new Map();
+      for (const b of bs) {
+        for (const lv of Object.values(b.levels || {})) {
+          const vol = (lv.buy_vol || 0) + (lv.sell_vol || 0);
+          if (vol > 0) profile.set(lv.price, (profile.get(lv.price) || 0) + vol);
+        }
+      }
+      if (profile.size > 0) {
+        /* VPOC */
+        let vpoc = 0, maxVol = 0;
+        for (const [p, v] of profile) { if (v > maxVol) { maxVol = v; vpoc = p; } }
+
+        /* Value Area (70%) — add highest-volume levels until 70% of total volume reached */
+        const totalVol  = [...profile.values()].reduce((s, v) => s + v, 0);
+        const vaTarget  = totalVol * 0.70;
+        const byVolDesc = [...profile.entries()].sort((a, b) => b[1] - a[1]);
+        const vaSet = new Set();
+        let cumVA = 0;
+        for (const [p, v] of byVolDesc) {
+          vaSet.add(p); cumVA += v;
+          if (cumVA >= vaTarget) break;
+        }
+        const vaPrices = [...vaSet].sort((a, b) => a - b);
+        const vah = vaPrices[vaPrices.length - 1];
+        const val = vaPrices[0];
+
+        const VP_W  = Math.min(isMobile ? 36 : 68, W * 0.12);
+        const barH  = Math.max(1, pxPerTick - 0.5);
+
+        ctx.save();
+        /* histogram bars — right-aligned, semi-transparent overlay */
+        for (const [p, vol] of profile) {
+          const y = p2y(p, H);
+          if (y < -2 || y > H + 2) continue;
+          const barW = (vol / maxVol) * VP_W;
+          ctx.fillStyle = (p === vpoc) ? "rgba(255,193,7,0.88)"
+            : vaSet.has(p)             ? "rgba(100,149,237,0.50)"
+                                       : "rgba(100,149,237,0.16)";
+          ctx.fillRect(W - barW, y - barH / 2, barW, Math.max(1, barH));
+        }
+
+        const vpocY = Math.round(p2y(vpoc, H)) + 0.5;
+        const vahY  = Math.round(p2y(vah,  H)) + 0.5;
+        const valY  = Math.round(p2y(val,  H)) + 0.5;
+
+        /* VPOC line */
+        ctx.strokeStyle = "rgba(255,193,7,0.85)";
+        ctx.lineWidth = 1; ctx.setLineDash([5, 3]);
+        ctx.beginPath(); ctx.moveTo(0, vpocY); ctx.lineTo(W, vpocY); ctx.stroke();
+
+        /* VAH line */
+        ctx.strokeStyle = "rgba(100,149,237,0.75)";
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath(); ctx.moveTo(0, vahY); ctx.lineTo(W, vahY); ctx.stroke();
+
+        /* VAL line */
+        ctx.beginPath(); ctx.moveTo(0, valY); ctx.lineTo(W, valY); ctx.stroke();
+
+        ctx.setLineDash([]);
+        ctx.font = `700 8px ${MONO}`;
+        ctx.textBaseline = "middle";
+        ctx.textAlign = "left";
+
+        ctx.fillStyle = "rgba(255,193,7,0.95)";
+        ctx.fillText("VPOC", 4, vpocY - 6);
+
+        ctx.fillStyle = "rgba(100,149,237,0.90)";
+        ctx.fillText("VAH",  4, vahY  - 6);
+        ctx.fillText("VAL",  4, valY  + 9);
+
+        ctx.restore();
+      }
+    }
+
     /* price scale + time (pass hoverPrice so Y-axis shows price at crosshair level) */
     _drawPS(H, ts, hoverPrice);
     _drawTime();
     _drawBot();
-  }, [dpr, getCanvasH, getVisRange, getVisPMin, p2y, getMaxPan, hoverBar, hoverPrice]);
+  }, [dpr, getCanvasH, getVisRange, getVisPMin, p2y, getMaxPan, hoverBar, hoverPrice,
+      showVWAP, showVP, isMobile]);
 
   /* ── price scale: TradingView-style levels + hover price at crosshair ── */
   const PS_LABEL_MIN_PX = 40;
