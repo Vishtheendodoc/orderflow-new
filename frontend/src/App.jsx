@@ -798,7 +798,6 @@ export default function App() {
                 {/* Features dropdown — next to instrument selector, above chart */}
                 <div className="feat-menu-wrap" ref={featMenuRef}>
                   <button
-                    ref={featBtnRef}
                     className={`cd-btn feat-btn${featMenuOpen ? " active" : ""}`}
                     onClick={() => setFeatMenuOpen((o) => !o)}
                     title="Toggle chart features"
