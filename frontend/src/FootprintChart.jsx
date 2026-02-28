@@ -212,12 +212,15 @@ function processCandles(candles, maxLevelsCap) {
 /* ════════════════════════════════════════════
    COMPONENT
 ════════════════════════════════════════════ */
-export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMinutes = 1 }) {
+export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMinutes = 1, features = {} }) {
+  const showOI = features.showOI ?? true;
   /* compact layout for narrow/mobile screens */
   const isMobile   = typeof window !== "undefined" && window.innerWidth <= 768;
   const HDR_H_EFF  = isMobile ? 36 : HDR_H;
   const TIME_H_EFF = isMobile ? 18 : TIME_H;
-  const BOT_H_EFF  = isMobile ? 52 : BOT_H;
+  const BOT_H_EFF  = showOI
+    ? (isMobile ? 68 : 90)   // 4 rows
+    : (isMobile ? 52 : BOT_H); // 3 rows
   // eslint-disable-next-line no-shadow
   const NZW  = isMobile ? 40 : 80;  // numbers-zone width per candle slot (20px/40px per side)
   // eslint-disable-next-line no-shadow
@@ -736,13 +739,15 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     ctx.fillStyle = "#fff";
     ctx.fillRect(0, 0, W, H);
 
-    const ROW_H = Math.floor(H / 3);
+    const numRows = showOI ? 4 : 3;
+    const ROW_H   = Math.floor(H / numRows);
     /* row dividers */
     ctx.strokeStyle = C.border; ctx.lineWidth = 0.5;
-    ctx.beginPath(); ctx.moveTo(0, ROW_H);     ctx.lineTo(W, ROW_H);     ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0, ROW_H * 2); ctx.lineTo(W, ROW_H * 2); ctx.stroke();
+    for (let r = 1; r < numRows; r++) {
+      ctx.beginPath(); ctx.moveTo(0, ROW_H * r); ctx.lineTo(W, ROW_H * r); ctx.stroke();
+    }
 
-    const rowYs = [ROW_H * 0.5, ROW_H * 1.5, ROW_H * 2.5];
+    const rowYs = Array.from({ length: numRows }, (_, r) => ROW_H * (r + 0.5));
     ctx.font = `600 9.5px ${MONO}`;
     ctx.textBaseline = "middle";
 
@@ -764,10 +769,12 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         ctx.fillRect(cx, 0, cw, H);
       }
 
-      const delta = b.delta ?? 0;
-      const cvd   = b.cvd   ?? 0;
-      const vol   = (b.buy_vol || 0) + (b.sell_vol || 0);
-      const midX  = cx + cw / 2; // centre of candle body
+      const delta    = b.delta ?? 0;
+      const cvd      = b.cvd   ?? 0;
+      const vol      = (b.buy_vol || 0) + (b.sell_vol || 0);
+      const oi       = b.oi       ?? 0;
+      const oiChange = b.oi_change ?? 0;
+      const midX     = cx + cw / 2;
 
       ctx.textAlign = "center";
       ctx.fillStyle = delta >= 0 ? C.buy : C.sell;
@@ -776,6 +783,10 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       ctx.fillText(fmtV(cvd),   midX, rowYs[1]);
       ctx.fillStyle = C.textMid;
       ctx.fillText(fmtV(vol),   midX, rowYs[2]);
+      if (showOI) {
+        ctx.fillStyle = oiChange >= 0 ? C.buy : C.sell;
+        ctx.fillText(oi > 0 ? fmtV(oi) : "—", midX, rowYs[3]);
+      }
     }
   }, [dpr, hoverBar]);
 
@@ -1246,6 +1257,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
               { label: "TICK Δ", color: C.textDim },
               { label: "CVD",    color: C.textDim },
               { label: "VOL",    color: C.textDim },
+              ...(showOI ? [{ label: "OI", color: C.textDim }] : []),
             ].map(({ label, color }) => (
               <span key={label} style={{
                 fontSize: 8, color, fontWeight: 700,

@@ -19,12 +19,12 @@ const API_URL = import.meta.env.VITE_API_URL || "";
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const fmt = (n, d = 2) => Number(n).toFixed(d);
-/* Only >= 1000 use K; 100–999 show as full number */
+/* Only >= 1000 use K; 100–999 show as full number. Works for negatives too. */
 const fmtVol = (v) => {
-  const n = Number(v);
-  if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, "") + "M";
-  if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "K";
-  return String(Math.round(n));
+  const n = Math.abs(Number(v));
+  if (n >= 1e6) return (Number(v) / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+  if (n >= 1e3) return (Number(v) / 1e3).toFixed(1).replace(/\.0$/, "") + "K";
+  return String(Math.round(Number(v)));
 };
 const clamp = (v, min, max) => Math.min(Math.max(v, min), max);
 
@@ -610,6 +610,17 @@ export default function App() {
   const [symbolExchangeMap, setSymbolExchangeMap] = useState({}); // symbol -> exchange
   const wsRef = useRef(null);
   const pingRef = useRef(null);
+  /* ── Feature toggles ── */
+  const [features, setFeatures] = useState({ showOI: true });
+  const [featMenuOpen, setFeatMenuOpen] = useState(false);
+  const featMenuRef = useRef(null);
+  /* close dropdown on outside click */
+  useEffect(() => {
+    if (!featMenuOpen) return;
+    const handler = (e) => { if (featMenuRef.current && !featMenuRef.current.contains(e.target)) setFeatMenuOpen(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [featMenuOpen]);
 
   useEffect(() => {
     fetch(`${API_URL}/api/health`)
@@ -786,7 +797,7 @@ export default function App() {
                   Footprint
                 </button>
               </div>
-              {/* Timeframe selector (TradingView-style, client-side aggregation) */}
+              {/* Timeframe selector + Feature toggles */}
               <div className="candle-duration-bar">
                 <span className="cd-label">Interval:</span>
                 {CANDLE_MINUTES.map((m) => (
@@ -798,17 +809,45 @@ export default function App() {
                     {m}m
                   </button>
                 ))}
+                {/* ── Features dropdown ── */}
+                <div className="feat-menu-wrap" ref={featMenuRef}>
+                  <button
+                    className={`cd-btn feat-btn${featMenuOpen ? " active" : ""}`}
+                    onClick={() => setFeatMenuOpen((o) => !o)}
+                    title="Toggle chart features"
+                  >
+                    ⚙ Features
+                  </button>
+                  {featMenuOpen && (
+                    <div className="feat-dropdown">
+                      <div className="feat-dropdown-title">Chart Features</div>
+                      {[
+                        { key: "showOI",   label: "Open Interest (OI)" },
+                      ].map(({ key, label }) => (
+                        <label key={key} className="feat-row">
+                          <input
+                            type="checkbox"
+                            checked={features[key] ?? true}
+                            onChange={(e) => setFeatures((f) => ({ ...f, [key]: e.target.checked }))}
+                          />
+                          {label}
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
               {viewMode === "chart" ? (
                 <div className="chart-view-wrap">
                   <OrderflowChart
                     candles={displayCandles}
                     symbol={flow.symbol}
+                    features={features}
                   />
                 </div>
               ) : (
                 <ErrorBoundary>
-                  <FootprintChart candles={displayCandles} symbol={flow.symbol} timeFrameMinutes={timeFrameMinutes} />
+                  <FootprintChart candles={displayCandles} symbol={flow.symbol} timeFrameMinutes={timeFrameMinutes} features={features} />
                 </ErrorBoundary>
               )}
             </>

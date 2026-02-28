@@ -12,10 +12,10 @@ import { createChart } from "lightweight-charts";
 
 /* ── helpers ── */
 const fmtVol = (v) => {
-  const n = Number(v);
-  if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, "") + "M";
-  if (n >= 1000)    return (n / 1000).toFixed(1).replace(/\.0$/, "") + "K";
-  return String(Math.round(n));
+  const n = Math.abs(Number(v));
+  if (n >= 1e6) return (Number(v) / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+  if (n >= 1e3) return (Number(v) / 1e3).toFixed(1).replace(/\.0$/, "") + "K";
+  return String(Math.round(Number(v)));
 };
 
 const toMs   = (t) => (t != null && t < 1e12 ? t * 1000 : t);
@@ -103,6 +103,8 @@ function buildMerged(candles, toChartTime) {
       prev.delta    = (prev.delta    ?? 0) + (c.delta    ?? 0);
       prev.buy_vol  = (prev.buy_vol  ?? 0) + (c.buy_vol  ?? 0);
       prev.sell_vol = (prev.sell_vol ?? 0) + (c.sell_vol ?? 0);
+      // OI: take the latest (last candle's value), not sum
+      if ((c.oi ?? 0) > 0) { prev.oi = c.oi; prev.oi_change = (prev.oi_change ?? 0) + (c.oi_change ?? 0); }
     }
   });
   return Array.from(byTime.values()).sort((a, b) => a.chartTime - b.chartTime);
@@ -110,13 +112,15 @@ function buildMerged(candles, toChartTime) {
 
 /* Width (px) of the fixed row-label column inside the delta panel */
 const LABEL_COL_W = 42;
-/* Height (px) of the delta panel */
-const DELTA_PANEL_H = 72;
+/* Height (px) per row in the delta panel */
+const ROW_H_PX = 24;
 
 /* ════════════════════════════════════════════════════════
    COMPONENT
 ════════════════════════════════════════════════════════ */
-export default function OrderflowChart({ candles, symbol }) {
+export default function OrderflowChart({ candles, symbol, features = {} }) {
+  const showOI = features.showOI ?? true;
+
   const priceContainerRef = useRef(null);
   const priceChartRef     = useRef(null);
   const priceSeriesRef    = useRef(null);
@@ -142,7 +146,6 @@ export default function OrderflowChart({ candles, symbol }) {
     const H   = canvas.clientHeight;
     if (!W || !H) return;
 
-    /* Resize backing store only when needed (avoids flicker) */
     const tw = Math.round(W * dpr);
     const th = Math.round(H * dpr);
     if (canvas.width !== tw || canvas.height !== th) {
@@ -154,27 +157,23 @@ export default function OrderflowChart({ candles, symbol }) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
 
-    const ts    = chart.timeScale();
-    const ROW_H = H / 3;
+    const ts      = chart.timeScale();
+    const numRows = showOI ? 4 : 3;
+    const ROW_H   = H / numRows;
 
     /* Running CVD per bar */
     let runCvd = 0;
     const cvdArr = merged.map((c) => { runCvd += c.delta ?? 0; return runCvd; });
 
-    /* Visible logical index range */
     const range = ts.getVisibleLogicalRange();
     const iFrom = range ? Math.max(0, Math.floor(range.from)) : 0;
     const iTo   = range ? Math.min(merged.length - 1, Math.ceil(range.to)) : merged.length - 1;
 
-    /* Estimate half-bar-width from the spacing between two adjacent visible bars */
     let halfW = 18;
     for (let k = iFrom; k < Math.min(iTo, iFrom + 8); k++) {
       const xa = ts.timeToCoordinate(merged[k].chartTime);
       const xb = ts.timeToCoordinate(merged[k + 1]?.chartTime);
-      if (xa != null && xb != null && xb > xa) {
-        halfW = (xb - xa) * 0.42;
-        break;
-      }
+      if (xa != null && xb != null && xb > xa) { halfW = (xb - xa) * 0.42; break; }
     }
     halfW = Math.max(halfW, 5);
 
@@ -183,40 +182,56 @@ export default function OrderflowChart({ candles, symbol }) {
     ctx.textAlign    = "center";
     ctx.textBaseline = "middle";
 
+    /* row dividers */
+    ctx.strokeStyle = "rgba(0,0,0,0.07)"; ctx.lineWidth = 0.5;
+    for (let r = 1; r < numRows; r++) {
+      ctx.beginPath(); ctx.moveTo(0, ROW_H * r); ctx.lineTo(W, ROW_H * r); ctx.stroke();
+    }
+
     for (let i = iFrom; i <= iTo; i++) {
       const c      = merged[i];
       const chartX = ts.timeToCoordinate(c.chartTime);
       if (chartX == null) continue;
 
-      /* Translate from chart-space to canvas-space (canvas starts after label col) */
       const cx = chartX - LABEL_COL_W;
       const bx = cx - halfW + 1;
       const bw = halfW * 2 - 2;
       if (bx + bw < 0 || bx > W) continue;
 
-      const delta = c.delta ?? 0;
-      const cvd   = cvdArr[i];
-      const vol   = (c.buy_vol ?? 0) + (c.sell_vol ?? 0);
+      const delta    = c.delta ?? 0;
+      const cvd      = cvdArr[i];
+      const vol      = (c.buy_vol ?? 0) + (c.sell_vol ?? 0);
+      const oi       = c.oi ?? 0;
+      const oiChange = c.oi_change ?? 0;
 
-      /* ── Row 0: Tick Delta ── */
-      ctx.fillStyle = delta >= 0 ? "rgba(7, 156, 84, 0.62)" : "rgba(255, 70, 70, 0.6)";
+      /* Row 0: Tick Delta */
+      ctx.fillStyle = delta >= 0 ? "rgba(7,156,84,0.62)" : "rgba(255,70,70,0.6)";
       ctx.fillRect(bx, 2, bw, ROW_H - 4);
       ctx.fillStyle = delta >= 0 ? "#00d26e" : "#ff4646";
       ctx.fillText(fmtVol(delta), cx, ROW_H * 0.5);
 
-      /* ── Row 1: Cumulative Delta (CVD) ── */
-      ctx.fillStyle = cvd >= 0 ? "rgba(7, 156, 84, 0.62)" : "rgba(255, 70, 70, 0.6)";
+      /* Row 1: CVD */
+      ctx.fillStyle = cvd >= 0 ? "rgba(7,156,84,0.62)" : "rgba(255,70,70,0.6)";
       ctx.fillRect(bx, ROW_H + 2, bw, ROW_H - 4);
       ctx.fillStyle = cvd >= 0 ? "#00d26e" : "#ff4646";
       ctx.fillText(fmtVol(cvd), cx, ROW_H * 1.5);
 
-      /* ── Row 2: Total Volume ── */
-      ctx.fillStyle = "rgba(184, 191, 201, 0.8)";
+      /* Row 2: Volume */
+      ctx.fillStyle = "rgba(184,191,201,0.8)";
       ctx.fillRect(bx, ROW_H * 2 + 2, bw, ROW_H - 4);
       ctx.fillStyle = "#94a3b8";
       ctx.fillText(fmtVol(vol), cx, ROW_H * 2.5);
+
+      /* Row 3: OI (optional) */
+      if (showOI) {
+        const oiColor = oiChange >= 0 ? "rgba(7,156,84,0.5)" : "rgba(255,70,70,0.45)";
+        ctx.fillStyle = oiColor;
+        ctx.fillRect(bx, ROW_H * 3 + 2, bw, ROW_H - 4);
+        ctx.fillStyle = oiChange >= 0 ? "#00b894" : "#ff6b6b";
+        ctx.fillText(oi > 0 ? fmtVol(oi) : "—", cx, ROW_H * 3.5);
+      }
     }
-  }, []);
+  }, [showOI]);
 
   const scheduleDrawDelta = useCallback(() => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -360,11 +375,12 @@ export default function OrderflowChart({ candles, symbol }) {
       <div ref={priceContainerRef} className="chart-pane chart-pane-price" />
 
       {/* ── Delta panel: fixed label column + pixel-aligned canvas ── */}
-      <div className="delta-panel">
+      <div className="delta-panel" style={{ height: (showOI ? 4 : 3) * ROW_H_PX }}>
         <div className="delta-panel-labels">
           <div>TICK Δ</div>
           <div>CVD</div>
           <div>VOL</div>
+          {showOI && <div>OI</div>}
         </div>
         <canvas ref={deltaCanvasRef} className="delta-panel-canvas" />
       </div>

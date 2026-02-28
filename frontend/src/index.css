@@ -523,6 +523,26 @@ html, body, #root {
 .cd-btn:hover { border-color: var(--accent); color: var(--accent); }
 .cd-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(14,165,233,0.12); }
 
+/* ── Feature toggle dropdown ── */
+.feat-menu-wrap { position: relative; margin-left: 6px; }
+.feat-btn { display: flex; align-items: center; gap: 4px; }
+.feat-dropdown {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 200;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  padding: 10px 14px; min-width: 200px;
+}
+.feat-dropdown-title {
+  font-size: 9px; font-weight: 700; letter-spacing: .12em;
+  color: var(--text-muted); margin-bottom: 8px; font-family: var(--font-display);
+}
+.feat-row {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px; color: var(--text); cursor: pointer;
+  padding: 4px 0; user-select: none;
+}
+.feat-row input[type="checkbox"] { accent-color: var(--accent); width: 13px; height: 13px; cursor: pointer; }
+
 /* ── Delta/CVD boxes below candles ── */
 .fp-delta-cvd-boxes {
   display: flex;

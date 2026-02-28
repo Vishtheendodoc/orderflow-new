@@ -111,6 +111,9 @@ class FootprintCandle:
     delta_max: float = 0.0    # max delta during candle (lowest possible = 0)
     # VR Trender: initiative (buy-initiated vs sell-initiated bar)
     initiative: Optional[str] = None  # "buy" | "sell" | None (neutral)
+    # Open Interest
+    oi: float = 0.0           # OI at close of candle (last tick's OI)
+    oi_change: float = 0.0    # OI this candle − OI previous candle
 
     @property
     def delta(self):
@@ -146,6 +149,8 @@ class FootprintCandle:
                 for p, lv in sorted(self.levels.items(), reverse=True)
             },
             "closed": self.closed,
+            "oi": self.oi,
+            "oi_change": self.oi_change,
         }
 
 
@@ -167,6 +172,7 @@ class OrderFlowEngine:
         self.prev_volume: float = 0.0  # For volume-delta logic (GoCharting-style)
         self.prev_total_buy: float = 0.0  # Cumulative buy from exchange
         self.prev_total_sell: float = 0.0  # Cumulative sell from exchange
+        self.last_oi: float = 0.0          # OI at close of most recent completed candle
 
     def _candle_start(self, ts_ms: int) -> int:
         """Floor timestamp to candle boundary."""
@@ -176,7 +182,8 @@ class OrderFlowEngine:
     def process_tick(self, ltp: float, bid: float, ask: float, vol: float, ts_ms: int,
                      cumulative_volume: Optional[float] = None,
                      total_buy_qty: Optional[float] = None,
-                     total_sell_qty: Optional[float] = None):
+                     total_sell_qty: Optional[float] = None,
+                     oi: Optional[float] = None):
         """
         Classify tick and update footprint.
         Uses TRADED volume only: volume-delta (cumulative_volume - prev) or LTQ.
@@ -243,6 +250,7 @@ class OrderFlowEngine:
                 self.candles.append(prev)
                 if len(self.candles) > MAX_CANDLES_PER_SYMBOL:
                     self.candles = self.candles[-MAX_CANDLES_PER_SYMBOL:]
+                self.last_oi = prev.oi  # carry forward OI baseline for next candle
             self.current_candle = FootprintCandle(
                 open_time=candle_ts,
                 open=ltp,
@@ -279,6 +287,11 @@ class OrderFlowEngine:
         d = c.delta
         c.delta_min = min(c.delta_min, d)
         c.delta_max = max(c.delta_max, d)
+
+        # Update OI on current candle
+        if oi is not None and oi > 0:
+            c.oi = oi
+            c.oi_change = oi - self.last_oi
 
         self.last_ltp = ltp
         self.last_bid = bid
@@ -444,6 +457,8 @@ def load_all_snapshots():
                     delta_min   = cd.get("delta_min", 0),
                     delta_max   = cd.get("delta_max", 0),
                     initiative  = cd.get("initiative"),
+                    oi          = cd.get("oi", 0),
+                    oi_change   = cd.get("oi_change", 0),
                     closed      = True,
                 )
                 for p_str, lv in cd.get("levels", {}).items():
@@ -638,6 +653,13 @@ def parse_dhan_binary(raw: bytes) -> Optional[dict]:
             offset += 4
             day_low = struct.unpack_from("<f", raw, offset)[0]
 
+            # OI field appears right after DayLow (offset 50) when packet is long enough
+            oi = None
+            if len(raw) >= 54:   # 50 (after header+data) + 4 bytes OI
+                raw_oi = struct.unpack_from("<I", raw, 50)[0]
+                if 0 < raw_oi <= 100_000_000:   # sanity: 0–100M is realistic for Indian markets
+                    oi = float(raw_oi)
+
             # Build a normalized dict
             return {
                 "type": "quote",
@@ -655,6 +677,7 @@ def parse_dhan_binary(raw: bytes) -> Optional[dict]:
                     "DayClose": float(day_close),
                     "DayHigh": float(day_high),
                     "DayLow": float(day_low),
+                    "openInterest": oi,
                 },
             }
 
@@ -703,10 +726,15 @@ async def handle_dhan_tick(msg: dict):
     if ltp <= 0:
         return
 
+    oi = data.get("openInterest")
+    if oi is not None:
+        oi = float(oi)
+
     engines[symbol].process_tick(ltp, bid, ask, ltq, ts,
                                  cumulative_volume=cumulative_vol,
                                  total_buy_qty=total_buy,
-                                 total_sell_qty=total_sell)
+                                 total_sell_qty=total_sell,
+                                 oi=oi)
 
     # Rate-limit broadcasts per symbol to avoid event-loop saturation.
     # All ticks are processed in memory; clients receive latest state at most
