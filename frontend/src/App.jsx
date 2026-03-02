@@ -336,19 +336,23 @@ function SubscribePanel({ onSubscribe, activeSymbols }) {
   const searchRef = useRef(null);
 
   useEffect(() => {
-    const base = (typeof API_URL !== "undefined" ? API_URL : "") || window.location.origin;
-    fetch(`${base}/api/symbols`)
-      .then((r) => r.json())
-      .then((rows) => {
-        if (!Array.isArray(rows)) return;
+    fetch("/stock_list.csv")
+      .then((r) => r.text())
+      .then((text) => {
+        const rows = parseCSV(text);
         setAllInstruments(rows);
+
+        // Default each base to first expiry found (closest = lowest alphabetically in context)
         const defaults = {};
         rows.forEach((r) => {
           const base = getBaseName(r.symbol);
           const exp = getExpiry(r.symbol);
           if (!defaults[base]) defaults[base] = exp;
-          else if (EXPIRY_ORDER.indexOf(exp) < EXPIRY_ORDER.indexOf(defaults[base]))
-            defaults[base] = exp;
+          else {
+            // prefer earlier expiry
+            if (EXPIRY_ORDER.indexOf(exp) < EXPIRY_ORDER.indexOf(defaults[base]))
+              defaults[base] = exp;
+          }
         });
         setSelectedExpiry(defaults);
         setLoading(false);
@@ -608,8 +612,6 @@ export default function App() {
   const [symbolExchangeMap, setSymbolExchangeMap] = useState({}); // symbol -> exchange
   const wsRef = useRef(null);
   const pingRef = useRef(null);
-  const lastMessageRef = useRef(Date.now());
-  const staleCheckRef = useRef(null);
   /* ── Feature toggles ── */
   const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true });
   const [featMenuOpen, setFeatMenuOpen] = useState(false);
@@ -636,28 +638,6 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  /* Auto-subscribe: run when WebSocket connects (ensures backend is up) and pre-populate activeSymbols */
-  const runAutoSubscribe = useCallback(async () => {
-    const base = API_URL || window.location.origin;
-    try {
-      const r = await fetch(`${base}/api/symbols`);
-      const instruments = await r.json();
-      if (!Array.isArray(instruments) || instruments.length === 0) return;
-      const sub = await fetch(`${base}/api/subscribe/batch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ instruments }),
-      });
-      if (sub.ok) {
-        const d = await sub.json();
-        const symbols = instruments.map((i) => (i.symbol || "").toUpperCase()).filter(Boolean);
-        setActiveSymbols((prev) => [...new Set([...prev, ...symbols])]);
-        setActiveSymbol((cur) => cur || symbols[0] || null);
-        console.log("Auto-subscribed:", d?.subscribed ?? symbols.length, "of", d?.total ?? symbols.length, "instruments");
-      }
-    } catch (_) {}
-  }, []);
-
   /* auto-subscribe when opened via ⧉ new-tab link */
   useEffect(() => {
     if (!urlSymbol) return;
@@ -669,78 +649,44 @@ export default function App() {
   }, [urlSymbol]);
 
   const connect = useCallback(() => {
-    // Close any existing connection so we don't accumulate sockets
-    if (wsRef.current) {
-      try {
-        wsRef.current.onclose = null;
-        wsRef.current.onerror = null;
-        wsRef.current.onmessage = null;
-        wsRef.current.close();
-      } catch (_) {}
-      wsRef.current = null;
-    }
-    clearInterval(staleCheckRef.current);
-    staleCheckRef.current = null;
-
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
 
     ws.onopen = () => {
-      lastMessageRef.current = Date.now();
       setWsStatus("connected");
-      runAutoSubscribe();
       pingRef.current = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "ping" }));
         }
       }, 15000);
-      // If no message (orderflow or pong) for 50s, connection is likely dead — force reconnect
-      staleCheckRef.current = setInterval(() => {
-        if (Date.now() - lastMessageRef.current > 50000) {
-          ws.close();
-        }
-      }, 15000);
     };
 
     ws.onmessage = (e) => {
-      lastMessageRef.current = Date.now();
-      try {
-        const msg = JSON.parse(e.data);
-        if (msg.type === "orderflow") {
-          const d = msg.data;
-          setFlows((prev) => ({ ...prev, [d.symbol]: d }));
-          setActiveSymbol((cur) => cur || d.symbol);
-          setActiveSymbols((prev) =>
-            prev.includes(d.symbol) ? prev : [...prev, d.symbol]
-          );
-        }
-        // pong and other types ignored (heartbeat keeps connection alive)
-      } catch (_) {
-        // Bad message — don't break the handler
+      const msg = JSON.parse(e.data);
+      if (msg.type === "orderflow") {
+        const d = msg.data;
+        setFlows((prev) => ({ ...prev, [d.symbol]: d }));
+        setActiveSymbol((cur) => cur || d.symbol);
+        setActiveSymbols((prev) =>
+          prev.includes(d.symbol) ? prev : [...prev, d.symbol]
+        );
       }
     };
 
     ws.onclose = () => {
       setWsStatus("reconnecting");
       clearInterval(pingRef.current);
-      clearInterval(staleCheckRef.current);
-      staleCheckRef.current = null;
-      wsRef.current = null;
       setTimeout(connect, 3000);
     };
 
     ws.onerror = () => ws.close();
-  }, [runAutoSubscribe]);
+  }, []);
 
   useEffect(() => {
     connect();
     return () => {
       clearInterval(pingRef.current);
-      clearInterval(staleCheckRef.current);
-      if (wsRef.current) {
-        try { wsRef.current.close(); } catch (_) {}
-        wsRef.current = null;
-      }
+      wsRef.current?.close();
     };
   }, [connect]);
 
@@ -801,7 +747,7 @@ export default function App() {
           <span className="logo-sub logo-sub-desktop">ENGINE</span>
         </div>
         <div className="header-center">
-          {[...new Set([...activeSymbols, ...Object.keys(flows)])].sort().map((sym) => (
+          {Object.keys(flows).map((sym) => (
             <button
               key={sym}
               className={`tab ${activeSymbol === sym ? "tab-active" : ""}`}
@@ -845,7 +791,7 @@ export default function App() {
             <>
               <div className="chart-toolbar">
                 <InstrumentSelector
-                  symbols={[...new Set([...activeSymbols, ...Object.keys(flows)])].sort()}
+                  symbols={Object.keys(flows)}
                   value={activeSymbol}
                   onChange={setActiveSymbol}
                 />
@@ -955,20 +901,11 @@ export default function App() {
               ) : null}
             </>
           ) : activeSymbol && !flows[activeSymbol] ? (
-            <>
-              <div className="chart-toolbar">
-                <InstrumentSelector
-                  symbols={[...new Set([...activeSymbols, ...Object.keys(flows)])].sort()}
-                  value={activeSymbol}
-                  onChange={setActiveSymbol}
-                />
-              </div>
-              <div className="empty-state loading-state">
-                <div className="empty-icon">⬡</div>
-                <div>Loading {activeSymbol}…</div>
-                <div className="empty-sub">Waiting for first data from feed</div>
-              </div>
-            </>
+            <div className="empty-state loading-state">
+              <div className="empty-icon">⬡</div>
+              <div>Loading {activeSymbol}…</div>
+              <div className="empty-sub">Waiting for first data from feed</div>
+            </div>
           ) : (
             <div className="empty-state">
               <div className="empty-icon">⬡</div>

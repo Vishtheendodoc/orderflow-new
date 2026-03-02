@@ -77,9 +77,6 @@ HEATMAP_SNAPSHOTS   = int(os.getenv("HEATMAP_SNAPSHOTS", "300"))   # rolling sna
 # ── Options GEX ──────────────────────────────────────────────────────────────
 DHAN_TOKEN_OPTIONS  = os.getenv("DHAN_TOKEN_OPTIONS", "")
 OPTIONS_POLL_SEC    = float(os.getenv("OPTIONS_POLL_SEC", "300"))         # poll every 5 min (4 indices × 300s = well within rate limit)
-# ── OI poller (Dhan Market Quote API) ───────────────────────────────────────
-# WebSocket tick feed may not include OI; REST /marketfeed/quote returns OI for derivatives.
-OI_POLL_SEC = float(os.getenv("OI_POLL_SEC", "10"))   # poll OI every 10s (rate limit 1 req/sec)
 # Underlying security IDs (NSE index) used for options chain
 UNDERLYING_IDS = {
     "NIFTY":      "13",
@@ -319,15 +316,9 @@ class OrderFlowEngine:
             c.oi_change = oi - self.last_oi
 
         self.last_ltp = ltp
-
-    def update_oi(self, oi: float):
-        """Update OI on current candle from REST quote API (e.g. Dhan /marketfeed/quote)."""
-        if oi is None or oi <= 0:
-            return
-        c = self.current_candle
-        if c:
-            c.oi = oi
-            c.oi_change = oi - self.last_oi
+        self.last_bid = bid
+        self.last_ask = ask
+        self.tick_count += 1
 
     def get_state(self, limit: Optional[int] = None) -> dict:
         """Return current state for broadcast. limit caps candles sent (avoids WebSocket payload limits)."""
@@ -373,7 +364,6 @@ _last_broadcast: Dict[str, float] = {}
 # Token expiry / reconnect state
 _dhan_reconnect_delay: int = 5          # seconds; doubles on auth failure, resets on success
 _dhan_token_event: asyncio.Event = asyncio.Event()  # set when token is updated via API
-_dhan_ws = None  # Current Dhan WebSocket connection (for re-subscribing when batch-add)
 
 # ── Heatmap: rolling order-book snapshots ────────────────────────────────────
 # symbol → deque of {ts, ltp, bids:[{p,q}], asks:[{p,q}]}
@@ -400,33 +390,29 @@ def _ist_date_str() -> str:
 
 
 def _do_daily_reset():
-    """Reset all engines for new trading day. Clears candles, CVD, preserves subscriptions.
-    Only clears when we cross IST midnight. On startup (_last_reset_date is None), we skip
-    clear/delete so load_all_snapshots can restore from disk."""
+    """Reset all engines for new trading day. Clears candles, CVD, preserves subscriptions."""
     global _last_reset_date
     today = _ist_date_str()
     if _last_reset_date == today:
         return
-    # Only clear/delete when we actually crossed midnight (not on first run)
-    if _last_reset_date is not None:
-        for eng in engines.values():
-            eng.candles.clear()
-            eng.current_candle = None
-            eng.cvd = 0.0
-            eng.prev_volume = 0.0
-            eng.prev_total_buy = 0.0
-            eng.prev_total_sell = 0.0
-        # Wipe yesterday's snapshot files so they don't get reloaded
-        if os.path.isdir(SNAPSHOT_DIR):
-            for fname in os.listdir(SNAPSHOT_DIR):
-                if fname.endswith(".json"):
-                    try:
-                        os.remove(os.path.join(SNAPSHOT_DIR, fname))
-                    except Exception:
-                        pass
-        gc.collect()
-        logger.info(f"Daily reset at IST midnight. Date: {today}. Engines + snapshots cleared.")
     _last_reset_date = today
+    for eng in engines.values():
+        eng.candles.clear()
+        eng.current_candle = None
+        eng.cvd = 0.0
+        eng.prev_volume = 0.0
+        eng.prev_total_buy = 0.0
+        eng.prev_total_sell = 0.0
+    # Also wipe yesterday's snapshot files so they don't get reloaded next restart
+    if os.path.isdir(SNAPSHOT_DIR):
+        for fname in os.listdir(SNAPSHOT_DIR):
+            if fname.endswith(".json"):
+                try:
+                    os.remove(os.path.join(SNAPSHOT_DIR, fname))
+                except Exception:
+                    pass
+    gc.collect()
+    logger.info(f"Daily reset at IST midnight. Date: {today}. Engines + snapshots cleared.")
 
 
 async def _daily_reset_task():
@@ -476,10 +462,9 @@ def load_all_snapshots():
         return
     today_start = _ist_midnight_ms()
     loaded = 0
-    files = [f for f in os.listdir(SNAPSHOT_DIR) if f.endswith(".json")]
-    if not files:
-        logger.info(f"No snapshot files in {SNAPSHOT_DIR} — run from market open (9:15 IST) to accumulate data")
-    for fname in files:
+    for fname in os.listdir(SNAPSHOT_DIR):
+        if not fname.endswith(".json"):
+            continue
         symbol = fname[:-5]
         if symbol not in engines:
             continue
@@ -526,20 +511,17 @@ def load_all_snapshots():
         except Exception as e:
             logger.warning(f"Snapshot load failed [{symbol}]: {e}")
     logger.info(f"Snapshot restore complete: {loaded} symbols loaded from {SNAPSHOT_DIR}")
-    if loaded == 0 and files:
-        logger.info("No symbols matched engines — check that stock_list.csv includes symbols with snapshot files")
 
 
 async def _snapshot_task():
-    """Background task: save all symbols to disk. First save after 60s, then every 5 min."""
-    await asyncio.sleep(60)   # First snapshot after 1 min (persist data quickly after startup)
+    """Background task: save all symbols to disk every 5 minutes."""
     while True:
+        await asyncio.sleep(300)
         syms = list(engines.keys())
         for sym in syms:
             save_symbol_snapshot(sym)
         if syms:
             logger.info(f"Periodic snapshot saved for {len(syms)} symbols")
-        await asyncio.sleep(300)
 
 
 # ─────────────────────────────────────────────
@@ -649,71 +631,6 @@ def _parse_depth_message(msg) -> Optional[dict]:
         "bids":   norm(raw_bids),
         "asks":   norm(raw_asks),
     }
-
-
-async def oi_poller_task():
-    """Poll Dhan /marketfeed/quote for OI (Open Interest). WebSocket tick feed often omits OI;
-    REST Quote API returns oi for derivatives. Docs: https://dhanhq.co/docs/v2/market-quote/"""
-    if not DHAN_ACCESS_TOKEN or not DHAN_CLIENT_ID:
-        return
-    logger.info(f"Starting OI poller (interval={OI_POLL_SEC}s, Dhan /marketfeed/quote)")
-    url = f"{DHAN_API_BASE}/marketfeed/quote"
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "access-token": DHAN_ACCESS_TOKEN,
-        "client-id": DHAN_CLIENT_ID,
-    }
-    while True:
-        await asyncio.sleep(OI_POLL_SEC)
-        if not subscribed_symbols:
-            continue
-        # Group by exchange_segment. Dhan Market Quote API uses NSE_FNO (not NSE_FO).
-        by_seg = defaultdict(list)
-        sid_to_symbol = {}
-        SEG_NORMALIZE = {"NSE_FO": "NSE_FNO"}  # Dhan REST API expects NSE_FNO
-        for symbol, info in subscribed_symbols.items():
-            seg = info.get("exchange_segment", "NSE_FO")
-            seg = SEG_NORMALIZE.get(seg, seg)
-            sid = str(info.get("security_id", ""))
-            if sid and symbol in engines:
-                by_seg[seg].append(sid)
-                sid_to_symbol[sid] = symbol
-        if not by_seg:
-            continue
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            for seg, sids in by_seg.items():
-                try:
-                    body = {seg: [int(s) for s in sids if s.isdigit()]}
-                    if not body[seg]:
-                        continue
-                    resp = await client.post(url, headers=headers, json=body)
-                    if resp.status_code != 200:
-                        continue
-                    data = resp.json()
-                    seg_data = (data.get("data") or {}).get(seg) or {}
-                    updated = []
-                    for sid_str, quote in seg_data.items():
-                        oi_val = quote.get("oi")
-                        symbol = sid_to_symbol.get(sid_str) if isinstance(sid_str, str) else sid_to_symbol.get(str(sid_str))
-                        if oi_val is not None and symbol:
-                            engine = engines.get(symbol)
-                            if engine:
-                                try:
-                                    oi = float(oi_val)
-                                    if oi > 0:
-                                        engine.update_oi(oi)
-                                        updated.append(symbol)
-                                except (TypeError, ValueError):
-                                    pass
-                    for sym in updated:
-                        now = time.monotonic()
-                        if now - _last_broadcast.get(sym, 0) >= BROADCAST_MIN_INTERVAL:
-                            _last_broadcast[sym] = now
-                            await broadcast_state(sym)
-                except Exception as e:
-                    logger.warning(f"OI poll error [{seg}]: {e}")
-                await asyncio.sleep(1.1)   # Dhan rate limit: 1 req/sec
 
 
 async def depth_poller_task():
@@ -991,8 +908,6 @@ async def dhan_feed_task():
 
         try:
             async with websockets.connect(url, ping_interval=20) as ws:
-                global _dhan_ws
-                _dhan_ws = ws
                 _dhan_reconnect_delay = 5          # reset backoff on successful connect
                 logger.info("Connected to Dhan WebSocket (v2)")
 
@@ -1010,22 +925,19 @@ async def dhan_feed_task():
                     }))
                     await asyncio.sleep(0.1)
 
-                try:
-                    async for raw in ws:
-                        try:
-                            if isinstance(raw, (bytes, bytearray)):
-                                parsed = parse_dhan_binary(raw)
-                                if parsed:
-                                    await handle_dhan_tick(parsed)
-                            else:
-                                try:
-                                    await handle_dhan_tick(json.loads(raw))
-                                except Exception:
-                                    pass
-                        except Exception as e:
-                            logger.error(f"Tick parse error: {e}")
-                finally:
-                    _dhan_ws = None
+                async for raw in ws:
+                    try:
+                        if isinstance(raw, (bytes, bytearray)):
+                            parsed = parse_dhan_binary(raw)
+                            if parsed:
+                                await handle_dhan_tick(parsed)
+                        else:
+                            try:
+                                await handle_dhan_tick(json.loads(raw))
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        logger.error(f"Tick parse error: {e}")
 
         except Exception as e:
             if _is_auth_error(e):
@@ -1250,7 +1162,7 @@ async def broadcast_state(symbol: str):
     msg = json.dumps({"type": "orderflow", "data": state})
 
     dead = set()
-    for ws in list(connected_clients):  # copy to avoid "Set changed size during iteration"
+    for ws in connected_clients:
         try:
             await ws.send_text(msg)
         except Exception:
@@ -1468,49 +1380,6 @@ async def subscribe(payload: dict):
     return {"status": "subscribed", "symbol": symbol}
 
 
-@app.post("/api/subscribe/batch")
-async def subscribe_batch(payload: dict):
-    """Subscribe to multiple symbols. payload: { instruments: [{symbol, security_id, exchange?, segment?}, ...] }"""
-    instruments = payload.get("instruments", [])
-    if not isinstance(instruments, list):
-        raise HTTPException(400, "instruments must be an array")
-    added = []
-    new_instruments_for_dhan = []  # {ExchangeSegment, SecurityId} for Dhan re-subscribe
-    for item in instruments:
-        if not isinstance(item, dict):
-            continue
-        symbol = (item.get("symbol") or "").upper()
-        security_id = str(item.get("security_id", ""))
-        if not symbol or not security_id:
-            continue
-        if symbol not in engines and len(engines) >= MAX_ENGINES:
-            logger.warning(f"Batch subscribe: max symbols ({MAX_ENGINES}) reached, skipping {symbol}")
-            continue
-        exchange_segment = _resolve_exchange_segment(item)
-        subscribed_symbols[symbol] = {"security_id": security_id, "exchange_segment": exchange_segment}
-        if symbol not in engines:
-            engines[symbol] = OrderFlowEngine(symbol, security_id)
-            added.append(symbol)
-            new_instruments_for_dhan.append({"ExchangeSegment": exchange_segment, "SecurityId": security_id})
-    if added:
-        logger.info(f"Batch subscribe: added {len(added)} instruments (total {len(engines)})")
-        # Re-subscribe to Dhan for new symbols if connection is active
-        if new_instruments_for_dhan and _dhan_ws is not None:
-            try:
-                for i in range(0, len(new_instruments_for_dhan), 100):
-                    batch = new_instruments_for_dhan[i : i + 100]
-                    await _dhan_ws.send(json.dumps({
-                        "RequestCode": 17,
-                        "InstrumentCount": len(batch),
-                        "InstrumentList": batch,
-                    }))
-                    await asyncio.sleep(0.05)
-                logger.info(f"Dhan re-subscribed to {len(new_instruments_for_dhan)} new instruments")
-            except Exception as e:
-                logger.warning(f"Dhan re-subscribe failed (will retry on next connect): {e}")
-    return {"status": "ok", "subscribed": len(added), "total": len(engines)}
-
-
 @app.delete("/api/subscribe/{symbol}")
 async def unsubscribe(symbol: str):
     symbol = symbol.upper()
@@ -1570,14 +1439,11 @@ async def websocket_endpoint(ws: WebSocket):
             await asyncio.sleep(0.02)  # 20ms between messages so client can process
 
         while True:
-            # Keep alive / handle client messages (ignore bad messages so one doesn't drop the client)
+            # Keep alive / handle client messages
             msg = await ws.receive_text()
-            try:
-                data = json.loads(msg)
-                if data.get("type") == "ping":
-                    await ws.send_text(json.dumps({"type": "pong"}))
-            except (json.JSONDecodeError, TypeError):
-                pass
+            data = json.loads(msg)
+            if data.get("type") == "ping":
+                await ws.send_text(json.dumps({"type": "pong"}))
 
     except WebSocketDisconnect:
         pass
@@ -1635,20 +1501,10 @@ async def startup():
 
     auto_subscribe_from_csv()
     _do_daily_reset()       # sets _last_reset_date = today; clears stale state
-    # Retry snapshot load (Render disk mount can be delayed a few seconds)
-    for attempt in range(2):
-        if os.path.isdir(SNAPSHOT_DIR):
-            load_all_snapshots()
-            break
-        if attempt == 0:
-            logger.info("Snapshot dir not found, retrying in 5s (disk mount may be delayed)...")
-            await asyncio.sleep(5)
-    else:
-        logger.info("Snapshot dir not found after retry — starting with empty history (ensure Render Disk is mounted at /data)")
+    load_all_snapshots()    # restore today's candles from disk (no-op if no disk mounted)
     asyncio.create_task(dhan_feed_task())
     asyncio.create_task(_daily_reset_task())
     asyncio.create_task(_snapshot_task())
-    asyncio.create_task(oi_poller_task())
     asyncio.create_task(depth_poller_task())
     asyncio.create_task(options_poller_task())
     logger.info("OrderFlow Engine started (daily reset at IST midnight, disk snapshots every 5 min)")
