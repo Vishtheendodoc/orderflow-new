@@ -328,9 +328,6 @@ class OrderFlowEngine:
         if c:
             c.oi = oi
             c.oi_change = oi - self.last_oi
-        self.last_bid = bid
-        self.last_ask = ask
-        self.tick_count += 1
 
     def get_state(self, limit: Optional[int] = None) -> dict:
         """Return current state for broadcast. limit caps candles sent (avoids WebSocket payload limits)."""
@@ -1251,7 +1248,7 @@ async def broadcast_state(symbol: str):
     msg = json.dumps({"type": "orderflow", "data": state})
 
     dead = set()
-    for ws in connected_clients:
+    for ws in list(connected_clients):  # copy to avoid "Set changed size during iteration"
         try:
             await ws.send_text(msg)
         except Exception:
