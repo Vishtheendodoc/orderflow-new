@@ -610,8 +610,11 @@ export default function App() {
   const [isDemo, setIsDemo] = useState(false);
   const [activeSymbols, setActiveSymbols] = useState(urlSymbol ? [urlSymbol] : []);
   const [symbolExchangeMap, setSymbolExchangeMap] = useState({}); // symbol -> exchange
+  const [allSymbols, setAllSymbols] = useState([]); // all symbols available on backend
   const wsRef = useRef(null);
   const pingRef = useRef(null);
+  const lastMsgRef = useRef(Date.now());
+  const staleTimerRef = useRef(null);
   /* ── Feature toggles ── */
   const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true });
   const [featMenuOpen, setFeatMenuOpen] = useState(false);
@@ -631,51 +634,75 @@ export default function App() {
     };
   }, [featMenuOpen]);
 
+  // Fetch backend instrument list once on mount (dropdown population only — no subscribe API calls)
   useEffect(() => {
-    fetch(`${API_URL}/api/health`)
+    const base = API_URL || window.location.origin;
+    fetch(`${base}/api/symbols`)
+      .then((r) => r.json())
+      .then((list) => {
+        if (Array.isArray(list)) {
+          setAllSymbols(list.map((i) => i.symbol || i).filter(Boolean));
+          const map = {};
+          list.forEach((i) => { if (i.symbol) map[i.symbol] = i.exchange || "NSE"; });
+          setSymbolExchangeMap((prev) => ({ ...map, ...prev }));
+        }
+      })
+      .catch(() => {});
+    fetch(`${base}/api/health`)
       .then((r) => r.json())
       .then((d) => setIsDemo(d.demo))
       .catch(() => {});
   }, []);
 
-  /* auto-subscribe when opened via ⧉ new-tab link */
-  useEffect(() => {
-    if (!urlSymbol) return;
-    fetch(`${API_URL}/api/subscribe`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ symbol: urlSymbol }),
-    }).catch(() => {});
-  }, [urlSymbol]);
-
   const connect = useCallback(() => {
+    // Close any stale socket first
+    clearInterval(staleTimerRef.current);
+    staleTimerRef.current = null;
+    if (wsRef.current) {
+      try {
+        const old = wsRef.current;
+        old.onopen = null; old.onmessage = null; old.onclose = null; old.onerror = null;
+        old.close();
+      } catch (_) {}
+      wsRef.current = null;
+    }
+
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
 
     ws.onopen = () => {
+      lastMsgRef.current = Date.now();
       setWsStatus("connected");
       pingRef.current = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "ping" }));
-        }
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "ping" }));
+      }, 15000);
+      // Force reconnect if no data for 50s (handles silent proxy/server drops)
+      staleTimerRef.current = setInterval(() => {
+        if (Date.now() - lastMsgRef.current > 50000) ws.close();
       }, 15000);
     };
 
     ws.onmessage = (e) => {
-      const msg = JSON.parse(e.data);
-      if (msg.type === "orderflow") {
-        const d = msg.data;
-        setFlows((prev) => ({ ...prev, [d.symbol]: d }));
-        setActiveSymbol((cur) => cur || d.symbol);
-        setActiveSymbols((prev) =>
-          prev.includes(d.symbol) ? prev : [...prev, d.symbol]
-        );
-      }
+      lastMsgRef.current = Date.now();
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === "orderflow") {
+          const d = msg.data;
+          setFlows((prev) => ({ ...prev, [d.symbol]: d }));
+          setActiveSymbol((cur) => cur || d.symbol);
+          setActiveSymbols((prev) =>
+            prev.includes(d.symbol) ? prev : [...prev, d.symbol]
+          );
+        }
+      } catch (_) {}
     };
 
     ws.onclose = () => {
       setWsStatus("reconnecting");
       clearInterval(pingRef.current);
+      clearInterval(staleTimerRef.current);
+      staleTimerRef.current = null;
+      wsRef.current = null;
       setTimeout(connect, 3000);
     };
 
@@ -686,7 +713,8 @@ export default function App() {
     connect();
     return () => {
       clearInterval(pingRef.current);
-      wsRef.current?.close();
+      clearInterval(staleTimerRef.current);
+      try { wsRef.current?.close(); } catch (_) {}
     };
   }, [connect]);
 
@@ -756,6 +784,10 @@ export default function App() {
               {sym}
             </button>
           ))}
+          {/* Show placeholder when no data yet */}
+          {Object.keys(flows).length === 0 && wsStatus === "connected" && (
+            <span style={{ fontSize: 12, opacity: 0.5, padding: "0 8px" }}>Loading data…</span>
+          )}
         </div>
         <div className={`ws-indicator ${wsStatus}`}>
           <span className="ws-dot" />
@@ -791,7 +823,7 @@ export default function App() {
             <>
               <div className="chart-toolbar">
                 <InstrumentSelector
-                  symbols={Object.keys(flows)}
+                  symbols={[...new Set([...allSymbols, ...Object.keys(flows)])].sort()}
                   value={activeSymbol}
                   onChange={setActiveSymbol}
                 />
@@ -900,12 +932,21 @@ export default function App() {
                 </div>
               ) : null}
             </>
-          ) : activeSymbol && !flows[activeSymbol] ? (
-            <div className="empty-state loading-state">
-              <div className="empty-icon">⬡</div>
-              <div>Loading {activeSymbol}…</div>
-              <div className="empty-sub">Waiting for first data from feed</div>
-            </div>
+          ) : (activeSymbol || allSymbols.length > 0) && !flows[activeSymbol] ? (
+            <>
+              <div className="chart-toolbar">
+                <InstrumentSelector
+                  symbols={[...new Set([...allSymbols, ...Object.keys(flows)])].sort()}
+                  value={activeSymbol}
+                  onChange={setActiveSymbol}
+                />
+              </div>
+              <div className="empty-state loading-state">
+                <div className="empty-icon">⬡</div>
+                <div>{activeSymbol ? `Loading ${activeSymbol}…` : "Select an instrument above"}</div>
+                <div className="empty-sub">Use the dropdown to pick any instrument</div>
+              </div>
+            </>
           ) : (
             <div className="empty-state">
               <div className="empty-icon">⬡</div>

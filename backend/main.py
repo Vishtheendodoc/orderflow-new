@@ -570,140 +570,121 @@ def _sid_to_symbol(sid: str) -> Optional[str]:
     return None
 
 
-def _parse_depth_message(msg) -> Optional[dict]:
+def _parse_binary_depth(raw: bytes, symbol: str) -> None:
+    """Parse 200-level binary depth packet from Dhan full-depth feed.
+
+    Per Dhan docs:
+      Response Header (12 bytes, 1-indexed so 0-indexed = 0–11):
+        bytes 0–1  : int16  message length
+        byte  2    : byte   feed response code (41=Bid, 51=Ask, 50=disconnect)
+        byte  3    : byte   exchange segment
+        bytes 4–7  : int32  security ID
+        bytes 8–11 : uint32 number of rows
+
+      Depth payload: num_rows × 16 bytes each
+        bytes 0–7  : float64  price
+        bytes 8–11 : uint32   quantity
+        bytes 12–15: uint32   number of orders
+
+    Bid and Ask packets are stacked; we accumulate until we have both then snapshot.
     """
-    Parse one depth message from the 200-level WebSocket.
+    pending_bids: list = []
+    pending_asks: list = []
+    pos = 0
+    while pos + 12 <= len(raw):
+        msg_len  = struct.unpack_from("<H", raw, pos)[0]
+        code     = struct.unpack_from("<B", raw, pos + 2)[0]
+        num_rows = struct.unpack_from("<I", raw, pos + 8)[0]
+        payload_start = pos + 12
+        levels = []
+        for i in range(num_rows):
+            off = payload_start + i * 16
+            if off + 16 > len(raw):
+                break
+            price  = struct.unpack_from("<d", raw, off)[0]      # float64
+            qty    = struct.unpack_from("<I", raw, off + 8)[0]  # uint32
+            if price > 0:
+                levels.append({"p": round(price, 2), "q": qty})
+        if code == 41:   # Bid
+            pending_bids = levels
+        elif code == 51:  # Ask
+            pending_asks = levels
+        # Advance; if msg_len == 0 (malformed), stop
+        step = msg_len if msg_len >= 12 else (12 + num_rows * 16)
+        pos += step
+        if step == 0:
+            break
 
-    Dhan sends JSON messages.  Two observed shapes:
-      Shape A (full depth list):
-        {
-          "type": "depth",
-          "securityId": "49081",
-          "ltp": 24520.0,
-          "bids": [{"price": 24519, "quantity": 150}, ...],   # up to 200 levels
-          "asks": [{"price": 24521, "quantity": 100}, ...]
-        }
-      Shape B (flat keys):
-        {
-          "securityId": "49081",
-          "LTP": 24520.0,
-          "buyDepth": [{"price": 24519, "quantity": 150}, ...],
-          "sellDepth": [{"price": 24521, "quantity": 100}, ...]
-        }
-    We try both shapes.
+    if pending_bids or pending_asks:
+        if symbol not in depth_snapshots:
+            depth_snapshots[symbol] = deque(maxlen=HEATMAP_SNAPSHOTS)
+        engine = engines.get(symbol)
+        depth_snapshots[symbol].append({
+            "ts":   int(time.time() * 1000),
+            "ltp":  engine.last_ltp if engine else 0,
+            "bids": pending_bids,
+            "asks": pending_asks,
+        })
+
+
+async def _depth_ws_single(sym: str, sid: str, seg: str):
+    """Maintain one 200-level depth WS connection for a single symbol.
+    Per Dhan docs: only 1 instrument per 200-level connection, RequestCode 23.
     """
-    if isinstance(msg, (bytes, bytearray)):
+    retry_delay = 5
+    ws_url = (
+        f"{DHAN_DEPTH_WS_BASE}"
+        f"?token={DHAN_TOKEN_DEPTH}"
+        f"&clientId={DHAN_CLIENT_ID}"
+        f"&authType=2"
+    )
+    while True:
         try:
-            msg = json.loads(msg.decode())
-        except Exception:
-            return None
-
-    if isinstance(msg, str):
-        try:
-            msg = json.loads(msg)
-        except Exception:
-            return None
-
-    if not isinstance(msg, dict):
-        return None
-
-    sec_id = str(msg.get("securityId", msg.get("security_id", msg.get("SecurityId", ""))))
-    if not sec_id:
-        return None
-
-    ltp = float(msg.get("ltp", msg.get("LTP", msg.get("last_price", 0))) or 0)
-
-    raw_bids = msg.get("bids", msg.get("buyDepth",  msg.get("BuyDepth",  [])))
-    raw_asks = msg.get("asks", msg.get("sellDepth", msg.get("SellDepth", [])))
-
-    def norm(levels):
-        out = []
-        for lv in levels:
-            p = float(lv.get("price", lv.get("Price", 0)) or 0)
-            q = int(lv.get("quantity", lv.get("Quantity", lv.get("qty", 0))) or 0)
-            if p > 0:
-                out.append({"p": round(p, 2), "q": q})
-        return out
-
-    return {
-        "sec_id": sec_id,
-        "ltp":    ltp,
-        "bids":   norm(raw_bids),
-        "asks":   norm(raw_asks),
-    }
+            async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10) as ws:
+                retry_delay = 5
+                # 200-level subscribe: single-instrument format (no InstrumentList)
+                await ws.send(json.dumps({
+                    "RequestCode": 23,
+                    "ExchangeSegment": seg,
+                    "SecurityId": str(sid),
+                }))
+                logger.info(f"Depth WS [{sym}] connected (200-level)")
+                async for raw in ws:
+                    if isinstance(raw, (bytes, bytearray)) and len(raw) >= 12:
+                        _parse_binary_depth(raw, sym)
+        except Exception as e:
+            logger.warning(f"Depth WS [{sym}] error: {e} — retry in {retry_delay}s")
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 120)
 
 
 async def depth_poller_task():
-    """
-    Connect to Dhan 200-level depth WebSocket, subscribe to all index futures,
-    and stream order-book snapshots into depth_snapshots.
-    Reconnects automatically on disconnection.
+    """Launch one 200-level depth WS task per index-future symbol.
+    Per Dhan docs, 200-level depth allows only 1 instrument per connection.
     """
     if not DHAN_TOKEN_DEPTH:
         logger.info("DHAN_TOKEN_DEPTH not set — 200-level depth feed inactive")
         return
 
-    logger.info("Starting 200-level depth WebSocket feed…")
-    retry_delay = 5
-
+    # Wait until index futures are subscribed
     while True:
         syms = _index_future_symbols()
-        if not syms:
-            logger.info("Depth WS: no index futures subscribed yet — retrying in 30s")
-            await asyncio.sleep(30)
-            continue
+        if syms:
+            break
+        await asyncio.sleep(30)
 
-        ws_url = (
-            f"{DHAN_DEPTH_WS_BASE}"
-            f"?token={DHAN_TOKEN_DEPTH}"
-            f"&clientId={DHAN_CLIENT_ID}"
-            f"&authType=2"
-        )
-
-        try:
-            async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10) as ws:
-                logger.info(f"Depth WS connected — subscribing {len(syms)} instruments")
-                retry_delay = 5  # reset on success
-
-                # Build subscription message (same JSON schema as main feed)
-                instruments = [
-                    {
-                        "ExchangeSegment": subscribed_symbols.get(sym, {}).get(
-                            "exchange_segment", "NSE_FO"
-                        ),
-                        "SecurityId": sid,
-                    }
-                    for sym, sid in syms.items()
-                ]
-                sub_msg = {
-                    "RequestCode": 21,        # Full market depth (Dhan code for depth)
-                    "InstrumentCount": len(instruments),
-                    "InstrumentList": instruments,
-                }
-                await ws.send(json.dumps(sub_msg))
-
-                async for raw in ws:
-                    parsed = _parse_depth_message(raw)
-                    if not parsed:
-                        continue
-
-                    symbol = _sid_to_symbol(parsed["sec_id"])
-                    if not symbol:
-                        continue
-
-                    if symbol not in depth_snapshots:
-                        depth_snapshots[symbol] = deque(maxlen=HEATMAP_SNAPSHOTS)
-                    depth_snapshots[symbol].append({
-                        "ts":   int(time.time() * 1000),
-                        "ltp":  parsed["ltp"],
-                        "bids": parsed["bids"],
-                        "asks": parsed["asks"],
-                    })
-
-        except Exception as e:
-            logger.warning(f"Depth WS error: {e} — reconnecting in {retry_delay}s")
-            await asyncio.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, 120)
+    # Normalise segment: depth feed uses NSE_FNO (same as market-quote)
+    SEG_MAP = {"NSE_FO": "NSE_FNO"}
+    tasks = {}
+    while True:
+        syms = _index_future_symbols()
+        for sym, sid in syms.items():
+            if sym not in tasks or tasks[sym].done():
+                seg = subscribed_symbols.get(sym, {}).get("exchange_segment", "NSE_FNO")
+                seg = SEG_MAP.get(seg, seg)
+                tasks[sym] = asyncio.create_task(_depth_ws_single(sym, sid, seg))
+                logger.info(f"Depth WS task started for {sym}")
+        await asyncio.sleep(60)  # check every 60s for new index futures
 
 
 # ─────────────────────────────────────────────
@@ -991,46 +972,29 @@ def parse_dhan_binary(raw: bytes) -> Optional[dict]:
                 },
             }
 
-        # Quote packet (code 4): fields described in docs (LTP, LTQ, LTT, ATP, Volume, SellQty, BuyQty, DayOpen, DayClose, DayHigh, DayLow)
-        if feed_code == 4 and len(raw) >= 8 + 50:
+        # Quote packet (code 4): LTP, LTQ, LTT, ATP, Volume, SellQty, BuyQty, Open, Close, High, Low
+        # Per Dhan docs: Quote packet = 8-byte header + 42-byte payload (total 50 bytes). NO OI here.
+        # OI is sent as a SEPARATE packet (code 5).
+        if feed_code == 4 and len(raw) >= 50:
             offset = 8
-            ltp = struct.unpack_from("<f", raw, offset)[0]
-            offset += 4
-            ltq = struct.unpack_from("<h", raw, offset)[0]  # int16
-            offset += 2
-            ltt = struct.unpack_from("<I", raw, offset)[0]
-            offset += 4
-            atp = struct.unpack_from("<f", raw, offset)[0]
-            offset += 4
-            volume = struct.unpack_from("<I", raw, offset)[0]
-            offset += 4
-            total_sell_qty = struct.unpack_from("<I", raw, offset)[0]
-            offset += 4
-            total_buy_qty = struct.unpack_from("<I", raw, offset)[0]
-            offset += 4
-            day_open = struct.unpack_from("<f", raw, offset)[0]
-            offset += 4
-            day_close = struct.unpack_from("<f", raw, offset)[0]
-            offset += 4
-            day_high = struct.unpack_from("<f", raw, offset)[0]
-            offset += 4
+            ltp = struct.unpack_from("<f", raw, offset)[0]; offset += 4
+            ltq = struct.unpack_from("<h", raw, offset)[0]; offset += 2  # int16
+            ltt = struct.unpack_from("<I", raw, offset)[0]; offset += 4
+            atp = struct.unpack_from("<f", raw, offset)[0]; offset += 4
+            volume = struct.unpack_from("<I", raw, offset)[0]; offset += 4
+            total_sell_qty = struct.unpack_from("<I", raw, offset)[0]; offset += 4
+            total_buy_qty = struct.unpack_from("<I", raw, offset)[0]; offset += 4
+            day_open = struct.unpack_from("<f", raw, offset)[0]; offset += 4
+            day_close = struct.unpack_from("<f", raw, offset)[0]; offset += 4
+            day_high = struct.unpack_from("<f", raw, offset)[0]; offset += 4
             day_low = struct.unpack_from("<f", raw, offset)[0]
 
-            # OI field appears right after DayLow (offset 50) when packet is long enough
-            oi = None
-            if len(raw) >= 54:   # 50 (after header+data) + 4 bytes OI
-                raw_oi = struct.unpack_from("<I", raw, 50)[0]
-                if 0 < raw_oi <= 100_000_000:   # sanity: 0–100M is realistic for Indian markets
-                    oi = float(raw_oi)
-
-            # Build a normalized dict
             return {
                 "type": "quote",
                 "data": {
                     "securityId": str(security_id),
                     "LTP": float(ltp),
                     "LastTradedQty": int(ltq),
-                    # LTT from Dhan is Unix epoch SECONDS. Convert to ms for JS Date.
                     "LastTradeTime": int(ltt) * 1000 if ltt and ltt < 1e12 else int(ltt),
                     "ATP": float(atp),
                     "volume": int(volume),
@@ -1040,6 +1004,19 @@ def parse_dhan_binary(raw: bytes) -> Optional[dict]:
                     "DayClose": float(day_close),
                     "DayHigh": float(day_high),
                     "DayLow": float(day_low),
+                    "openInterest": None,  # OI comes via code 5 packet
+                },
+            }
+
+        # OI packet (code 5): sent separately when subscribing Quote (code 17)
+        # Per Dhan docs: 8-byte header + 4 bytes int32 OI
+        if feed_code == 5 and len(raw) >= 12:
+            raw_oi = struct.unpack_from("<I", raw, 8)[0]
+            oi = float(raw_oi) if 0 < raw_oi <= 500_000_000 else None
+            return {
+                "type": "oi",
+                "data": {
+                    "securityId": str(security_id),
                     "openInterest": oi,
                 },
             }
@@ -1052,9 +1029,10 @@ def parse_dhan_binary(raw: bytes) -> Optional[dict]:
 
 
 async def handle_dhan_tick(msg: dict):
-    """Parse Dhan tick message and feed into engines."""
-    # Dhan v2 tick format
-    # { "type": "ticker", "data": { "securityId": "...", "LTP": 0, "BidPrice": 0, "AskPrice": 0, "volume": 0, ... } }
+    """Parse Dhan tick message and feed into engines.
+    Handles type 'quote', 'ticker', and 'oi' (separate OI packet from Dhan code 5).
+    """
+    msg_type = msg.get("type", "")
     data = msg.get("data", msg)
     sid = str(data.get("securityId", data.get("SecurityId", "")))
 
@@ -1069,6 +1047,17 @@ async def handle_dhan_tick(msg: dict):
             break
 
     if not symbol or symbol not in engines:
+        return
+
+    # OI-only packet: update OI then broadcast (no tick processing needed)
+    if msg_type == "oi":
+        oi_val = data.get("openInterest")
+        if oi_val is not None:
+            engines[symbol].update_oi(float(oi_val))
+            now = time.monotonic()
+            if now - _last_broadcast.get(symbol, 0) >= BROADCAST_MIN_INTERVAL:
+                _last_broadcast[symbol] = now
+                await broadcast_state(symbol)
         return
 
     ltp = float(data.get("LTP", data.get("ltp", 0)))
