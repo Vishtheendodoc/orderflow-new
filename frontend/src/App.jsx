@@ -608,6 +608,8 @@ export default function App() {
   const [symbolExchangeMap, setSymbolExchangeMap] = useState({}); // symbol -> exchange
   const wsRef = useRef(null);
   const pingRef = useRef(null);
+  const lastMessageRef = useRef(Date.now());
+  const staleCheckRef = useRef(null);
   /* ── Feature toggles ── */
   const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true });
   const [featMenuOpen, setFeatMenuOpen] = useState(false);
@@ -667,10 +669,24 @@ export default function App() {
   }, [urlSymbol]);
 
   const connect = useCallback(() => {
+    // Close any existing connection so we don't accumulate sockets
+    if (wsRef.current) {
+      try {
+        wsRef.current.onclose = null;
+        wsRef.current.onerror = null;
+        wsRef.current.onmessage = null;
+        wsRef.current.close();
+      } catch (_) {}
+      wsRef.current = null;
+    }
+    clearInterval(staleCheckRef.current);
+    staleCheckRef.current = null;
+
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
 
     ws.onopen = () => {
+      lastMessageRef.current = Date.now();
       setWsStatus("connected");
       runAutoSubscribe();
       pingRef.current = setInterval(() => {
@@ -678,23 +694,38 @@ export default function App() {
           ws.send(JSON.stringify({ type: "ping" }));
         }
       }, 15000);
+      // If no message (orderflow or pong) for 50s, connection is likely dead — force reconnect
+      staleCheckRef.current = setInterval(() => {
+        if (Date.now() - lastMessageRef.current > 50000) {
+          ws.close();
+        }
+      }, 15000);
     };
 
     ws.onmessage = (e) => {
-      const msg = JSON.parse(e.data);
-      if (msg.type === "orderflow") {
-        const d = msg.data;
-        setFlows((prev) => ({ ...prev, [d.symbol]: d }));
-        setActiveSymbol((cur) => cur || d.symbol);
-        setActiveSymbols((prev) =>
-          prev.includes(d.symbol) ? prev : [...prev, d.symbol]
-        );
+      lastMessageRef.current = Date.now();
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === "orderflow") {
+          const d = msg.data;
+          setFlows((prev) => ({ ...prev, [d.symbol]: d }));
+          setActiveSymbol((cur) => cur || d.symbol);
+          setActiveSymbols((prev) =>
+            prev.includes(d.symbol) ? prev : [...prev, d.symbol]
+          );
+        }
+        // pong and other types ignored (heartbeat keeps connection alive)
+      } catch (_) {
+        // Bad message — don't break the handler
       }
     };
 
     ws.onclose = () => {
       setWsStatus("reconnecting");
       clearInterval(pingRef.current);
+      clearInterval(staleCheckRef.current);
+      staleCheckRef.current = null;
+      wsRef.current = null;
       setTimeout(connect, 3000);
     };
 
@@ -705,7 +736,11 @@ export default function App() {
     connect();
     return () => {
       clearInterval(pingRef.current);
-      wsRef.current?.close();
+      clearInterval(staleCheckRef.current);
+      if (wsRef.current) {
+        try { wsRef.current.close(); } catch (_) {}
+        wsRef.current = null;
+      }
     };
   }, [connect]);
 

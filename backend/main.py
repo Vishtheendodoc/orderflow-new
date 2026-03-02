@@ -1570,11 +1570,14 @@ async def websocket_endpoint(ws: WebSocket):
             await asyncio.sleep(0.02)  # 20ms between messages so client can process
 
         while True:
-            # Keep alive / handle client messages
+            # Keep alive / handle client messages (ignore bad messages so one doesn't drop the client)
             msg = await ws.receive_text()
-            data = json.loads(msg)
-            if data.get("type") == "ping":
-                await ws.send_text(json.dumps({"type": "pong"}))
+            try:
+                data = json.loads(msg)
+                if data.get("type") == "ping":
+                    await ws.send_text(json.dumps({"type": "pong"}))
+            except (json.JSONDecodeError, TypeError):
+                pass
 
     except WebSocketDisconnect:
         pass
