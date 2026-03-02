@@ -204,30 +204,29 @@ export default function OrderflowChart({ candles, symbol, features = {} }) {
       const oi       = c.oi ?? 0;
       const oiChange = c.oi_change ?? 0;
 
-      /* Row 0: Tick Delta */
-      ctx.fillStyle = delta >= 0 ? "rgba(7, 156, 84, 0.2)" : "rgba(255, 70, 70, 0.18)";
+      /* Row 0: Tick Delta — strongest signal, highest contrast */
+      ctx.fillStyle = delta >= 0 ? "rgba(0,210,110,0.28)" : "rgba(255,60,60,0.28)";
       ctx.fillRect(bx, 2, bw, ROW_H - 4);
-      ctx.fillStyle = delta >= 0 ? "#00d26e" : "#ff4646";
+      ctx.fillStyle = delta >= 0 ? "#00f088" : "#ff5050";
       ctx.fillText(fmtVol(delta), cx, ROW_H * 0.5);
 
-      /* Row 1: CVD */
-      ctx.fillStyle = cvd >= 0 ? "rgba(7, 156, 84, 0.16)" : "rgba(255, 70, 70, 0.15)";
+      /* Row 1: CVD — cumulative; slightly softer than delta */
+      ctx.fillStyle = cvd >= 0 ? "rgba(0,210,110,0.20)" : "rgba(255,60,60,0.20)";
       ctx.fillRect(bx, ROW_H + 2, bw, ROW_H - 4);
-      ctx.fillStyle = cvd >= 0 ? "#00d26e" : "#ff4646";
+      ctx.fillStyle = cvd >= 0 ? "#00d26e" : "#ff6464";
       ctx.fillText(fmtVol(cvd), cx, ROW_H * 1.5);
 
-      /* Row 2: Volume */
-      ctx.fillStyle = "rgba(184,191,201,0.8)";
+      /* Row 2: Volume — neutral grey, brighter text for legibility */
+      ctx.fillStyle = "rgba(120,140,165,0.28)";
       ctx.fillRect(bx, ROW_H * 2 + 2, bw, ROW_H - 4);
-      ctx.fillStyle = "#94a3b8";
+      ctx.fillStyle = "#cdd5e0";
       ctx.fillText(fmtVol(vol), cx, ROW_H * 2.5);
 
-      /* Row 3: OI (optional) */
+      /* Row 3: OI — symmetric opacity pos/neg */
       if (showOI) {
-        const oiColor = oiChange >= 0 ? "rgba(7, 156, 84, 0.08)" : "rgba(255, 70, 70, 0.2)";
-        ctx.fillStyle = oiColor;
+        ctx.fillStyle = oiChange >= 0 ? "rgba(0,210,110,0.18)" : "rgba(255,60,60,0.22)";
         ctx.fillRect(bx, ROW_H * 3 + 2, bw, ROW_H - 4);
-        ctx.fillStyle = oiChange >= 0 ? "#00b894" : "#ff6b6b";
+        ctx.fillStyle = oiChange >= 0 ? "#00cc88" : "#ff6060";
         ctx.fillText(oi > 0 ? fmtVol(oi) : "—", cx, ROW_H * 3.5);
       }
     }

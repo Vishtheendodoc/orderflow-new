@@ -216,15 +216,20 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   const showOI   = features.showOI   ?? true;
   const showVWAP = features.showVWAP ?? true;
   const showVP   = features.showVP   ?? true;
-  /* compact layout for narrow/mobile screens */
+  /* compact layout for narrow/mobile screens — recalculated on every render so it reacts to
+     orientation changes and the ResizeObserver-driven re-renders */
   const isMobile   = typeof window !== "undefined" && window.innerWidth <= 768;
   const HDR_H_EFF  = isMobile ? 36 : HDR_H;
   const TIME_H_EFF = isMobile ? 18 : TIME_H;
+  /* Bottom panel height: scales with timeframe on mobile so higher-TF rows stay legible */
   const BOT_H_EFF  = showOI
-    ? (isMobile ? 68 : 90)   // 4 rows
-    : (isMobile ? 52 : BOT_H); // 3 rows
+    ? (isMobile ? Math.max(68, Math.min(100, timeFrameMinutes * 8 + 60)) : Math.max(90, Math.min(120, timeFrameMinutes * 4 + 84)))
+    : (isMobile ? 52 : BOT_H);
   // eslint-disable-next-line no-shadow
-  const NZW  = isMobile ? 40 : 80;  // numbers-zone width per candle slot (20px/40px per side)
+  /* numbers-zone width auto-expands on higher TFs where volumes are larger */
+  const NZW  = isMobile
+    ? Math.max(40, Math.min(60, 32 + timeFrameMinutes * 2))
+    : Math.max(80, Math.min(110, 72 + timeFrameMinutes * 2));
   // eslint-disable-next-line no-shadow
   const RPAD = isMobile ? 12 : 30;  // padding after last candle
 
@@ -452,7 +457,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const buyLinePrices  = new Set();
     const sellLinePrices = new Set();
 
-    /* ── PASS 1: row backgrounds (no grid lines) ── */
+    /* ── PASS 1: level row backgrounds + volume bars ── */
     ctx.font = `600 ${FONT_SZ}px ${MONO}`;
     ctx.textBaseline = "middle";
 
@@ -461,29 +466,47 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       const x = i * slotW - pan;
       if (x + cw + NZW < 0 || x > W) continue;
 
-      const bull = (b.close ?? b.open ?? 0) >= (b.open ?? b.close ?? 0);
-
       /* current candle tint */
       if (i === bs.length - 1) {
         ctx.fillStyle = C.curBg;
         ctx.fillRect(x, 0, slotW - GAP, H);
       }
 
-      ctx.save();
-      const cx0 = x + nzHalf;
-      ctx.beginPath(); ctx.rect(cx0, 0, cw, H); ctx.clip();
+      const displayLvs = getDisplayLevels(b.levels);
+      const maxRowVol  = displayLvs.reduce((m, l) => Math.max(m, (l.buy_vol || 0) + (l.sell_vol || 0)), 1);
 
-      for (const lv of getDisplayLevels(b.levels)) {
+      for (const lv of displayLvs) {
         const ly   = p2y(lv.price, H);
-        const rowY = ly - LEVEL_H / 2;
+        const rowY = Math.round(ly - LEVEL_H / 2);
         if (rowY > H || rowY + LEVEL_H < 0) continue;
 
+        const rH = Math.max(1, LEVEL_H);
+
+        /* Faint full-slot row band — anchors each level visually on all TFs */
+        const volFrac = ((lv.buy_vol || 0) + (lv.sell_vol || 0)) / maxRowVol;
+        if (lv.highBuy)       ctx.fillStyle = C.buyHL;
+        else if (lv.highSell) ctx.fillStyle = C.sellHL;
+        else                  ctx.fillStyle = `rgba(0,0,0,${(0.01 + volFrac * 0.03).toFixed(3)})`;
+        ctx.fillRect(x, rowY, slotW - GAP, rH);
+
+        /* Sell volume bar — right-justified in the left (sell) zone */
+        if (lv.sell_vol > 0) {
+          const barW = Math.max(1, Math.round((lv.sell_vol / maxRowVol) * nzHalf * 0.88));
+          ctx.fillStyle = lv.highSell ? "rgba(229,57,53,0.50)" : "rgba(229,57,53,0.22)";
+          ctx.fillRect(x + nzHalf - barW, rowY + 1, barW, Math.max(1, rH - 2));
+        }
+        /* Buy volume bar — left-justified in the right (buy) zone */
+        if (lv.buy_vol > 0) {
+          const barW = Math.max(1, Math.round((lv.buy_vol  / maxRowVol) * nzHalf * 0.88));
+          ctx.fillStyle = lv.highBuy ? "rgba(0,137,123,0.50)" : "rgba(0,137,123,0.22)";
+          ctx.fillRect(x + nzHalf + cw, rowY + 1, barW, Math.max(1, rH - 2));
+        }
+
         if (showLinesRef.current) {
-          if (lv.highBuy) buyLinePrices.add(lv.price);
+          if (lv.highBuy)  buyLinePrices.add(lv.price);
           if (lv.highSell) sellLinePrices.add(lv.price);
         }
       }
-      ctx.restore();
     }
 
     /* ── PASS 2: imbalance lines ── */
