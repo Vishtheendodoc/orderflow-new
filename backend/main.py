@@ -56,13 +56,16 @@ IMBALANCE_RATIO = float(os.getenv("IMBALANCE_RATIO", "3.0"))
 CANDLE_OPTIONS = [60, 300, 600, 900, 1800, 2700, 3600, 7200]  # seconds: 1,5,10,15,30,45,60,120 min
 
 # Memory bounds — MCX trades 9AM-11:55PM IST (~895 min); NSE 9:15AM-3:30PM (~375 min)
-MAX_CANDLES_PER_SYMBOL = int(os.getenv("MAX_CANDLES_PER_SYMBOL", "1000"))
-# Send full stored history to every client on connect/broadcast
-BROADCAST_CANDLES_LIMIT = int(os.getenv("BROADCAST_CANDLES_LIMIT", "1000"))
+MAX_CANDLES_PER_SYMBOL = int(os.getenv("MAX_CANDLES_PER_SYMBOL", "400"))
+# Candles kept in RAM per engine; closed candles are also written to disk immediately.
+# Full history is loaded from disk on client request — so RAM usage stays flat.
+MAX_CANDLES_IN_MEMORY = int(os.getenv("MAX_CANDLES_IN_MEMORY", "20"))
+# Send only recent candles in live broadcasts; full history served via request_history WS msg
+BROADCAST_CANDLES_LIMIT = int(os.getenv("BROADCAST_CANDLES_LIMIT", "5"))
 # Persistent snapshot directory — mount a Render Disk at this path so data survives restarts
 SNAPSHOT_DIR = os.getenv("SNAPSHOT_DIR", "/data/snapshots")
-MAX_LEVELS_PER_CANDLE = int(os.getenv("MAX_LEVELS_PER_CANDLE", "500"))
-MAX_ENGINES = int(os.getenv("MAX_ENGINES", "1000"))  # No trim: all instruments from CSV
+MAX_LEVELS_PER_CANDLE = int(os.getenv("MAX_LEVELS_PER_CANDLE", "150"))
+MAX_ENGINES = int(os.getenv("MAX_ENGINES", "1000"))  # soft cap; all CSV instruments get engines
 GC_INTERVAL_TICKS = int(os.getenv("GC_INTERVAL_TICKS", "10000"))  # Run gc every N ticks
 # Minimum interval between broadcasts per symbol (seconds).
 # Without this, every tick triggers a full JSON serialize + WS send, saturating the event loop
@@ -269,9 +272,10 @@ class OrderFlowEngine:
                 else:
                     prev.initiative = None
                 prev.closed = True
+                _append_candle_to_disk(self.symbol, prev.to_dict())  # persist immediately
                 self.candles.append(prev)
-                if len(self.candles) > MAX_CANDLES_PER_SYMBOL:
-                    self.candles = self.candles[-MAX_CANDLES_PER_SYMBOL:]
+                if len(self.candles) > MAX_CANDLES_IN_MEMORY:
+                    self.candles = self.candles[-MAX_CANDLES_IN_MEMORY:]
                 self.last_oi = prev.oi  # carry forward OI baseline for next candle
             self.current_candle = FootprintCandle(
                 open_time=candle_ts,
@@ -330,14 +334,17 @@ class OrderFlowEngine:
             c.oi_change = oi - self.last_oi
 
     def get_state(self, limit: Optional[int] = None) -> dict:
-        """Return current state for broadcast. limit caps candles sent (avoids WebSocket payload limits)."""
+        """Return in-memory state (last MAX_CANDLES_IN_MEMORY closed + current).
+        For full day history use load_history_from_disk + build_full_state."""
         all_candles = list(self.candles) if self.candles else []
         if limit is not None and len(all_candles) > limit:
             all_candles = all_candles[-limit:]
         candle_dicts = [c.to_dict() for c in all_candles]
 
-        # Add CVD (running)
-        running = 0.0
+        # Running CVD — start from (total CVD − sum of selected candles) so the final
+        # value matches self.cvd exactly.
+        selected_delta = sum(cd["delta"] for cd in candle_dicts)
+        running = self.cvd - selected_delta
         for cd in candle_dicts:
             running += cd["delta"]
             cd["cvd"] = running
@@ -356,6 +363,11 @@ class OrderFlowEngine:
             "tick_count": self.tick_count,
             "candles": candle_dicts,
         }
+
+    def get_state_live(self) -> dict:
+        """Compact state for live tick broadcasts: last 5 closed + current candle only.
+        Keeps WS payload tiny. Clients with full history merge these in."""
+        return self.get_state(limit=BROADCAST_CANDLES_LIMIT)
 
 
 # ─────────────────────────────────────────────
@@ -412,10 +424,10 @@ def _do_daily_reset():
         eng.prev_volume = 0.0
         eng.prev_total_buy = 0.0
         eng.prev_total_sell = 0.0
-    # Also wipe yesterday's snapshot files so they don't get reloaded next restart
+    # Wipe yesterday's snapshot files so they don't get reloaded next restart
     if os.path.isdir(SNAPSHOT_DIR):
         for fname in os.listdir(SNAPSHOT_DIR):
-            if fname.endswith(".json"):
+            if fname.endswith(".json") or fname.endswith(".jsonl"):
                 try:
                     os.remove(os.path.join(SNAPSHOT_DIR, fname))
                 except Exception:
@@ -443,8 +455,90 @@ def _ist_midnight_ms() -> int:
     return int(midnight.timestamp() * 1000)
 
 
+def _append_candle_to_disk(symbol: str, candle_dict: dict) -> None:
+    """Append one closed candle as a JSON line to the symbol's JSONL file.
+    Called on every candle close — data survives restarts even without periodic snapshots."""
+    if not SNAPSHOT_DIR:
+        return
+    try:
+        os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+        path = os.path.join(SNAPSHOT_DIR, f"{symbol}.jsonl")
+        with open(path, "a") as fh:
+            fh.write(json.dumps(candle_dict) + "\n")
+    except Exception as e:
+        logger.warning(f"Disk append failed [{symbol}]: {e}")
+
+
+def load_history_from_disk(symbol: str, limit: int = 400) -> list:
+    """Read up to `limit` closed candles for a symbol from disk.
+    Prefers the JSONL append file; falls back to legacy JSON array snapshot."""
+    if not os.path.isdir(SNAPSHOT_DIR):
+        return []
+    jsonl_path = os.path.join(SNAPSHOT_DIR, f"{symbol}.jsonl")
+    if os.path.exists(jsonl_path):
+        lines: list[str] = []
+        try:
+            with open(jsonl_path) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        lines.append(line)
+        except Exception as e:
+            logger.warning(f"JSONL read failed [{symbol}]: {e}")
+            return []
+        start = max(0, len(lines) - limit)
+        result = []
+        for ln in lines[start:]:
+            try:
+                result.append(json.loads(ln))
+            except Exception:
+                pass
+        return result
+    # Fallback: legacy JSON array snapshot
+    json_path = os.path.join(SNAPSHOT_DIR, f"{symbol}.json")
+    if os.path.exists(json_path):
+        try:
+            with open(json_path) as fh:
+                data = json.load(fh)
+            return data[-limit:] if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"JSON snapshot read failed [{symbol}]: {e}")
+    return []
+
+
+def build_full_state(symbol: str, engine) -> dict:
+    """Assemble the full-day state for a symbol by reading disk history + live candle.
+    Used for on-demand history requests — not called on every tick."""
+    today_start = _ist_midnight_ms()
+    candle_dicts = [
+        c for c in load_history_from_disk(symbol, limit=MAX_CANDLES_PER_SYMBOL)
+        if c.get("open_time", 0) >= today_start and c.get("closed", True)
+    ]
+    # Build running CVD from full history
+    running = 0.0
+    for cd in candle_dicts:
+        running += cd.get("delta", cd.get("buy_vol", 0) - cd.get("sell_vol", 0))
+        cd["cvd"] = running
+
+    if engine.current_candle:
+        live = engine.current_candle.to_dict()
+        live["cvd"] = running + live.get("delta", 0)
+        candle_dicts.append(live)
+
+    return {
+        "symbol": symbol,
+        "ltp": engine.last_ltp,
+        "bid": engine.last_bid,
+        "ask": engine.last_ask,
+        "cvd": engine.cvd,
+        "tick_count": engine.tick_count,
+        "candles": candle_dicts,
+    }
+
+
 def save_symbol_snapshot(symbol: str):
-    """Atomically write the closed candles for one symbol to a JSON file on disk."""
+    """Periodic safety backup: write last in-memory candles to JSON for legacy load_all_snapshots.
+    The primary persistence path is JSONL (written on every candle close)."""
     eng = engines.get(symbol)
     if not eng or not eng.candles:
         return
@@ -455,70 +549,89 @@ def save_symbol_snapshot(symbol: str):
         candle_dicts = [c.to_dict() for c in eng.candles]
         with open(tmp, "w") as fh:
             json.dump(candle_dicts, fh)
-        os.replace(tmp, path)   # atomic rename — never leaves a half-written file
+        os.replace(tmp, path)
     except Exception as e:
         logger.warning(f"Snapshot save failed [{symbol}]: {e}")
 
 
 def load_all_snapshots():
     """
-    On startup: restore today's closed candles from disk into the already-created engines.
-    Call this AFTER auto_subscribe (engines exist) and AFTER _do_daily_reset (CVD/prev cleared).
-    Candles older than today's IST midnight are silently discarded.
+    On startup: restore today's candles from disk (JSONL preferred, JSON fallback).
+    Only loads last MAX_CANDLES_IN_MEMORY candles into RAM per engine; computes CVD
+    from the full day's history so the running total is accurate.
     """
     if not os.path.isdir(SNAPSHOT_DIR):
         logger.info("Snapshot dir not found — starting with empty history (no Render Disk mounted?)")
         return
     today_start = _ist_midnight_ms()
     loaded = 0
+
+    # Collect all symbols present on disk (JSONL + JSON)
+    disk_symbols: set[str] = set()
     for fname in os.listdir(SNAPSHOT_DIR):
-        if not fname.endswith(".json"):
-            continue
-        symbol = fname[:-5]
+        if fname.endswith(".jsonl"):
+            disk_symbols.add(fname[:-6])
+        elif fname.endswith(".json") and not fname.endswith(".tmp"):
+            disk_symbols.add(fname[:-5])
+
+    if not disk_symbols:
+        logger.info("Snapshot dir is empty — starting fresh.")
+        return
+
+    for symbol in disk_symbols:
         if symbol not in engines:
             continue
-        path = os.path.join(SNAPSHOT_DIR, fname)
         try:
-            with open(path) as fh:
-                candle_dicts = json.load(fh)
-            restored = []
-            for cd in candle_dicts:
-                if not cd.get("closed"):
-                    continue                        # skip any open candle — it'll be rebuilt live
-                if cd.get("open_time", 0) < today_start:
-                    continue                        # discard yesterday's candles
+            all_today = [
+                c for c in load_history_from_disk(symbol, limit=MAX_CANDLES_PER_SYMBOL)
+                if c.get("closed", True) and c.get("open_time", 0) >= today_start
+            ]
+            if not all_today:
+                continue
+
+            # CVD from full history (accurate running total)
+            full_cvd = sum(
+                c.get("delta", c.get("buy_vol", 0) - c.get("sell_vol", 0))
+                for c in all_today
+            )
+
+            # Only hydrate last MAX_CANDLES_IN_MEMORY into engine.candles
+            recent_dicts = all_today[-MAX_CANDLES_IN_MEMORY:]
+            restored: list[FootprintCandle] = []
+            for cd in recent_dicts:
                 c = FootprintCandle(
-                    open_time   = cd["open_time"],
-                    open        = cd["open"],
-                    high        = cd["high"],
-                    low         = cd["low"],
-                    close       = cd["close"],
-                    buy_vol     = cd.get("buy_vol", 0),
-                    sell_vol    = cd.get("sell_vol", 0),
-                    delta_open  = cd.get("delta_open", 0),
-                    delta_min   = cd.get("delta_min", 0),
-                    delta_max   = cd.get("delta_max", 0),
-                    initiative  = cd.get("initiative"),
-                    oi          = cd.get("oi", 0),
-                    oi_change   = cd.get("oi_change", 0),
-                    closed      = True,
+                    open_time  = cd["open_time"],
+                    open       = cd["open"],
+                    high       = cd["high"],
+                    low        = cd["low"],
+                    close      = cd["close"],
+                    buy_vol    = cd.get("buy_vol", 0),
+                    sell_vol   = cd.get("sell_vol", 0),
+                    delta_open = cd.get("delta_open", 0),
+                    delta_min  = cd.get("delta_min", 0),
+                    delta_max  = cd.get("delta_max", 0),
+                    initiative = cd.get("initiative"),
+                    oi         = cd.get("oi", 0),
+                    oi_change  = cd.get("oi_change", 0),
+                    closed     = True,
                 )
                 for p_str, lv in cd.get("levels", {}).items():
                     p = float(p_str)
                     c.levels[p] = FootprintLevel(
-                        price     = p,
-                        buy_vol   = lv.get("buy_vol", 0),
-                        sell_vol  = lv.get("sell_vol", 0),
+                        price    = p,
+                        buy_vol  = lv.get("buy_vol", 0),
+                        sell_vol = lv.get("sell_vol", 0),
                     )
                 restored.append(c)
-            if restored:
-                restored = restored[-MAX_CANDLES_PER_SYMBOL:]
-                engines[symbol].candles = restored
-                engines[symbol].cvd     = sum(c.delta for c in restored)
-                loaded += 1
-                logger.info(f"  Restored {len(restored)} candles for {symbol}")
+
+            engines[symbol].candles  = restored
+            engines[symbol].cvd      = full_cvd
+            engines[symbol].last_oi  = restored[-1].oi if restored else 0.0
+            loaded += 1
+            logger.info(f"  Restored {len(all_today)} candles for {symbol} (last {len(restored)} in RAM, CVD={full_cvd:.0f})")
         except Exception as e:
             logger.warning(f"Snapshot load failed [{symbol}]: {e}")
+
     logger.info(f"Snapshot restore complete: {loaded} symbols loaded from {SNAPSHOT_DIR}")
 
 
@@ -1159,10 +1272,12 @@ async def demo_feed_task():
 
 
 async def broadcast_state(symbol: str):
-    """Push updated state to all connected WebSocket clients. Caps candles to avoid payload limits."""
+    """Push live tick update to connected clients.
+    Sends only last BROADCAST_CANDLES_LIMIT candles (default 5) to keep payloads tiny.
+    Clients that need full history send a request_history WS message."""
     if symbol not in engines:
         return
-    state = engines[symbol].get_state(limit=BROADCAST_CANDLES_LIMIT)
+    state = engines[symbol].get_state_live()
     msg = json.dumps({"type": "orderflow", "data": state})
 
     dead = set()
@@ -1436,18 +1551,37 @@ async def websocket_endpoint(ws: WebSocket):
     logger.info(f"Client connected. Total: {len(connected_clients)}")
 
     try:
-        # Send current state on connect (cap candles, small delay between sends to avoid overwhelming client)
-        for symbol, engine in engines.items():
-            state = engine.get_state(limit=BROADCAST_CANDLES_LIMIT)
+        # On connect: send in-memory state (last ~20 candles) for all engines.
+        # This is fast (no disk reads). Clients request full history per symbol separately.
+        for symbol, engine in list(engines.items()):
+            if not engine.candles and engine.current_candle is None:
+                continue  # skip engines with no data yet
+            state = engine.get_state()
             await ws.send_text(json.dumps({"type": "orderflow", "data": state}))
-            await asyncio.sleep(0.02)  # 20ms between messages so client can process
+            await asyncio.sleep(0.01)  # 10ms between — 452 symbols ≈ 4.5s max
 
         while True:
-            # Keep alive / handle client messages
             msg = await ws.receive_text()
-            data = json.loads(msg)
-            if data.get("type") == "ping":
+            try:
+                data = json.loads(msg)
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            msg_type = data.get("type")
+
+            if msg_type == "ping":
                 await ws.send_text(json.dumps({"type": "pong"}))
+
+            elif msg_type == "request_history":
+                # Client asks for full-day disk history for one symbol.
+                # Response: {"type": "history", "data": {symbol, ltp, cvd, candles:[400]}}
+                symbol = str(data.get("symbol", "")).upper()
+                if symbol in engines:
+                    try:
+                        state = build_full_state(symbol, engines[symbol])
+                        await ws.send_text(json.dumps({"type": "history", "data": state}))
+                    except Exception as e:
+                        logger.warning(f"History request failed [{symbol}]: {e}")
 
     except WebSocketDisconnect:
         pass
@@ -1514,29 +1648,20 @@ async def startup():
 
             ordered = priority_0 + priority_1 + priority_2
             count = 0
-            skipped = 0
             for symbol, security_id, seg_name in ordered:
-                if len(engines) >= MAX_ENGINES:
-                    skipped += 1
-                    # Still register in subscribed_symbols so the Dhan feed receives
-                    # ticks (lightweight), but do NOT create a heavy engine object.
-                    subscribed_symbols[symbol] = {
-                        "security_id": security_id,
-                        "exchange_segment": seg_name,
-                    }
-                    continue
                 subscribed_symbols[symbol] = {
                     "security_id": security_id,
                     "exchange_segment": seg_name,
                 }
                 if symbol not in engines:
                     engines[symbol] = OrderFlowEngine(symbol, security_id)
-                count += 1
+                    count += 1
 
             logger.info(
-                f"Auto-subscribed: {count} engines created (MAX_ENGINES={MAX_ENGINES}), "
-                f"{skipped} extra symbols registered for ticks only, "
-                f"{len(priority_0)} index futures prioritised"
+                f"Auto-subscribed all {count} instruments from CSV "
+                f"({len(priority_0)} index futures, {len(priority_1)} NSE stock futures, "
+                f"{len(priority_2)} MCX). Each engine holds ≤{MAX_CANDLES_IN_MEMORY} candles in RAM; "
+                f"full history is read from disk on demand."
             )
         except Exception as e:
             logger.error(f"Auto-subscribe failed: {e}")

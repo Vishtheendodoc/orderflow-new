@@ -22,17 +22,19 @@ services:
       - key: IMBALANCE_RATIO
         value: "3.0"
       - key: MAX_CANDLES_PER_SYMBOL
-        value: "400"          # 400 covers a full NSE session (375 min) with margin
+        value: "400"          # max candles kept on disk per symbol (full NSE session = 375)
+      - key: MAX_CANDLES_IN_MEMORY
+        value: "20"           # closed candles kept in RAM per engine; rest live on disk
       - key: MAX_LEVELS_PER_CANDLE
-        value: "150"          # 150 price levels per candle is more than enough; cuts RAM ~3x vs 500
+        value: "150"          # 150 price levels per candle is more than enough
       - key: MAX_ENGINES
-        value: "60"           # hard engine cap; indices take priority in auto-subscribe
+        value: "1000"         # no cap — all CSV instruments get engines (RAM is flat at 20 candles each)
       - key: GC_INTERVAL_TICKS
         value: "10000"
       - key: BROADCAST_MIN_INTERVAL
         value: "0.1"          # 100ms = 10 updates/sec max per symbol
       - key: BROADCAST_CANDLES_LIMIT
-        value: "400"          # send full stored history to clients (matches MAX_CANDLES_PER_SYMBOL)
+        value: "5"            # live tick broadcasts send only last 5 candles; full history via request_history
       - key: SNAPSHOT_DIR
         value: /data/snapshots
       # ── Liquidity Heatmap token (separate Dhan account) ──────────────────────

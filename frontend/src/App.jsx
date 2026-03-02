@@ -615,10 +615,17 @@ export default function App() {
   const pingRef = useRef(null);
   const lastMsgRef = useRef(Date.now());
   const staleTimerRef = useRef(null);
+  // Tracks which symbols have received full-day history from disk (not just live 20-candle snapshot)
+  const historyLoadedRef = useRef(new Set());
+  // Ref copy of activeSymbol so WS callbacks can read it without stale closures
+  const activeSymbolRef = useRef(activeSymbol);
   /* ── Feature toggles ── */
   const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true });
   const [featMenuOpen, setFeatMenuOpen] = useState(false);
   const featMenuRef = useRef(null);
+  // Keep ref in sync
+  useEffect(() => { activeSymbolRef.current = activeSymbol; }, [activeSymbol]);
+
   /* close dropdown on outside click */
   useEffect(() => {
     if (!featMenuOpen) return;
@@ -654,6 +661,13 @@ export default function App() {
       .catch(() => {});
   }, []);
 
+  // Helper: send request_history for a symbol if WS is open
+  const requestHistory = useCallback((symbol) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "request_history", symbol }));
+    }
+  }, []);
+
   const connect = useCallback(() => {
     // Close any stale socket first
     clearInterval(staleTimerRef.current);
@@ -672,6 +686,8 @@ export default function App() {
 
     ws.onopen = () => {
       lastMsgRef.current = Date.now();
+      // Clear loaded-history flags — we have a fresh connection
+      historyLoadedRef.current.clear();
       setWsStatus("connected");
       pingRef.current = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "ping" }));
@@ -680,20 +696,55 @@ export default function App() {
       staleTimerRef.current = setInterval(() => {
         if (Date.now() - lastMsgRef.current > 50000) ws.close();
       }, 15000);
+      // After backend finishes sending the initial snapshot (~4s for 452 symbols),
+      // request full history for whatever symbol the user is viewing
+      setTimeout(() => {
+        const sym = activeSymbolRef.current;
+        if (sym && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "request_history", symbol: sym }));
+        }
+      }, 5000);
     };
 
     ws.onmessage = (e) => {
       lastMsgRef.current = Date.now();
       try {
         const msg = JSON.parse(e.data);
+
         if (msg.type === "orderflow") {
           const d = msg.data;
-          setFlows((prev) => ({ ...prev, [d.symbol]: d }));
+          setFlows((prev) => {
+            const existing = prev[d.symbol];
+            // If we already have full history for this symbol, smartly merge the live candles
+            // instead of replacing (keeps the full day visible while updating the live candle)
+            if (existing && historyLoadedRef.current.has(d.symbol) && existing.candles?.length > (d.candles?.length ?? 0)) {
+              const newByTime = {};
+              (d.candles || []).forEach((c) => { newByTime[c.open_time] = c; });
+              // Update matching candles; keep everything else intact
+              const merged = (existing.candles || []).map((c) => newByTime[c.open_time] ?? c);
+              // Append any candles that are new (open_time not seen before)
+              const existingTimes = new Set((existing.candles || []).map((c) => c.open_time));
+              (d.candles || []).forEach((c) => {
+                if (!existingTimes.has(c.open_time)) merged.push(c);
+              });
+              merged.sort((a, b) => a.open_time - b.open_time);
+              return { ...prev, [d.symbol]: { ...d, candles: merged } };
+            }
+            return { ...prev, [d.symbol]: d };
+          });
           setActiveSymbol((cur) => cur || d.symbol);
           setActiveSymbols((prev) =>
             prev.includes(d.symbol) ? prev : [...prev, d.symbol]
           );
         }
+
+        if (msg.type === "history") {
+          // Full-day disk history arrived — replace the symbol's data entirely
+          const d = msg.data;
+          historyLoadedRef.current.add(d.symbol);
+          setFlows((prev) => ({ ...prev, [d.symbol]: d }));
+        }
+
       } catch (_) {}
     };
 
@@ -717,6 +768,13 @@ export default function App() {
       try { wsRef.current?.close(); } catch (_) {}
     };
   }, [connect]);
+
+  // When the user switches to a symbol that hasn't had full history loaded yet, request it
+  useEffect(() => {
+    if (!activeSymbol) return;
+    if (historyLoadedRef.current.has(activeSymbol)) return;
+    requestHistory(activeSymbol);
+  }, [activeSymbol, requestHistory]);
 
   const flow = activeSymbol ? flows[activeSymbol] : null;
   const candles = flow?.candles || [];
