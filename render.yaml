@@ -22,17 +22,17 @@ services:
       - key: IMBALANCE_RATIO
         value: "3.0"
       - key: MAX_CANDLES_PER_SYMBOL
-        value: "1000"         # ~895 candles = full MCX day (9AM-11:55PM) at 1-min; NSE needs ~375
+        value: "400"          # 400 covers a full NSE session (375 min) with margin
       - key: MAX_LEVELS_PER_CANDLE
-        value: "500"
+        value: "150"          # 150 price levels per candle is more than enough; cuts RAM ~3x vs 500
       - key: MAX_ENGINES
-        value: "50"
+        value: "60"           # hard engine cap; indices take priority in auto-subscribe
       - key: GC_INTERVAL_TICKS
         value: "10000"
       - key: BROADCAST_MIN_INTERVAL
         value: "0.1"          # 100ms = 10 updates/sec max per symbol
       - key: BROADCAST_CANDLES_LIMIT
-        value: "1000"         # send full stored history to clients (matches MAX_CANDLES_PER_SYMBOL)
+        value: "400"          # send full stored history to clients (matches MAX_CANDLES_PER_SYMBOL)
       - key: SNAPSHOT_DIR
         value: /data/snapshots
       # ── Liquidity Heatmap token (separate Dhan account) ──────────────────────

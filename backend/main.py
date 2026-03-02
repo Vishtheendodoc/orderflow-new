@@ -1472,7 +1472,14 @@ async def startup():
             return
         import csv as _csv
 
-        count = 0
+        # Priority: index futures first (NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY/SENSEX),
+        # then NSE stock futures, then MCX commodities.
+        # This ensures the most-watched instruments claim the engine slots first.
+        INDEX_KEYWORDS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
+        priority_0: list[tuple] = []   # index futures
+        priority_1: list[tuple] = []   # NSE stock futures
+        priority_2: list[tuple] = []   # MCX commodities
+
         try:
             with open(csv_path, newline="") as f:
                 reader = _csv.DictReader(f)
@@ -1485,21 +1492,52 @@ async def startup():
                     if not security_id or not symbol:
                         continue
 
-                    # We only auto-subscribe NSE FNO and MCX as requested
-                    # Dhan v2 Annexure: MCX_COMM = MCX Commodity (futures)
                     seg_name = None
                     if exch == "MCX":
                         seg_name = "MCX_COMM"
-                    elif exch == "NSE" and ("FUT" in instr or "FUTIDX" in instr or "FUTSTK" in instr or row.get("segment","").upper()=="D"):
+                    elif exch == "NSE" and (
+                        "FUT" in instr or "FUTIDX" in instr or "FUTSTK" in instr
+                        or row.get("segment", "").upper() == "D"
+                    ):
                         seg_name = "NSE_FNO"
 
-                    if seg_name:
-                        # store segment name (will be resolved to MarketFeed constant at runtime)
-                        subscribed_symbols[symbol] = {"security_id": security_id, "exchange_segment": seg_name}
-                        if symbol not in engines:
-                            engines[symbol] = OrderFlowEngine(symbol, security_id)
-                        count += 1
-            logger.info(f"Auto-subscribed {count} instruments (NSE_FNO/MCX) from stock_list.csv")
+                    if not seg_name:
+                        continue
+
+                    entry = (symbol, security_id, seg_name)
+                    if seg_name == "NSE_FNO" and any(kw in symbol for kw in INDEX_KEYWORDS):
+                        priority_0.append(entry)
+                    elif seg_name == "NSE_FNO":
+                        priority_1.append(entry)
+                    else:
+                        priority_2.append(entry)
+
+            ordered = priority_0 + priority_1 + priority_2
+            count = 0
+            skipped = 0
+            for symbol, security_id, seg_name in ordered:
+                if len(engines) >= MAX_ENGINES:
+                    skipped += 1
+                    # Still register in subscribed_symbols so the Dhan feed receives
+                    # ticks (lightweight), but do NOT create a heavy engine object.
+                    subscribed_symbols[symbol] = {
+                        "security_id": security_id,
+                        "exchange_segment": seg_name,
+                    }
+                    continue
+                subscribed_symbols[symbol] = {
+                    "security_id": security_id,
+                    "exchange_segment": seg_name,
+                }
+                if symbol not in engines:
+                    engines[symbol] = OrderFlowEngine(symbol, security_id)
+                count += 1
+
+            logger.info(
+                f"Auto-subscribed: {count} engines created (MAX_ENGINES={MAX_ENGINES}), "
+                f"{skipped} extra symbols registered for ticks only, "
+                f"{len(priority_0)} index futures prioritised"
+            )
         except Exception as e:
             logger.error(f"Auto-subscribe failed: {e}")
 
