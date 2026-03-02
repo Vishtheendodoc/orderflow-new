@@ -391,29 +391,33 @@ def _ist_date_str() -> str:
 
 
 def _do_daily_reset():
-    """Reset all engines for new trading day. Clears candles, CVD, preserves subscriptions."""
+    """Reset all engines for new trading day. Clears candles, CVD, preserves subscriptions.
+    Only clears when we cross IST midnight. On startup (_last_reset_date is None), we skip
+    clear/delete so load_all_snapshots can restore from disk."""
     global _last_reset_date
     today = _ist_date_str()
     if _last_reset_date == today:
         return
+    # Only clear/delete when we actually crossed midnight (not on first run)
+    if _last_reset_date is not None:
+        for eng in engines.values():
+            eng.candles.clear()
+            eng.current_candle = None
+            eng.cvd = 0.0
+            eng.prev_volume = 0.0
+            eng.prev_total_buy = 0.0
+            eng.prev_total_sell = 0.0
+        # Wipe yesterday's snapshot files so they don't get reloaded
+        if os.path.isdir(SNAPSHOT_DIR):
+            for fname in os.listdir(SNAPSHOT_DIR):
+                if fname.endswith(".json"):
+                    try:
+                        os.remove(os.path.join(SNAPSHOT_DIR, fname))
+                    except Exception:
+                        pass
+        gc.collect()
+        logger.info(f"Daily reset at IST midnight. Date: {today}. Engines + snapshots cleared.")
     _last_reset_date = today
-    for eng in engines.values():
-        eng.candles.clear()
-        eng.current_candle = None
-        eng.cvd = 0.0
-        eng.prev_volume = 0.0
-        eng.prev_total_buy = 0.0
-        eng.prev_total_sell = 0.0
-    # Also wipe yesterday's snapshot files so they don't get reloaded next restart
-    if os.path.isdir(SNAPSHOT_DIR):
-        for fname in os.listdir(SNAPSHOT_DIR):
-            if fname.endswith(".json"):
-                try:
-                    os.remove(os.path.join(SNAPSHOT_DIR, fname))
-                except Exception:
-                    pass
-    gc.collect()
-    logger.info(f"Daily reset at IST midnight. Date: {today}. Engines + snapshots cleared.")
 
 
 async def _daily_reset_task():
@@ -463,9 +467,10 @@ def load_all_snapshots():
         return
     today_start = _ist_midnight_ms()
     loaded = 0
-    for fname in os.listdir(SNAPSHOT_DIR):
-        if not fname.endswith(".json"):
-            continue
+    files = [f for f in os.listdir(SNAPSHOT_DIR) if f.endswith(".json")]
+    if not files:
+        logger.info(f"No snapshot files in {SNAPSHOT_DIR} — run from market open (9:15 IST) to accumulate data")
+    for fname in files:
         symbol = fname[:-5]
         if symbol not in engines:
             continue
@@ -512,17 +517,20 @@ def load_all_snapshots():
         except Exception as e:
             logger.warning(f"Snapshot load failed [{symbol}]: {e}")
     logger.info(f"Snapshot restore complete: {loaded} symbols loaded from {SNAPSHOT_DIR}")
+    if loaded == 0 and files:
+        logger.info("No symbols matched engines — check that stock_list.csv includes symbols with snapshot files")
 
 
 async def _snapshot_task():
-    """Background task: save all symbols to disk every 5 minutes."""
+    """Background task: save all symbols to disk. First save after 60s, then every 5 min."""
+    await asyncio.sleep(60)   # First snapshot after 1 min (persist data quickly after startup)
     while True:
-        await asyncio.sleep(300)
         syms = list(engines.keys())
         for sym in syms:
             save_symbol_snapshot(sym)
         if syms:
             logger.info(f"Periodic snapshot saved for {len(syms)} symbols")
+        await asyncio.sleep(300)
 
 
 # ─────────────────────────────────────────────
@@ -1550,7 +1558,16 @@ async def startup():
 
     auto_subscribe_from_csv()
     _do_daily_reset()       # sets _last_reset_date = today; clears stale state
-    load_all_snapshots()    # restore today's candles from disk (no-op if no disk mounted)
+    # Retry snapshot load (Render disk mount can be delayed a few seconds)
+    for attempt in range(2):
+        if os.path.isdir(SNAPSHOT_DIR):
+            load_all_snapshots()
+            break
+        if attempt == 0:
+            logger.info("Snapshot dir not found, retrying in 5s (disk mount may be delayed)...")
+            await asyncio.sleep(5)
+    else:
+        logger.info("Snapshot dir not found after retry — starting with empty history (ensure Render Disk is mounted at /data)")
     asyncio.create_task(dhan_feed_task())
     asyncio.create_task(_daily_reset_task())
     asyncio.create_task(_snapshot_task())
