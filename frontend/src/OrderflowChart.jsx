@@ -205,13 +205,13 @@ export default function OrderflowChart({ candles, symbol, features = {} }) {
       const oiChange = c.oi_change ?? 0;
 
       /* Row 0: Tick Delta */
-      ctx.fillStyle = delta >= 0 ? "rgba(7,156,84,0.62)" : "rgba(255,70,70,0.6)";
+      ctx.fillStyle = delta >= 0 ? "rgba(7, 156, 84, 0.2)" : "rgba(255, 70, 70, 0.18)";
       ctx.fillRect(bx, 2, bw, ROW_H - 4);
       ctx.fillStyle = delta >= 0 ? "#00d26e" : "#ff4646";
       ctx.fillText(fmtVol(delta), cx, ROW_H * 0.5);
 
       /* Row 1: CVD */
-      ctx.fillStyle = cvd >= 0 ? "rgba(7,156,84,0.62)" : "rgba(255,70,70,0.6)";
+      ctx.fillStyle = cvd >= 0 ? "rgba(7, 156, 84, 0.16)" : "rgba(255, 70, 70, 0.15)";
       ctx.fillRect(bx, ROW_H + 2, bw, ROW_H - 4);
       ctx.fillStyle = cvd >= 0 ? "#00d26e" : "#ff4646";
       ctx.fillText(fmtVol(cvd), cx, ROW_H * 1.5);
@@ -224,7 +224,7 @@ export default function OrderflowChart({ candles, symbol, features = {} }) {
 
       /* Row 3: OI (optional) */
       if (showOI) {
-        const oiColor = oiChange >= 0 ? "rgba(7,156,84,0.5)" : "rgba(255,70,70,0.45)";
+        const oiColor = oiChange >= 0 ? "rgba(7, 156, 84, 0.08)" : "rgba(255, 70, 70, 0.2)";
         ctx.fillStyle = oiColor;
         ctx.fillRect(bx, ROW_H * 3 + 2, bw, ROW_H - 4);
         ctx.fillStyle = oiChange >= 0 ? "#00b894" : "#ff6b6b";
