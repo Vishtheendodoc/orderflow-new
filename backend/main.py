@@ -668,15 +668,17 @@ async def oi_poller_task():
         await asyncio.sleep(OI_POLL_SEC)
         if not subscribed_symbols:
             continue
-        # Group by exchange_segment: { "NSE_FNO": [sid, ...], "MCX_COMM": [...] }
+        # Group by exchange_segment. Dhan Market Quote API uses NSE_FNO (not NSE_FO).
         by_seg = defaultdict(list)
         sid_to_symbol = {}
+        SEG_NORMALIZE = {"NSE_FO": "NSE_FNO"}  # Dhan REST API expects NSE_FNO
         for symbol, info in subscribed_symbols.items():
             seg = info.get("exchange_segment", "NSE_FO")
+            seg = SEG_NORMALIZE.get(seg, seg)
             sid = str(info.get("security_id", ""))
             if sid and symbol in engines:
                 by_seg[seg].append(sid)
-                sid_to_symbol[sid] = (symbol, seg)
+                sid_to_symbol[sid] = symbol
         if not by_seg:
             continue
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -693,8 +695,8 @@ async def oi_poller_task():
                     updated = []
                     for sid_str, quote in seg_data.items():
                         oi_val = quote.get("oi")
-                        if oi_val is not None and (symbol_seg := sid_to_symbol.get(sid_str)):
-                            symbol, _ = symbol_seg
+                        symbol = sid_to_symbol.get(sid_str) if isinstance(sid_str, str) else sid_to_symbol.get(str(sid_str))
+                        if oi_val is not None and symbol:
                             engine = engines.get(symbol)
                             if engine:
                                 try:

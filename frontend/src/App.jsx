@@ -336,23 +336,19 @@ function SubscribePanel({ onSubscribe, activeSymbols }) {
   const searchRef = useRef(null);
 
   useEffect(() => {
-    fetch("/stock_list.csv")
-      .then((r) => r.text())
-      .then((text) => {
-        const rows = parseCSV(text);
+    const base = (typeof API_URL !== "undefined" ? API_URL : "") || window.location.origin;
+    fetch(`${base}/api/symbols`)
+      .then((r) => r.json())
+      .then((rows) => {
+        if (!Array.isArray(rows)) return;
         setAllInstruments(rows);
-
-        // Default each base to first expiry found (closest = lowest alphabetically in context)
         const defaults = {};
         rows.forEach((r) => {
           const base = getBaseName(r.symbol);
           const exp = getExpiry(r.symbol);
           if (!defaults[base]) defaults[base] = exp;
-          else {
-            // prefer earlier expiry
-            if (EXPIRY_ORDER.indexOf(exp) < EXPIRY_ORDER.indexOf(defaults[base]))
-              defaults[base] = exp;
-          }
+          else if (EXPIRY_ORDER.indexOf(exp) < EXPIRY_ORDER.indexOf(defaults[base]))
+            defaults[base] = exp;
         });
         setSelectedExpiry(defaults);
         setLoading(false);
@@ -638,23 +634,26 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  /* Auto-subscribe to all instruments when frontend loads (ensures full list + data from market open) */
-  useEffect(() => {
+  /* Auto-subscribe: run when WebSocket connects (ensures backend is up) and pre-populate activeSymbols */
+  const runAutoSubscribe = useCallback(async () => {
     const base = API_URL || window.location.origin;
-    fetch(`${base}/api/symbols`)
-      .then((r) => r.json())
-      .then((instruments) => {
-        if (Array.isArray(instruments) && instruments.length > 0) {
-          return fetch(`${base}/api/subscribe/batch`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ instruments }),
-          });
-        }
-      })
-      .then((r) => r?.ok && r?.json())
-      .then((d) => d && console.log("Auto-subscribed:", d.subscribed, "of", d.total, "instruments"))
-      .catch(() => {});
+    try {
+      const r = await fetch(`${base}/api/symbols`);
+      const instruments = await r.json();
+      if (!Array.isArray(instruments) || instruments.length === 0) return;
+      const sub = await fetch(`${base}/api/subscribe/batch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruments }),
+      });
+      if (sub.ok) {
+        const d = await sub.json();
+        const symbols = instruments.map((i) => (i.symbol || "").toUpperCase()).filter(Boolean);
+        setActiveSymbols((prev) => [...new Set([...prev, ...symbols])]);
+        setActiveSymbol((cur) => cur || symbols[0] || null);
+        console.log("Auto-subscribed:", d?.subscribed ?? symbols.length, "of", d?.total ?? symbols.length, "instruments");
+      }
+    } catch (_) {}
   }, []);
 
   /* auto-subscribe when opened via ⧉ new-tab link */
@@ -673,6 +672,7 @@ export default function App() {
 
     ws.onopen = () => {
       setWsStatus("connected");
+      runAutoSubscribe();
       pingRef.current = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "ping" }));
@@ -699,7 +699,7 @@ export default function App() {
     };
 
     ws.onerror = () => ws.close();
-  }, []);
+  }, [runAutoSubscribe]);
 
   useEffect(() => {
     connect();
@@ -766,7 +766,7 @@ export default function App() {
           <span className="logo-sub logo-sub-desktop">ENGINE</span>
         </div>
         <div className="header-center">
-          {Object.keys(flows).map((sym) => (
+          {[...new Set([...activeSymbols, ...Object.keys(flows)])].sort().map((sym) => (
             <button
               key={sym}
               className={`tab ${activeSymbol === sym ? "tab-active" : ""}`}
@@ -810,7 +810,7 @@ export default function App() {
             <>
               <div className="chart-toolbar">
                 <InstrumentSelector
-                  symbols={Object.keys(flows)}
+                  symbols={[...new Set([...activeSymbols, ...Object.keys(flows)])].sort()}
                   value={activeSymbol}
                   onChange={setActiveSymbol}
                 />
@@ -920,11 +920,20 @@ export default function App() {
               ) : null}
             </>
           ) : activeSymbol && !flows[activeSymbol] ? (
-            <div className="empty-state loading-state">
-              <div className="empty-icon">⬡</div>
-              <div>Loading {activeSymbol}…</div>
-              <div className="empty-sub">Waiting for first data from feed</div>
-            </div>
+            <>
+              <div className="chart-toolbar">
+                <InstrumentSelector
+                  symbols={[...new Set([...activeSymbols, ...Object.keys(flows)])].sort()}
+                  value={activeSymbol}
+                  onChange={setActiveSymbol}
+                />
+              </div>
+              <div className="empty-state loading-state">
+                <div className="empty-icon">⬡</div>
+                <div>Loading {activeSymbol}…</div>
+                <div className="empty-sub">Waiting for first data from feed</div>
+              </div>
+            </>
           ) : (
             <div className="empty-state">
               <div className="empty-icon">⬡</div>
