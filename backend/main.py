@@ -77,6 +77,9 @@ HEATMAP_SNAPSHOTS   = int(os.getenv("HEATMAP_SNAPSHOTS", "300"))   # rolling sna
 # ── Options GEX ──────────────────────────────────────────────────────────────
 DHAN_TOKEN_OPTIONS  = os.getenv("DHAN_TOKEN_OPTIONS", "")
 OPTIONS_POLL_SEC    = float(os.getenv("OPTIONS_POLL_SEC", "300"))         # poll every 5 min (4 indices × 300s = well within rate limit)
+# ── OI poller (Dhan Market Quote API) ───────────────────────────────────────
+# WebSocket tick feed may not include OI; REST /marketfeed/quote returns OI for derivatives.
+OI_POLL_SEC = float(os.getenv("OI_POLL_SEC", "10"))   # poll OI every 10s (rate limit 1 req/sec)
 # Underlying security IDs (NSE index) used for options chain
 UNDERLYING_IDS = {
     "NIFTY":      "13",
@@ -316,6 +319,15 @@ class OrderFlowEngine:
             c.oi_change = oi - self.last_oi
 
         self.last_ltp = ltp
+
+    def update_oi(self, oi: float):
+        """Update OI on current candle from REST quote API (e.g. Dhan /marketfeed/quote)."""
+        if oi is None or oi <= 0:
+            return
+        c = self.current_candle
+        if c:
+            c.oi = oi
+            c.oi_change = oi - self.last_oi
         self.last_bid = bid
         self.last_ask = ask
         self.tick_count += 1
@@ -640,6 +652,69 @@ def _parse_depth_message(msg) -> Optional[dict]:
         "bids":   norm(raw_bids),
         "asks":   norm(raw_asks),
     }
+
+
+async def oi_poller_task():
+    """Poll Dhan /marketfeed/quote for OI (Open Interest). WebSocket tick feed often omits OI;
+    REST Quote API returns oi for derivatives. Docs: https://dhanhq.co/docs/v2/market-quote/"""
+    if not DHAN_ACCESS_TOKEN or not DHAN_CLIENT_ID:
+        return
+    logger.info(f"Starting OI poller (interval={OI_POLL_SEC}s, Dhan /marketfeed/quote)")
+    url = f"{DHAN_API_BASE}/marketfeed/quote"
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "access-token": DHAN_ACCESS_TOKEN,
+        "client-id": DHAN_CLIENT_ID,
+    }
+    while True:
+        await asyncio.sleep(OI_POLL_SEC)
+        if not subscribed_symbols:
+            continue
+        # Group by exchange_segment: { "NSE_FNO": [sid, ...], "MCX_COMM": [...] }
+        by_seg = defaultdict(list)
+        sid_to_symbol = {}
+        for symbol, info in subscribed_symbols.items():
+            seg = info.get("exchange_segment", "NSE_FO")
+            sid = str(info.get("security_id", ""))
+            if sid and symbol in engines:
+                by_seg[seg].append(sid)
+                sid_to_symbol[sid] = (symbol, seg)
+        if not by_seg:
+            continue
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for seg, sids in by_seg.items():
+                try:
+                    body = {seg: [int(s) for s in sids if s.isdigit()]}
+                    if not body[seg]:
+                        continue
+                    resp = await client.post(url, headers=headers, json=body)
+                    if resp.status_code != 200:
+                        continue
+                    data = resp.json()
+                    seg_data = (data.get("data") or {}).get(seg) or {}
+                    updated = []
+                    for sid_str, quote in seg_data.items():
+                        oi_val = quote.get("oi")
+                        if oi_val is not None and (symbol_seg := sid_to_symbol.get(sid_str)):
+                            symbol, _ = symbol_seg
+                            engine = engines.get(symbol)
+                            if engine:
+                                try:
+                                    oi = float(oi_val)
+                                    if oi > 0:
+                                        engine.update_oi(oi)
+                                        updated.append(symbol)
+                                except (TypeError, ValueError):
+                                    pass
+                    for sym in updated:
+                        now = time.monotonic()
+                        if now - _last_broadcast.get(sym, 0) >= BROADCAST_MIN_INTERVAL:
+                            _last_broadcast[sym] = now
+                            await broadcast_state(sym)
+                except Exception as e:
+                    logger.warning(f"OI poll error [{seg}]: {e}")
+                await asyncio.sleep(1.1)   # Dhan rate limit: 1 req/sec
 
 
 async def depth_poller_task():
@@ -1571,6 +1646,7 @@ async def startup():
     asyncio.create_task(dhan_feed_task())
     asyncio.create_task(_daily_reset_task())
     asyncio.create_task(_snapshot_task())
+    asyncio.create_task(oi_poller_task())
     asyncio.create_task(depth_poller_task())
     asyncio.create_task(options_poller_task())
     logger.info("OrderFlow Engine started (daily reset at IST midnight, disk snapshots every 5 min)")
