@@ -320,6 +320,15 @@ class OrderFlowEngine:
         self.last_ask = ask
         self.tick_count += 1
 
+    def update_oi(self, oi: float):
+        """Update OI on the current candle from a separate OI packet or REST poll."""
+        if oi is None or oi <= 0:
+            return
+        c = self.current_candle
+        if c:
+            c.oi = oi
+            c.oi_change = oi - self.last_oi
+
     def get_state(self, limit: Optional[int] = None) -> dict:
         """Return current state for broadcast. limit caps candles sent (avoids WebSocket payload limits)."""
         all_candles = list(self.candles) if self.candles else []
@@ -652,6 +661,12 @@ async def _depth_ws_single(sym: str, sid: str, seg: str):
                 async for raw in ws:
                     if isinstance(raw, (bytes, bytearray)) and len(raw) >= 12:
                         _parse_binary_depth(raw, sym)
+        except (websockets.exceptions.ConnectionClosedError,
+                websockets.exceptions.ConnectionClosedOK):
+            # Normal / expected close (e.g. server-side idle timeout, no close frame)
+            logger.info(f"Depth WS [{sym}] closed — reconnecting in {retry_delay}s")
+            await asyncio.sleep(retry_delay)
+            retry_delay = 5  # reset after expected close
         except Exception as e:
             logger.warning(f"Depth WS [{sym}] error: {e} — retry in {retry_delay}s")
             await asyncio.sleep(retry_delay)
