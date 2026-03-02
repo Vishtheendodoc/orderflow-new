@@ -108,6 +108,10 @@ function aggregateCandles(candles, targetMinutes, openOffsetMs = DEFAULT_MARKET_
       runningCvd += merged.delta;
       merged.cvd = runningCvd;
       merged.initiative = merged.delta > 0 ? "buy" : merged.delta < 0 ? "sell" : null;
+      // OI: use closing OI of the last 1m candle in this bucket;
+      // oi_change: sum of per-minute changes = net OI change over the whole period
+      merged.oi = last.oi ?? 0;
+      merged.oi_change = arr.reduce((sum, c) => sum + (c.oi_change ?? 0), 0);
       return merged;
     });
 }
