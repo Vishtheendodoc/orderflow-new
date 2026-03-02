@@ -364,6 +364,7 @@ _last_broadcast: Dict[str, float] = {}
 # Token expiry / reconnect state
 _dhan_reconnect_delay: int = 5          # seconds; doubles on auth failure, resets on success
 _dhan_token_event: asyncio.Event = asyncio.Event()  # set when token is updated via API
+_dhan_ws = None  # Current Dhan WebSocket connection (for re-subscribing when batch-add)
 
 # ── Heatmap: rolling order-book snapshots ────────────────────────────────────
 # symbol → deque of {ts, ltp, bids:[{p,q}], asks:[{p,q}]}
@@ -908,6 +909,8 @@ async def dhan_feed_task():
 
         try:
             async with websockets.connect(url, ping_interval=20) as ws:
+                global _dhan_ws
+                _dhan_ws = ws
                 _dhan_reconnect_delay = 5          # reset backoff on successful connect
                 logger.info("Connected to Dhan WebSocket (v2)")
 
@@ -925,19 +928,22 @@ async def dhan_feed_task():
                     }))
                     await asyncio.sleep(0.1)
 
-                async for raw in ws:
-                    try:
-                        if isinstance(raw, (bytes, bytearray)):
-                            parsed = parse_dhan_binary(raw)
-                            if parsed:
-                                await handle_dhan_tick(parsed)
-                        else:
-                            try:
-                                await handle_dhan_tick(json.loads(raw))
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        logger.error(f"Tick parse error: {e}")
+                try:
+                    async for raw in ws:
+                        try:
+                            if isinstance(raw, (bytes, bytearray)):
+                                parsed = parse_dhan_binary(raw)
+                                if parsed:
+                                    await handle_dhan_tick(parsed)
+                            else:
+                                try:
+                                    await handle_dhan_tick(json.loads(raw))
+                                except Exception:
+                                    pass
+                        except Exception as e:
+                            logger.error(f"Tick parse error: {e}")
+                finally:
+                    _dhan_ws = None
 
         except Exception as e:
             if _is_auth_error(e):
@@ -1378,6 +1384,49 @@ async def subscribe(payload: dict):
 
     logger.info(f"Subscribed: {symbol} ({security_id})")
     return {"status": "subscribed", "symbol": symbol}
+
+
+@app.post("/api/subscribe/batch")
+async def subscribe_batch(payload: dict):
+    """Subscribe to multiple symbols. payload: { instruments: [{symbol, security_id, exchange?, segment?}, ...] }"""
+    instruments = payload.get("instruments", [])
+    if not isinstance(instruments, list):
+        raise HTTPException(400, "instruments must be an array")
+    added = []
+    new_instruments_for_dhan = []  # {ExchangeSegment, SecurityId} for Dhan re-subscribe
+    for item in instruments:
+        if not isinstance(item, dict):
+            continue
+        symbol = (item.get("symbol") or "").upper()
+        security_id = str(item.get("security_id", ""))
+        if not symbol or not security_id:
+            continue
+        if symbol not in engines and len(engines) >= MAX_ENGINES:
+            logger.warning(f"Batch subscribe: max symbols ({MAX_ENGINES}) reached, skipping {symbol}")
+            continue
+        exchange_segment = _resolve_exchange_segment(item)
+        subscribed_symbols[symbol] = {"security_id": security_id, "exchange_segment": exchange_segment}
+        if symbol not in engines:
+            engines[symbol] = OrderFlowEngine(symbol, security_id)
+            added.append(symbol)
+            new_instruments_for_dhan.append({"ExchangeSegment": exchange_segment, "SecurityId": security_id})
+    if added:
+        logger.info(f"Batch subscribe: added {len(added)} instruments (total {len(engines)})")
+        # Re-subscribe to Dhan for new symbols if connection is active
+        if new_instruments_for_dhan and _dhan_ws is not None:
+            try:
+                for i in range(0, len(new_instruments_for_dhan), 100):
+                    batch = new_instruments_for_dhan[i : i + 100]
+                    await _dhan_ws.send(json.dumps({
+                        "RequestCode": 17,
+                        "InstrumentCount": len(batch),
+                        "InstrumentList": batch,
+                    }))
+                    await asyncio.sleep(0.05)
+                logger.info(f"Dhan re-subscribed to {len(new_instruments_for_dhan)} new instruments")
+            except Exception as e:
+                logger.warning(f"Dhan re-subscribe failed (will retry on next connect): {e}")
+    return {"status": "ok", "subscribed": len(added), "total": len(engines)}
 
 
 @app.delete("/api/subscribe/{symbol}")

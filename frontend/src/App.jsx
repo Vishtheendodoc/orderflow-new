@@ -638,6 +638,25 @@ export default function App() {
       .catch(() => {});
   }, []);
 
+  /* Auto-subscribe to all instruments when frontend loads (ensures full list + data from market open) */
+  useEffect(() => {
+    const base = API_URL || window.location.origin;
+    fetch(`${base}/api/symbols`)
+      .then((r) => r.json())
+      .then((instruments) => {
+        if (Array.isArray(instruments) && instruments.length > 0) {
+          return fetch(`${base}/api/subscribe/batch`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ instruments }),
+          });
+        }
+      })
+      .then((r) => r?.ok && r?.json())
+      .then((d) => d && console.log("Auto-subscribed:", d.subscribed, "of", d.total, "instruments"))
+      .catch(() => {});
+  }, []);
+
   /* auto-subscribe when opened via ⧉ new-tab link */
   useEffect(() => {
     if (!urlSymbol) return;
