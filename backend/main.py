@@ -1305,6 +1305,41 @@ def health():
     }
 
 
+@app.get("/api/disk")
+def disk_info():
+    """Show what's stored on the Render Disk — useful for verifying data persistence."""
+    if not os.path.isdir(SNAPSHOT_DIR):
+        return {"mounted": False, "path": SNAPSHOT_DIR, "files": []}
+    files = []
+    total_bytes = 0
+    for fname in sorted(os.listdir(SNAPSHOT_DIR)):
+        if not (fname.endswith(".jsonl") or fname.endswith(".json")):
+            continue
+        fpath = os.path.join(SNAPSHOT_DIR, fname)
+        try:
+            size = os.path.getsize(fpath)
+            total_bytes += size
+            # Count lines (= candles) for JSONL files
+            candle_count = None
+            if fname.endswith(".jsonl"):
+                with open(fpath) as fh:
+                    candle_count = sum(1 for ln in fh if ln.strip())
+            files.append({
+                "file": fname,
+                "size_kb": round(size / 1024, 1),
+                "candles": candle_count,
+            })
+        except Exception:
+            pass
+    return {
+        "mounted": True,
+        "path": SNAPSHOT_DIR,
+        "total_files": len(files),
+        "total_size_kb": round(total_bytes / 1024, 1),
+        "files": files,
+    }
+
+
 @app.get("/api/settings")
 def get_settings():
     return {"candle_seconds": CANDLE_SECONDS, "candle_options": CANDLE_OPTIONS}
