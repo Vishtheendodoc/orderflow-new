@@ -424,12 +424,17 @@ def _ist_date_str() -> str:
 
 
 def _do_daily_reset():
-    """Reset all engines for new trading day. Clears candles, CVD, preserves subscriptions."""
+    """Reset all engines for new trading day. Clears candles, CVD, preserves subscriptions.
+    On cold start (restart/redeploy): only clear RAM; do NOT delete disk — load_all_snapshots
+    will restore from disk. On midnight crossing: wipe yesterday's disk files too.
+    """
     global _last_reset_date
     today = _ist_date_str()
     if _last_reset_date == today:
         return
+    is_midnight_crossing = _last_reset_date is not None  # Had a previous run, now new day
     _last_reset_date = today
+
     for eng in engines.values():
         eng.candles.clear()
         eng.current_candle = None
@@ -437,26 +442,30 @@ def _do_daily_reset():
         eng.prev_volume = 0.0
         eng.prev_total_buy = 0.0
         eng.prev_total_sell = 0.0
-    # Clear depth snapshots (RAM) and wipe disk files
     depth_snapshots.clear()
     _depth_append_count.clear()
-    if os.path.isdir(DEPTH_DIR):
-        for fname in os.listdir(DEPTH_DIR):
-            if fname.endswith(".depth.jsonl"):
-                try:
-                    os.remove(os.path.join(DEPTH_DIR, fname))
-                except Exception:
-                    pass
-    # Wipe yesterday's snapshot files so they don't get reloaded next restart
-    if os.path.isdir(SNAPSHOT_DIR):
-        for fname in os.listdir(SNAPSHOT_DIR):
-            if fname.endswith(".json") or fname.endswith(".jsonl"):
-                try:
-                    os.remove(os.path.join(SNAPSHOT_DIR, fname))
-                except Exception:
-                    pass
+
+    # Only wipe disk when crossing midnight — NOT on cold start (restart/redeploy)
+    # On cold start we keep disk so load_all_snapshots can restore
+    if is_midnight_crossing:
+        if os.path.isdir(DEPTH_DIR):
+            for fname in os.listdir(DEPTH_DIR):
+                if fname.endswith(".depth.jsonl"):
+                    try:
+                        os.remove(os.path.join(DEPTH_DIR, fname))
+                    except Exception:
+                        pass
+        if os.path.isdir(SNAPSHOT_DIR):
+            for fname in os.listdir(SNAPSHOT_DIR):
+                if fname.endswith(".json") or fname.endswith(".jsonl"):
+                    try:
+                        os.remove(os.path.join(SNAPSHOT_DIR, fname))
+                    except Exception:
+                        pass
+        logger.info(f"Daily reset at IST midnight. Date: {today}. Engines + disk cleared.")
+    else:
+        logger.info(f"Cold start. Date: {today}. Engines cleared; disk preserved for restore.")
     gc.collect()
-    logger.info(f"Daily reset at IST midnight. Date: {today}. Engines + snapshots cleared.")
 
 
 async def _daily_reset_task():
