@@ -397,6 +397,14 @@ gex_cache: Dict[str, dict] = {}
 # expiry_list_cache keyed by index_name -> list of expiry date strings
 expiry_list_cache: Dict[str, list] = {}
 
+# ── HFT Scanner ───────────────────────────────────────────────────────────────
+# Accumulated per-minute option chain snapshots → time-series for the triple-pane chart.
+# index_name → list[{t, ts, spot, mfi, flows}]
+hft_scanner_history: Dict[str, list] = defaultdict(list)
+# Previous snapshot per index, keyed by "{strike}_CE|PE" → {oi, ltp, iv}
+hft_prev_data: Dict[str, dict] = {}
+HFT_MAX_SNAPSHOTS = int(os.getenv("HFT_MAX_SNAPSHOTS", "400"))  # ~6.5 h at 1-min intervals
+
 
 # ─────────────────────────────────────────────
 # Daily reset (IST midnight) for 24/7 deployment
@@ -837,6 +845,133 @@ def _find_gex_flip(strikes: list, spot: float) -> Optional[float]:
     return flip
 
 
+def _compute_hft_snapshot(index_name: str, spot: float, oc: dict) -> None:
+    """Derive one time-series entry for the HFT scanner chart from a raw option-chain snapshot.
+
+    Computes:
+      • per-strike OI / LTP / IV changes vs the previous call
+      • a simple Money Flow Index (MFI) across all ATM ±5 strikes
+      • flow classification into eight named buckets (matching the Streamlit colour scheme)
+
+    Appended to hft_scanner_history[index_name] (capped at HFT_MAX_SNAPSHOTS).
+    """
+    prev   = hft_prev_data.get(index_name, {})
+    strikes_data = []
+
+    for strike_str, sides in oc.items():
+        try:
+            strike = float(strike_str)
+        except ValueError:
+            continue
+
+        ce = sides.get("ce") or {}
+        pe = sides.get("pe") or {}
+
+        def _f(d, key):
+            return float(d.get(key) or 0)
+
+        ce_oi  = _f(ce, "oi");           pe_oi  = _f(pe, "oi")
+        ce_ltp = _f(ce, "last_price");   pe_ltp = _f(pe, "last_price")
+        ce_iv  = _f(ce, "implied_volatility"); pe_iv = _f(pe, "implied_volatility")
+        ce_vol = _f(ce, "volume");       pe_vol = _f(pe, "volume")
+
+        pk_ce = f"{strike}_CE";  pk_pe = f"{strike}_PE"
+        pc = prev.get(pk_ce, {}); pp = prev.get(pk_pe, {})
+
+        def _chg(cur, p_val):
+            return (cur - p_val) / (p_val or 1) * 100 if p_val else 0
+
+        strikes_data.append({
+            "strike":      strike,
+            "CE_OI":       ce_oi,  "CE_LTP":  ce_ltp, "CE_IV":  ce_iv,  "CE_VOL": ce_vol,
+            "CE_OI_CHG":   _chg(ce_oi,  pc.get("oi",  ce_oi)),
+            "CE_LTP_CHG":  _chg(ce_ltp, pc.get("ltp", ce_ltp)),
+            "CE_IV_CHG":   _chg(ce_iv,  pc.get("iv",  ce_iv)),
+            "PE_OI":       pe_oi,  "PE_LTP":  pe_ltp, "PE_IV":  pe_iv,  "PE_VOL": pe_vol,
+            "PE_OI_CHG":   _chg(pe_oi,  pp.get("oi",  pe_oi)),
+            "PE_LTP_CHG":  _chg(pe_ltp, pp.get("ltp", pe_ltp)),
+            "PE_IV_CHG":   _chg(pe_iv,  pp.get("iv",  pe_iv)),
+        })
+
+    if not strikes_data:
+        return
+
+    # ── Money Flow Index (across all strikes, single-snapshot approximation) ──
+    mf_pos = mf_neg = 0.0
+    for s in strikes_data:
+        ce_mf = s["CE_LTP"] * s["CE_VOL"]
+        pe_mf = s["PE_LTP"] * s["PE_VOL"]
+        if s["CE_LTP_CHG"] > 0:  mf_pos += ce_mf
+        elif s["CE_LTP_CHG"] < 0: mf_neg += ce_mf
+        if s["PE_LTP_CHG"] > 0:  mf_pos += pe_mf
+        elif s["PE_LTP_CHG"] < 0: mf_neg += pe_mf
+    mfi = 100 - (100 / (1 + mf_pos / (mf_neg + 1)))
+
+    # ── ATM ±5 strikes filter ─────────────────────────────────────────────────
+    sorted_s = sorted(set(s["strike"] for s in strikes_data))
+    interval = 50.0
+    if len(sorted_s) >= 2:
+        diffs = [sorted_s[i + 1] - sorted_s[i] for i in range(len(sorted_s) - 1)]
+        interval = min(diffs) or 50.0
+    nearby = [s for s in strikes_data if abs(s["strike"] - spot) <= 5 * interval]
+
+    # ── Flow classification ───────────────────────────────────────────────────
+    flows: dict = {
+        "Aggressive Call Buy":  0.0,
+        "Heavy Call Short":     0.0,
+        "Aggressive Put Buy":   0.0,
+        "Heavy Put Write":      0.0,
+        "Dark Pool CE":         0.0,
+        "Dark Pool PE":         0.0,
+        "Call Short":           0.0,
+        "Put Write":            0.0,
+    }
+
+    for s in nearby:
+        ce_act = s["CE_OI"] * s["CE_LTP"]
+        pe_act = s["PE_OI"] * s["PE_LTP"]
+
+        if ce_act > 0:
+            if s["CE_OI_CHG"] > 5 and abs(s["CE_LTP_CHG"]) < 2 and s["CE_VOL"] > 100:
+                flows["Dark Pool CE"] += ce_act
+            elif s["CE_LTP_CHG"] > 2 and mfi > 70 and s["CE_VOL"] > 50:
+                flows["Aggressive Call Buy"] += ce_act
+            elif s["CE_OI_CHG"] > 5 and s["CE_LTP_CHG"] < -2 and mfi < 30:
+                flows["Heavy Call Short"] += ce_act
+            elif s["CE_LTP_CHG"] < -1 and s["CE_OI_CHG"] > 3:
+                flows["Call Short"] += ce_act
+
+        if pe_act > 0:
+            if s["PE_OI_CHG"] > 5 and abs(s["PE_LTP_CHG"]) < 2 and s["PE_VOL"] > 100:
+                flows["Dark Pool PE"] += pe_act
+            elif s["PE_LTP_CHG"] > 2 and mfi < 30 and s["PE_VOL"] > 50:
+                flows["Aggressive Put Buy"] += pe_act
+            elif s["PE_OI_CHG"] > 5 and s["PE_LTP_CHG"] < -2 and mfi > 70:
+                flows["Heavy Put Write"] += pe_act
+            elif s["PE_LTP_CHG"] < -1 and s["PE_OI_CHG"] > 3:
+                flows["Put Write"] += pe_act
+
+    # ── Store snapshot ────────────────────────────────────────────────────────
+    now_ist  = datetime.now(IST)
+    history  = hft_scanner_history[index_name]
+    history.append({
+        "t":     now_ist.strftime("%H:%M"),
+        "ts":    int(time.time()),
+        "spot":  round(spot, 2),
+        "mfi":   round(mfi, 2),
+        "flows": {k: round(v, 2) for k, v in flows.items() if v > 0},
+    })
+    if len(history) > HFT_MAX_SNAPSHOTS:
+        hft_scanner_history[index_name] = history[-HFT_MAX_SNAPSHOTS:]
+
+    # ── Update prev-data for next cycle's change computation ─────────────────
+    new_prev: dict = {}
+    for s in strikes_data:
+        new_prev[f"{s['strike']}_CE"] = {"oi": s["CE_OI"], "ltp": s["CE_LTP"], "iv": s["CE_IV"]}
+        new_prev[f"{s['strike']}_PE"] = {"oi": s["PE_OI"], "ltp": s["PE_LTP"], "iv": s["PE_IV"]}
+    hft_prev_data[index_name] = new_prev
+
+
 async def _fetch_gex_once(index_name: str, underlying_scrip: str, expiry: str) -> bool:
     """Fetch options chain from Dhan REST API and compute GEX for one index.
 
@@ -925,6 +1060,9 @@ async def _fetch_gex_once(index_name: str, underlying_scrip: str, expiry: str) -
                 "put_gex":  round(put_gex, 2),
                 "net_gex":  round(net_gex, 2),
             })
+
+        # Also accumulate HFT scanner time-series (piggybacks the same API call)
+        _compute_hft_snapshot(index_name, spot, oc)
 
         results.sort(key=lambda x: x["strike"])
         flip = _find_gex_flip(results, spot)
@@ -1470,6 +1608,34 @@ async def get_gex(symbol: str, expiry: str = ""):
 def list_gex():
     """Return GEX for all cached index:expiry combinations."""
     return {k: v for k, v in gex_cache.items()}
+
+
+@app.get("/api/hft_scanner/{symbol}")
+async def get_hft_scanner(symbol: str):
+    """Return HFT scanner time-series for a NIFTY / BANKNIFTY index.
+
+    Response: { symbol, spot, updated_at, series: [{t, ts, spot, mfi, flows}] }
+    Each entry is one option-chain poll cycle (default every OPTIONS_POLL_SEC seconds).
+    """
+    idx = _resolve_index(symbol)
+    if not idx:
+        return JSONResponse({"error": f"Unknown index: {symbol}"}, status_code=400)
+
+    history = list(hft_scanner_history.get(idx, []))
+    if not history:
+        token_hint = "" if DHAN_TOKEN_OPTIONS else " — set DHAN_TOKEN_OPTIONS to enable"
+        return JSONResponse(
+            {"symbol": idx, "series": [], "error": f"No HFT scanner data yet{token_hint}"},
+            status_code=202,
+        )
+
+    last = history[-1]
+    return {
+        "symbol":     idx,
+        "spot":       last["spot"],
+        "updated_at": last["ts"],
+        "series":     history,
+    }
 
 
 @app.post("/api/token")

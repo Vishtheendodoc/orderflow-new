@@ -3,6 +3,7 @@ import OrderflowChart from "./OrderflowChart";
 import FootprintChart from "./FootprintChart";
 import LiquidityHeatmap from "./LiquidityHeatmap";
 import GexChart from "./GexChart";
+import HftScannerChart from "./HftScannerChart";
 
 class ErrorBoundary extends Component {
   state = { hasError: false };
@@ -952,6 +953,15 @@ export default function App() {
                     GEX
                   </button>
                 )}
+                {isIndexFuture && (
+                  <button
+                    className={`vt-btn ${viewMode === "hft" ? "active" : ""}`}
+                    onClick={() => setViewMode("hft")}
+                    title="HFT Algo Scanner — Spot / MFI / Institutional flow (DHAN_TOKEN_OPTIONS required)"
+                  >
+                    HFT
+                  </button>
+                )}
               </div>
               {/* Timeframe selector + Feature toggles */}
               <div className="candle-duration-bar">
@@ -988,6 +998,13 @@ export default function App() {
               ) : viewMode === "gex" ? (
                 <div className="heatmap-view-wrap">
                   <GexChart
+                    symbol={activeSymbol}
+                    apiBase={API_URL || window.location.origin}
+                  />
+                </div>
+              ) : viewMode === "hft" ? (
+                <div className="chart-view-wrap">
+                  <HftScannerChart
                     symbol={activeSymbol}
                     apiBase={API_URL || window.location.origin}
                   />
