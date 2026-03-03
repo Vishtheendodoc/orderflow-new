@@ -24,7 +24,7 @@ services:
       - key: MAX_CANDLES_PER_SYMBOL
         value: "400"          # max candles kept on disk per symbol (full NSE session = 375)
       - key: MAX_CANDLES_IN_MEMORY
-        value: "20"           # closed candles kept in RAM per engine; rest live on disk
+        value: "10"           # closed candles kept in RAM per engine; rest live on disk
       - key: MAX_LEVELS_PER_CANDLE
         value: "150"          # 150 price levels per candle is more than enough
       - key: MAX_ENGINES
@@ -44,7 +44,7 @@ services:
       - key: DHAN_TOKEN_DEPTH
         sync: false             # set manually in Render dashboard
       - key: HEATMAP_SNAPSHOTS
-        value: "300"            # rolling snapshots kept per symbol (≈5 min of depth history)
+        value: "60"             # 60 snapshots per symbol ≈ last ~30s of depth; 300 was ~192MB RAM
       # ── Options GEX token (separate Dhan account) ────────────────────────────
       # Polls /v2/optionchain every 60 s for NIFTY/BANKNIFTY options chain.
       # Leave blank to disable the GEX poller (GEX tab will show "no data").
