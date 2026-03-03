@@ -75,7 +75,12 @@ BROADCAST_MIN_INTERVAL = float(os.getenv("BROADCAST_MIN_INTERVAL", "0.1"))
 # ── Liquidity Heatmap (200-level order book) ─────────────────────────────────
 # Separate Dhan token — avoids rate-limiting the main feed token.
 DHAN_TOKEN_DEPTH    = os.getenv("DHAN_TOKEN_DEPTH", "")
-HEATMAP_SNAPSHOTS   = int(os.getenv("HEATMAP_SNAPSHOTS", "300"))   # rolling snapshots per symbol (300 = 5 min)
+HEATMAP_SNAPSHOTS   = int(os.getenv("HEATMAP_SNAPSHOTS", "300"))   # max snapshots to return via API
+# In-RAM cache size — keep small to reduce Render memory; full history lives on disk
+HEATMAP_SNAPSHOTS_IN_RAM = int(os.getenv("HEATMAP_SNAPSHOTS_IN_RAM", "50"))
+# Disk: append to JSONL; when file exceeds this many lines, truncate to keep last N
+MAX_DEPTH_FILE_LINES = int(os.getenv("MAX_DEPTH_FILE_LINES", "500"))
+DEPTH_DIR = os.path.join(SNAPSHOT_DIR, "depth")
 
 # ── Options GEX ──────────────────────────────────────────────────────────────
 DHAN_TOKEN_OPTIONS  = os.getenv("DHAN_TOKEN_OPTIONS", "")
@@ -432,6 +437,16 @@ def _do_daily_reset():
         eng.prev_volume = 0.0
         eng.prev_total_buy = 0.0
         eng.prev_total_sell = 0.0
+    # Clear depth snapshots (RAM) and wipe disk files
+    depth_snapshots.clear()
+    _depth_append_count.clear()
+    if os.path.isdir(DEPTH_DIR):
+        for fname in os.listdir(DEPTH_DIR):
+            if fname.endswith(".depth.jsonl"):
+                try:
+                    os.remove(os.path.join(DEPTH_DIR, fname))
+                except Exception:
+                    pass
     # Wipe yesterday's snapshot files so they don't get reloaded next restart
     if os.path.isdir(SNAPSHOT_DIR):
         for fname in os.listdir(SNAPSHOT_DIR):
@@ -700,6 +715,55 @@ def _sid_to_symbol(sid: str) -> Optional[str]:
     return None
 
 
+# Per-symbol append counter for periodic disk truncation
+_depth_append_count: Dict[str, int] = {}
+
+
+def _append_depth_to_disk(symbol: str, snap: dict) -> None:
+    """Append one depth snapshot to disk (JSONL). Truncate periodically to cap file size."""
+    if not SNAPSHOT_DIR:
+        return
+    try:
+        os.makedirs(DEPTH_DIR, exist_ok=True)
+        path = os.path.join(DEPTH_DIR, f"{symbol}.depth.jsonl")
+        with open(path, "a") as fh:
+            fh.write(json.dumps(snap) + "\n")
+
+        # Every 100 appends, truncate if file exceeds MAX_DEPTH_FILE_LINES
+        _depth_append_count[symbol] = _depth_append_count.get(symbol, 0) + 1
+        if _depth_append_count[symbol] >= 100:
+            _depth_append_count[symbol] = 0
+            try:
+                with open(path, "r") as fh:
+                    lines = fh.readlines()
+                if len(lines) > MAX_DEPTH_FILE_LINES:
+                    keep = lines[-MAX_DEPTH_FILE_LINES:]
+                    with open(path, "w") as fh:
+                        fh.writelines(keep)
+                    logger.debug(f"Depth file truncated [{symbol}] to {len(keep)} lines")
+            except Exception as e:
+                logger.warning(f"Depth truncate failed [{symbol}]: {e}")
+    except Exception as e:
+        logger.warning(f"Depth disk append failed [{symbol}]: {e}")
+
+
+def _load_depth_from_disk(symbol: str, n: int) -> list:
+    """Load last n depth snapshots from disk. Returns [] if no file or error."""
+    path = os.path.join(DEPTH_DIR, f"{symbol}.depth.jsonl")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r") as fh:
+            lines = fh.readlines()
+        if not lines:
+            return []
+        lines = lines[-n:] if len(lines) > n else lines
+        return [json.loads(l) for l in lines if l.strip()]
+    except Exception as e:
+        logger.warning(f"Depth disk load failed [{symbol}]: {e}")
+        return []
+
+
 def _parse_binary_depth(raw: bytes, symbol: str) -> None:
     """Parse 200-level binary depth packet from Dhan full-depth feed.
 
@@ -747,14 +811,16 @@ def _parse_binary_depth(raw: bytes, symbol: str) -> None:
 
     if pending_bids or pending_asks:
         if symbol not in depth_snapshots:
-            depth_snapshots[symbol] = deque(maxlen=HEATMAP_SNAPSHOTS)
+            depth_snapshots[symbol] = deque(maxlen=HEATMAP_SNAPSHOTS_IN_RAM)
         engine = engines.get(symbol)
-        depth_snapshots[symbol].append({
+        snap = {
             "ts":   int(time.time() * 1000),
             "ltp":  engine.last_ltp if engine else 0,
             "bids": pending_bids,
             "asks": pending_asks,
-        })
+        }
+        depth_snapshots[symbol].append(snap)
+        _append_depth_to_disk(symbol, snap)
 
 
 async def _depth_ws_single(sym: str, sid: str, seg: str):
@@ -1483,22 +1549,41 @@ def get_settings():
     return {"candle_seconds": CANDLE_SECONDS, "candle_options": CANDLE_OPTIONS}
 
 
+def _resolve_depth_symbol(symbol: str) -> Optional[str]:
+    """Resolve to a concrete symbol key (for partial match like NIFTY -> NIFTY25MARFUT)."""
+    symbol = symbol.upper()
+    if symbol in depth_snapshots:
+        return symbol
+    for key in depth_snapshots:
+        if symbol in key.upper():
+            return key
+    # Try disk: any .depth.jsonl file whose name contains symbol
+    if os.path.isdir(DEPTH_DIR):
+        for fname in os.listdir(DEPTH_DIR):
+            if fname.endswith(".depth.jsonl") and symbol in fname.upper():
+                return fname.replace(".depth.jsonl", "")
+    return None
+
+
 @app.get("/api/heatmap/{symbol}")
 def get_heatmap(symbol: str, n: int = 300):
     """Return last *n* depth snapshots for the given index-future symbol.
-    Used by the Liquidity Heatmap canvas component on the frontend.
+    Uses in-RAM cache when n <= cache size; otherwise pulls from disk to save RAM.
     """
-    symbol = symbol.upper()
-    # Allow partial match: "NIFTY" matches "NIFTY25MARFUT" etc.
-    snaps = depth_snapshots.get(symbol)
-    if snaps is None:
-        for key in depth_snapshots:
-            if symbol in key.upper():
-                snaps = depth_snapshots[key]
-                break
-    if not snaps:
-        return {"symbol": symbol, "snapshots": []}
-    return {"symbol": symbol, "snapshots": list(snaps)[-n:]}
+    resolved = _resolve_depth_symbol(symbol)
+    if not resolved:
+        return {"symbol": symbol.upper(), "snapshots": []}
+    snaps = depth_snapshots.get(resolved)
+    n = min(n, HEATMAP_SNAPSHOTS)
+    if snaps and n <= len(snaps):
+        return {"symbol": resolved, "snapshots": list(snaps)[-n:]}
+    # Pull from disk when n > RAM cache or no in-memory data
+    from_disk = _load_depth_from_disk(resolved, n)
+    if from_disk:
+        return {"symbol": resolved, "snapshots": from_disk}
+    if snaps:
+        return {"symbol": resolved, "snapshots": list(snaps)[-n:]}
+    return {"symbol": resolved, "snapshots": []}
 
 
 def _resolve_index(symbol: str) -> Optional[str]:
