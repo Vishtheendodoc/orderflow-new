@@ -102,11 +102,11 @@ export default function GexChart({ symbol, apiBase, height = 480 }) {
     const d    = dataRef.current;
 
     ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = "#0d1117";
+    ctx.fillStyle = "#f8fafc";
     ctx.fillRect(0, 0, W, H);
 
     if (!d || !d.strikes?.length) {
-      ctx.fillStyle = "#555";
+      ctx.fillStyle = "#94a3b8";
       ctx.font = "13px monospace";
       ctx.textAlign = "center";
       ctx.fillText(
@@ -147,7 +147,7 @@ export default function GexChart({ symbol, apiBase, height = 480 }) {
     const scale = (W - LABEL_W) / 2 / maxAbs * 0.9;
 
     // Centre line
-    ctx.strokeStyle = "#333";
+    ctx.strokeStyle = "#cbd5e1";
     ctx.lineWidth   = 1;
     ctx.beginPath();
     ctx.moveTo(midX, 0);
@@ -161,23 +161,23 @@ export default function GexChart({ symbol, apiBase, height = 480 }) {
 
       // Row background for ATM
       if (isATM) {
-        ctx.fillStyle = "rgba(255,255,255,0.04)";
+        ctx.fillStyle = "rgba(251,191,36,0.12)";
         ctx.fillRect(0, y - 1, W, BAR_H + 2);
       }
 
       // Call GEX (teal, extends right from midX)
       const callW = row.call_gex * scale;
-      ctx.fillStyle = "rgba(0,180,130,0.65)";
+      ctx.fillStyle = "rgba(5,150,105,0.55)";
       ctx.fillRect(midX, y, callW, BAR_H);
 
       // Put GEX (red, extends left from midX)
       const putW = row.put_gex * scale;
-      ctx.fillStyle = "rgba(210,50,50,0.65)";
+      ctx.fillStyle = "rgba(220,38,38,0.55)";
       ctx.fillRect(midX - putW, y, putW, BAR_H);
 
       // Net GEX outline
       const netW = row.net_gex * scale;
-      ctx.strokeStyle = row.net_gex >= 0 ? "#00e676" : "#ff5252";
+      ctx.strokeStyle = row.net_gex >= 0 ? "#059669" : "#dc2626";
       ctx.lineWidth   = 1.5;
       ctx.strokeRect(
         netW >= 0 ? midX : midX + netW,
@@ -185,14 +185,14 @@ export default function GexChart({ symbol, apiBase, height = 480 }) {
       );
 
       // Strike label
-      ctx.fillStyle   = isATM ? "#fff" : "#888";
+      ctx.fillStyle   = isATM ? "#92400e" : "#475569";
       ctx.font        = `${isATM ? "bold " : ""}11px monospace`;
       ctx.textAlign   = "right";
       ctx.fillText(row.strike.toFixed(0), LABEL_W - 4, y + BAR_H - 2);
 
       // Net GEX value label
       if (Math.abs(row.net_gex) > maxAbs * 0.05) {
-        ctx.fillStyle  = row.net_gex >= 0 ? "#00e676" : "#ff5252";
+        ctx.fillStyle  = row.net_gex >= 0 ? "#059669" : "#dc2626";
         ctx.font       = "9px monospace";
         ctx.textAlign  = netW >= 0 ? "left" : "right";
         const labelX   = netW >= 0 ? midX + netW + 3 : midX + netW - 3;
@@ -206,7 +206,7 @@ export default function GexChart({ symbol, apiBase, height = 480 }) {
       if (fpRow) {
         const i  = visible.indexOf(fpRow);
         const fy = startY + i * (BAR_H + 2) + BAR_H / 2;
-        ctx.strokeStyle = "#ffeb3b";
+        ctx.strokeStyle = "#d97706";
         ctx.lineWidth   = 1.5;
         ctx.setLineDash([5, 3]);
         ctx.beginPath();
@@ -214,7 +214,7 @@ export default function GexChart({ symbol, apiBase, height = 480 }) {
         ctx.lineTo(W, fy);
         ctx.stroke();
         ctx.setLineDash([]);
-        ctx.fillStyle  = "#ffeb3b";
+        ctx.fillStyle  = "#d97706";
         ctx.font       = "bold 10px monospace";
         ctx.textAlign  = "left";
         ctx.fillText(`Flip ${flipPoint.toFixed(0)}`, LABEL_W + 4, fy - 3);
@@ -229,7 +229,7 @@ export default function GexChart({ symbol, apiBase, height = 480 }) {
       );
       const si = visible.indexOf(spotRow);
       const sy = startY + si * (BAR_H + 2) + BAR_H / 2;
-      ctx.strokeStyle = "#ffffff";
+      ctx.strokeStyle = "#1e293b";
       ctx.lineWidth   = 1;
       ctx.setLineDash([2, 2]);
       ctx.beginPath();
@@ -237,14 +237,14 @@ export default function GexChart({ symbol, apiBase, height = 480 }) {
       ctx.lineTo(W, sy);
       ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle  = "#fff";
+      ctx.fillStyle  = "#1e293b";
       ctx.font       = "bold 10px monospace";
       ctx.textAlign  = "left";
       ctx.fillText(`SPOT ${spot.toFixed(0)}`, LABEL_W + 4, sy - 3);
     }
 
     // Column headers
-    ctx.fillStyle  = "#555";
+    ctx.fillStyle  = "#94a3b8";
     ctx.font       = "10px monospace";
     ctx.textAlign  = "center";
     ctx.fillText("← Put GEX", midX - (W - LABEL_W) / 4, 14);
@@ -288,31 +288,31 @@ export default function GexChart({ symbol, apiBase, height = 480 }) {
   }, [height]);
 
   return (
-    <div style={{ position: "relative", width: "100%", background: "#0d1117", borderRadius: 6 }}>
+    <div style={{ position: "relative", width: "100%", background: "#f8fafc", borderRadius: 6 }}>
       {/* ── top bar ── */}
       <div style={{
         display: "flex", alignItems: "center", gap: 10,
-        padding: "5px 8px", borderBottom: "1px solid #1e2530",
+        padding: "5px 8px", borderBottom: "1px solid #e2e8f0",
         flexWrap: "wrap",
       }}>
         {/* Legend */}
         <div style={{ display: "flex", gap: 12, fontSize: 11 }}>
-          <span style={{ color: "rgba(0,180,130,0.9)" }}>■ Call GEX</span>
-          <span style={{ color: "rgba(210,50,50,0.9)" }}>■ Put GEX</span>
-          <span style={{ color: "#00e676" }}>■ Net+</span>
-          <span style={{ color: "#ff5252" }}>■ Net−</span>
-          <span style={{ color: "#ffeb3b" }}>– Flip pt</span>
+          <span style={{ color: "rgba(5,150,105,0.9)" }}>■ Call GEX</span>
+          <span style={{ color: "rgba(220,38,38,0.9)" }}>■ Put GEX</span>
+          <span style={{ color: "#059669" }}>■ Net+</span>
+          <span style={{ color: "#dc2626" }}>■ Net−</span>
+          <span style={{ color: "#d97706" }}>– Flip pt</span>
         </div>
 
         {/* Expiry selector */}
         {expiries.length > 0 && (
           <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
-            <span style={{ fontSize: 11, color: "#888" }}>Expiry:</span>
+            <span style={{ fontSize: 11, color: "#64748b" }}>Expiry:</span>
             <select
               value={selExpiry}
               onChange={e => setSelExpiry(e.target.value)}
               style={{
-                background: "#1a2030", color: "#ccc", border: "1px solid #333",
+                background: "#fff", color: "#1e293b", border: "1px solid #cbd5e1",
                 borderRadius: 4, padding: "2px 6px", fontSize: 12, cursor: "pointer",
               }}
             >
@@ -324,7 +324,7 @@ export default function GexChart({ symbol, apiBase, height = 480 }) {
         )}
 
         {/* Status */}
-        <span style={{ fontSize: 10, color: "#555", marginLeft: expiries.length ? 0 : "auto" }}>
+        <span style={{ fontSize: 10, color: "#94a3b8", marginLeft: expiries.length ? 0 : "auto" }}>
           {info}
         </span>
       </div>

@@ -94,11 +94,11 @@ export default function LiquidityHeatmap({ symbol, apiBase, height = 520 }) {
     const snaps = dataRef.current;
 
     ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = "#0d1117";
+    ctx.fillStyle = "#f8fafc";
     ctx.fillRect(0, 0, W, H);
 
     if (!snaps.length) {
-      ctx.fillStyle = "#556";
+      ctx.fillStyle = "#94a3b8";
       ctx.font = `13px ${MONO}`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
@@ -140,21 +140,21 @@ export default function LiquidityHeatmap({ symbol, apiBase, height = 520 }) {
     const bidBarX  = MID_X + PRICE_W / 2 + QTY_W + SR_W;   // bid bar starts here
 
     /* ── Header ── */
-    ctx.fillStyle = "#141824";
+    ctx.fillStyle = "#e2e8f0";
     ctx.fillRect(0, 0, W, HEADER_H);
     ctx.font = `bold 11px ${MONO}`;
     ctx.textBaseline = "middle";
 
     /* column labels */
-    ctx.fillStyle = "#dc3545";
+    ctx.fillStyle = "#dc2626";
     ctx.textAlign = "center";
     ctx.fillText("ASKS  ▼", askBarX + BAR_W / 2, HEADER_H / 2);
 
-    ctx.fillStyle = "#888";
+    ctx.fillStyle = "#475569";
     ctx.textAlign = "center";
     ctx.fillText("PRICE", MID_X, HEADER_H / 2);
 
-    ctx.fillStyle = "#00c896";
+    ctx.fillStyle = "#059669";
     ctx.textAlign = "center";
     ctx.fillText("▲  BIDS", bidBarX + BAR_W / 2, HEADER_H / 2);
 
@@ -165,31 +165,31 @@ export default function LiquidityHeatmap({ symbol, apiBase, height = 520 }) {
       const isSR = lv.q >= srThreshold;
 
       /* row tint */
-      ctx.fillStyle = isSR ? "rgba(220,50,50,0.10)" : (i % 2 === 0 ? "rgba(220,50,50,0.03)" : "transparent");
+      ctx.fillStyle = isSR ? "rgba(220,38,38,0.10)" : (i % 2 === 0 ? "rgba(220,38,38,0.04)" : "#f8fafc");
       ctx.fillRect(0, rowY, W, ROW_H);
 
       /* ask bar — right-aligned against price column */
       const barW = Math.max(2, (lv.q / maxQty) * BAR_W);
-      ctx.fillStyle = isSR ? "rgba(220,50,50,0.75)" : "rgba(220,50,50,0.30)";
+      ctx.fillStyle = isSR ? "rgba(220,38,38,0.70)" : "rgba(220,38,38,0.28)";
       ctx.fillRect(MID_X - PRICE_W / 2 - QTY_W - SR_W - barW, rowY + 2, barW, ROW_H - 4);
 
       /* ask qty */
       ctx.font = isSR ? `bold 10px ${MONO}` : `10px ${MONO}`;
-      ctx.fillStyle = isSR ? "#ff6b6b" : "#aa4444";
+      ctx.fillStyle = isSR ? "#b91c1c" : "#ef4444";
       ctx.textAlign = "right";
       ctx.textBaseline = "middle";
       ctx.fillText(fmtQ(lv.q), askQtyX, rowY + ROW_H / 2);
 
       /* price */
       ctx.font = `10px ${MONO}`;
-      ctx.fillStyle = "#6870a0";
+      ctx.fillStyle = "#64748b";
       ctx.textAlign = "center";
       ctx.fillText(fmtP(lv.p, dec), MID_X, rowY + ROW_H / 2);
 
       /* S/R label */
       if (isSR) {
         ctx.font = `bold 9px ${MONO}`;
-        ctx.fillStyle = "#ff5555";
+        ctx.fillStyle = "#b91c1c";
         ctx.textAlign = "left";
         ctx.fillText("⚡R", MID_X + PRICE_W / 2 + 3, rowY + ROW_H / 2);
       }
@@ -197,14 +197,14 @@ export default function LiquidityHeatmap({ symbol, apiBase, height = 520 }) {
 
     /* ── LTP row ── */
     const ltpRowY = HEADER_H + asks.length * ROW_H;
-    ctx.fillStyle = "rgba(251,191,36,0.14)";
+    ctx.fillStyle = "rgba(217,119,6,0.12)";
     ctx.fillRect(0, ltpRowY, W, ROW_H);
-    ctx.strokeStyle = "rgba(251,191,36,0.55)";
+    ctx.strokeStyle = "rgba(217,119,6,0.60)";
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(0, ltpRowY); ctx.lineTo(W, ltpRowY); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(0, ltpRowY + ROW_H); ctx.lineTo(W, ltpRowY + ROW_H); ctx.stroke();
     ctx.font = `bold 11px ${MONO}`;
-    ctx.fillStyle = "#fbbf24";
+    ctx.fillStyle = "#b45309";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(`▶  ${fmtP(ltp, dec)}  ◀`, MID_X, ltpRowY + ROW_H / 2);
@@ -215,7 +215,7 @@ export default function LiquidityHeatmap({ symbol, apiBase, height = 520 }) {
     if (bestAsk && bestBid) {
       const spread = bestAsk - bestBid;
       ctx.font = `9px ${MONO}`;
-      ctx.fillStyle = "#888";
+      ctx.fillStyle = "#94a3b8";
       ctx.textAlign = "right";
       ctx.fillText(`sprd ${spread.toFixed(dec)}`, W - 6, ltpRowY + ROW_H / 2);
     }
@@ -227,38 +227,38 @@ export default function LiquidityHeatmap({ symbol, apiBase, height = 520 }) {
       const isSR = lv.q >= srThreshold;
 
       /* row tint */
-      ctx.fillStyle = isSR ? "rgba(0,200,150,0.10)" : (i % 2 === 0 ? "rgba(0,200,150,0.03)" : "transparent");
+      ctx.fillStyle = isSR ? "rgba(5,150,105,0.10)" : (i % 2 === 0 ? "rgba(5,150,105,0.04)" : "#f8fafc");
       ctx.fillRect(0, rowY, W, ROW_H);
 
       /* bid bar — left-aligned from price column */
       const barW = Math.max(2, (lv.q / maxQty) * BAR_W);
-      ctx.fillStyle = isSR ? "rgba(0,200,150,0.75)" : "rgba(0,200,150,0.30)";
+      ctx.fillStyle = isSR ? "rgba(5,150,105,0.70)" : "rgba(5,150,105,0.28)";
       ctx.fillRect(MID_X + PRICE_W / 2 + QTY_W + SR_W, rowY + 2, barW, ROW_H - 4);
 
       /* bid qty */
       ctx.font = isSR ? `bold 10px ${MONO}` : `10px ${MONO}`;
-      ctx.fillStyle = isSR ? "#00d4a0" : "#007a60";
+      ctx.fillStyle = isSR ? "#047857" : "#10b981";
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
       ctx.fillText(fmtQ(lv.q), bidQtyX, rowY + ROW_H / 2);
 
       /* price */
       ctx.font = `10px ${MONO}`;
-      ctx.fillStyle = "#6870a0";
+      ctx.fillStyle = "#64748b";
       ctx.textAlign = "center";
       ctx.fillText(fmtP(lv.p, dec), MID_X, rowY + ROW_H / 2);
 
       /* S/R label */
       if (isSR) {
         ctx.font = `bold 9px ${MONO}`;
-        ctx.fillStyle = "#00c896";
+        ctx.fillStyle = "#047857";
         ctx.textAlign = "right";
         ctx.fillText("⚡S", MID_X - PRICE_W / 2 - 3, rowY + ROW_H / 2);
       }
     });
 
     /* ── vertical dividers ── */
-    ctx.strokeStyle = "rgba(255,255,255,0.06)";
+    ctx.strokeStyle = "rgba(100,116,139,0.20)";
     ctx.lineWidth = 1;
     [MID_X - PRICE_W / 2, MID_X + PRICE_W / 2].forEach(x => {
       ctx.beginPath(); ctx.moveTo(x, HEADER_H); ctx.lineTo(x, H); ctx.stroke();
@@ -292,9 +292,9 @@ export default function LiquidityHeatmap({ symbol, apiBase, height = 520 }) {
   }, [height]);
 
   return (
-    <div style={{ width: "100%", background: "#0d1117", borderRadius: 6, overflow: "hidden" }}>
+    <div style={{ width: "100%", background: "#f8fafc", borderRadius: 6, overflow: "hidden", border: "1px solid #e2e8f0" }}>
       {/* status bar */}
-      <div style={{ padding: "4px 10px", fontSize: 10, color: "#556", fontFamily: MONO, borderBottom: "1px solid #1a1e2e" }}>
+      <div style={{ padding: "4px 10px", fontSize: 10, color: "#94a3b8", fontFamily: MONO, borderBottom: "1px solid #e2e8f0" }}>
         {symbol} &nbsp;·&nbsp; {status}
       </div>
 
@@ -303,24 +303,24 @@ export default function LiquidityHeatmap({ symbol, apiBase, height = 520 }) {
 
       {/* Key S/R walls summary */}
       {(walls.asks.length > 0 || walls.bids.length > 0) && (
-        <div style={{ display: "flex", gap: 0, borderTop: "1px solid #1a1e2e", fontSize: 11, fontFamily: MONO }}>
+        <div style={{ display: "flex", gap: 0, borderTop: "1px solid #e2e8f0", fontSize: 11, fontFamily: MONO, background: "#f1f5f9" }}>
           {/* Ask walls (resistance) */}
-          <div style={{ flex: 1, padding: "6px 10px", borderRight: "1px solid #1a1e2e" }}>
-            <div style={{ color: "#dc3545", fontWeight: 700, marginBottom: 4, fontSize: 10 }}>⚡ RESISTANCE WALLS</div>
+          <div style={{ flex: 1, padding: "6px 10px", borderRight: "1px solid #e2e8f0" }}>
+            <div style={{ color: "#dc2626", fontWeight: 700, marginBottom: 4, fontSize: 10 }}>⚡ RESISTANCE WALLS</div>
             {walls.asks.slice(0, 5).map((w, i) => (
-              <div key={i} style={{ display: "flex", justifyContent: "space-between", color: "#ff6b6b", marginBottom: 2 }}>
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", color: "#b91c1c", marginBottom: 2 }}>
                 <span>{fmtP(w.price, 1)}</span>
-                <span style={{ color: "#666" }}>{fmtQ(w.qty)}</span>
+                <span style={{ color: "#94a3b8" }}>{fmtQ(w.qty)}</span>
               </div>
             ))}
           </div>
           {/* Bid walls (support) */}
           <div style={{ flex: 1, padding: "6px 10px" }}>
-            <div style={{ color: "#00c896", fontWeight: 700, marginBottom: 4, fontSize: 10 }}>⚡ SUPPORT WALLS</div>
+            <div style={{ color: "#059669", fontWeight: 700, marginBottom: 4, fontSize: 10 }}>⚡ SUPPORT WALLS</div>
             {walls.bids.slice(0, 5).map((w, i) => (
-              <div key={i} style={{ display: "flex", justifyContent: "space-between", color: "#00d4a0", marginBottom: 2 }}>
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", color: "#047857", marginBottom: 2 }}>
                 <span>{fmtP(w.price, 1)}</span>
-                <span style={{ color: "#666" }}>{fmtQ(w.qty)}</span>
+                <span style={{ color: "#94a3b8" }}>{fmtQ(w.qty)}</span>
               </div>
             ))}
           </div>
