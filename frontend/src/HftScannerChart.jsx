@@ -171,6 +171,7 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
   const hasInitialFit     = useRef(false);
   const rawSeriesRef      = useRef([]);
   const syncingRef        = useRef(false); // prevent scroll-sync feedback loop
+  const candleTimesRef    = useRef([]);   // IST-epoch seconds of every loaded candle
 
   // Drag state for the resize handle
   const isDraggingRef    = useRef(false);
@@ -301,6 +302,11 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
       }))
       .sort((a, b) => a.time - b.time);
     if (data.length) {
+      // Keep a list of IST-epoch seconds for every loaded candle so applyVisibility
+      // can seed the flow chart with phantom bars at these same timestamps — without
+      // this the two separate chart instances have different bar densities and bars
+      // appear at different horizontal pixel positions even with the same time range.
+      candleTimesRef.current = data.map((c) => c.time);
       try { series.setData(data); } catch (_) {}
       // After candles are written, sync the price pane to whatever time window the flow
       // chart is already showing.  This handles the race where flow data arrives first
@@ -338,21 +344,41 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
     const refs = flowSeriesRefs.current;
     if (!series?.length || !Object.keys(refs).length) return;
 
+    // KEY FIX: use a time→value map so we can seed every visible flow type with
+    // phantom 0-value bars at ALL candle timestamps.  This gives the flow chart the
+    // same bar density as the price chart (one slot per IST minute), which ensures
+    // setVisibleRange() lands HFT bars at the same pixel columns as the candles.
+    // Real HFT data simply overwrites the phantom where it exists.
     const dataByType = {};
-    STACK_ORDER.forEach((ft) => { dataByType[ft] = []; });
+    STACK_ORDER.forEach((ft) => { dataByType[ft] = {}; });
 
+    // 1. Phantom bars at every candle time (value = 0)
+    candleTimesRef.current.forEach((t) => {
+      STACK_ORDER.forEach((ft) => { dataByType[ft][t] = 0; });
+    });
+
+    // 2. Real HFT data
     series.forEach((snap) => {
+      const t = toChartTime(snap.ts);
       let cumSum = 0;
       STACK_ORDER.forEach((flowType) => {
         if (visible.has(flowType)) {
           cumSum += snap.flows?.[flowType] ?? 0;
-          dataByType[flowType].push({ time: toChartTime(snap.ts), value: cumSum });
+          dataByType[flowType][t] = cumSum;
         }
       });
     });
 
+    // 3. Convert maps → sorted arrays; invisible types receive empty arrays
     STACK_ORDER.forEach((flowType) => {
-      refs[flowType]?.setData(dataByType[flowType]);
+      if (visible.has(flowType)) {
+        const sorted = Object.entries(dataByType[flowType])
+          .map(([t, v]) => ({ time: Number(t), value: v }))
+          .sort((a, b) => a.time - b.time);
+        refs[flowType]?.setData(sorted);
+      } else {
+        refs[flowType]?.setData([]);
+      }
     });
   }, []);
 

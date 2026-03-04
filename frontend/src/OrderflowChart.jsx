@@ -437,20 +437,40 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
     const refs = hftFlowRefs.current;
     if (!Object.keys(refs).length) return;
 
+    // KEY FIX: seed every HFT series with a phantom 0-value bar at each candle
+    // timestamp.  This makes the HFT chart have the same bar density as the price
+    // chart (one slot per IST minute) so setVisibleRange() places bars at the same
+    // pixel columns — without this the two charts have different bar counts and bars
+    // appear shifted even with the same {from,to} range.
+    // Use a time→value map so real HFT data simply overwrites any phantom at that time.
     const dataByType = {};
-    HFT_STACK_ORDER.forEach((ft) => { dataByType[ft] = []; });
+    HFT_STACK_ORDER.forEach((ft) => { dataByType[ft] = {}; });
+
+    // 1. Phantom bars at every candle timestamp (value = 0, invisible)
+    mergedRef.current.forEach(({ chartTime: t }) => {
+      HFT_STACK_ORDER.forEach((ft) => { dataByType[ft][t] = 0; });
+    });
+
+    // 2. Real HFT data — overwrites phantoms where data exists, adds new times otherwise
+    // Price chart uses Dhan IST-epoch seconds (Unix + 19800).
+    // HFT snap.ts is real UTC Unix epoch — floor to minute boundary then add 19800
+    // so every HFT bar lands exactly on the matching candle open_time.
     hftSeries.forEach((snap) => {
-      // Price chart uses Dhan IST-epoch seconds (Unix + 19800).
-      // HFT snap.ts is real UTC Unix epoch — floor to minute boundary then add 19800
-      // so every HFT bar lands exactly on the matching candle open_time.
       const chartTime = Math.floor(snap.ts / 60) * 60 + 19800;
       let cumSum = 0;
       HFT_STACK_ORDER.forEach((ft) => {
         cumSum += snap.flows?.[ft] ?? 0;
-        dataByType[ft].push({ time: chartTime, value: cumSum });
+        dataByType[ft][chartTime] = cumSum;
       });
     });
-    HFT_STACK_ORDER.forEach((ft) => { refs[ft]?.setData(dataByType[ft]); });
+
+    // 3. Convert maps → sorted arrays and push to each series
+    HFT_STACK_ORDER.forEach((ft) => {
+      const sorted = Object.entries(dataByType[ft])
+        .map(([t, v]) => ({ time: Number(t), value: v }))
+        .sort((a, b) => a.time - b.time);
+      refs[ft]?.setData(sorted);
+    });
 
     // After data is set, align the HFT chart to the price chart's current time window
     const cur = priceChartRef.current?.timeScale().getVisibleRange();
