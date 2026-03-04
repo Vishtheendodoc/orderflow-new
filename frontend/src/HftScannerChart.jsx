@@ -281,7 +281,10 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
     }
   }, [candles]);
 
-  /* ── Effect 3: clear stale data on symbol change ──────────────────────── */
+  /* ── Effect 3: clear stale HFT flow data on symbol change ──────────────── */
+  /* NOTE: do NOT clear candleSeriesRef here — Effect 2 ([candles]) already handles
+     candle data. Clearing here would run AFTER Effect 2 on initial mount and wipe
+     the price chart blank before the user sees anything.                         */
   useEffect(() => {
     hasInitialFit.current = false;
     rawSeriesRef.current  = [];
@@ -292,7 +295,6 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
     Object.values(flowSeriesRefs.current).forEach((s) => {
       try { s?.setData([]); } catch (_) {}
     });
-    try { candleSeriesRef.current?.setData([]); } catch (_) {}
   }, [symbol]);
 
   /* ── applyVisibility: recompute cumulative sums for visible flows ─────── */

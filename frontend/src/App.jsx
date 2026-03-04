@@ -824,6 +824,38 @@ export default function App() {
     requestHistory(activeSymbol);
   }, [activeSymbol, requestHistory]);
 
+  // Footprint live update: poll /api/state/{symbol} every 2s when footprint tab is active.
+  // Live batches strip price levels (for size), so we re-fetch full state with levels here.
+  useEffect(() => {
+    if (viewMode !== "footprint" || !activeSymbol) return;
+    const base = API_URL || window.location.origin;
+    const poll = async () => {
+      try {
+        const res = await fetch(`${base}/api/state/${encodeURIComponent(activeSymbol)}`);
+        if (!res.ok) return;
+        const d = await res.json();
+        if (!d.symbol || !d.candles?.length) return;
+        setFlows((prev) => {
+          const existing = prev[d.symbol];
+          if (!existing?.candles?.length) return { ...prev, [d.symbol]: d };
+          // Merge incoming candles (with levels) over existing candles (preserving history length)
+          const newByTime = {};
+          (d.candles || []).forEach((c) => { newByTime[c.open_time] = c; });
+          const merged = (existing.candles || []).map((c) => newByTime[c.open_time] ?? c);
+          const existingTimes = new Set(existing.candles.map((c) => c.open_time));
+          (d.candles || []).forEach((c) => {
+            if (!existingTimes.has(c.open_time)) merged.push(c);
+          });
+          merged.sort((a, b) => a.open_time - b.open_time);
+          return { ...prev, [d.symbol]: { ...existing, ltp: d.ltp, bid: d.bid, ask: d.ask, cvd: d.cvd, candles: merged } };
+        });
+      } catch (_) {}
+    };
+    poll();
+    const id = setInterval(poll, 2000);
+    return () => clearInterval(id);
+  }, [viewMode, activeSymbol]);
+
 
   const flow = activeSymbol ? flows[activeSymbol] : null;
   const candles = flow?.candles || [];
