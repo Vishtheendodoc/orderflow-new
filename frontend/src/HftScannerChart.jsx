@@ -79,6 +79,26 @@ const TIMEFRAMES = [
   { label: "1h",  minutes: 60 },
 ];
 
+/** Aggregate 1m candles into N-min candles for the price chart. */
+function aggregateCandlesForHft(candles, tfMin) {
+  if (!candles?.length || tfMin <= 1) return candles;
+  const secPerBucket = tfMin * 60;
+  const buckets = {};
+  for (const c of candles) {
+    const tSec = Math.floor((c.open_time || 0) / 1000);
+    const bucket = Math.floor(tSec / secPerBucket) * secPerBucket;
+    if (!buckets[bucket]) {
+      buckets[bucket] = { time: bucket, open: c.open, high: c.high, low: c.low, close: c.close };
+    } else {
+      const b = buckets[bucket];
+      b.high = Math.max(b.high ?? 0, c.high ?? 0);
+      b.low = Math.min(b.low ?? 1e9, c.low ?? 1e9);
+      b.close = c.close ?? b.close;
+    }
+  }
+  return Object.values(buckets).sort((a, b) => a.time - b.time);
+}
+
 /**
  * Aggregate raw HFT snapshots into timeframe buckets.
  * Always runs (even for 1m) to deduplicate multiple snaps that may share the
@@ -251,23 +271,19 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
     chart.priceScale("hft").applyOptions({ scaleMargins: { top: pct, bottom: 0.02 } });
   }, [pricePaneH]);
 
-  /* ── Effect 2: push orderflow candles into price chart ─────────────────── */
+  /* ── Effect 2: push candles into price chart (aggregated by tfMin) ──────── */
   useEffect(() => {
     const series = candleSeriesRef.current;
     if (!series || !candles?.length) return;
-    const data = candles
-      .filter((c) => c.open_time && c.open && c.high && c.low && c.close)
-      .map((c) => ({
-        // open_time is Dhan IST-epoch milliseconds.  Dividing by 1000 gives
-        // IST-epoch seconds — the same unit toChartTime() produces for flow
-        // bars, so both panes share an identical time axis.
-        time:  Math.floor(c.open_time / 1000),
-        open:  c.open,
-        high:  c.high,
-        low:   c.low,
-        close: c.close,
-      }))
-      .sort((a, b) => a.time - b.time);
+    const filtered = candles.filter((c) => c.open_time && c.open && c.high && c.low && c.close);
+    const merged = aggregateCandlesForHft(filtered, tfMin);
+    const data = merged.map((c) => ({
+      time:  c.time ?? Math.floor((c.open_time || 0) / 1000),
+      open:  c.open,
+      high:  c.high,
+      low:   c.low,
+      close: c.close,
+    })).sort((a, b) => a.time - b.time);
     if (data.length) {
       try { series.setData(data); } catch (_) {}
       if (!hasInitialFit.current) {
@@ -275,7 +291,7 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
         chartRef.current?.timeScale().fitContent();
       }
     }
-  }, [candles]);
+  }, [candles, tfMin]);
 
   /* ── Effect 3: clear stale HFT flow data on symbol change ──────────────── */
   /* NOTE: do NOT clear candleSeriesRef here — Effect 2 ([candles]) already handles
@@ -549,7 +565,7 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
       {/* ── Single chart: candles + HFT flow (same chart, separate price scales) ── */}
       <div
         ref={chartContainerRef}
-        style={{ flex: 1, minHeight: 0, overflow: "hidden" }}
+        style={{ flex: "1 1 300px", minHeight: 300, overflow: "hidden" }}
       />
 
       {/* Drag handle: resize candle vs flow split */}

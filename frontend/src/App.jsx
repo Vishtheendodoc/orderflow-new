@@ -1101,6 +1101,7 @@ export default function App() {
                     candles={displayCandles}
                     symbol={flow.symbol}
                     features={features}
+                    timeFrameMinutes={timeFrameMinutes}
                     hftSeries={(() => {
                       const s = (activeSymbol || "").toUpperCase();
                       const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n));

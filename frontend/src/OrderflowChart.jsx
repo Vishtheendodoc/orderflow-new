@@ -142,10 +142,28 @@ const HFT_PANE_MIN = 0.2;   // min fraction of chart for HFT (20%)
 const HFT_PANE_MAX = 0.55;  // max fraction (55%)
 const HFT_PANE_DEFAULT = 0.35;  // default 35% for HFT strip
 
+/** Aggregate HFT snaps into N-min buckets to match chart timeframe. */
+function aggregateHftForOverlay(series, targetMinutes) {
+  if (!series?.length || targetMinutes <= 1) return series;
+  const secPerBucket = targetMinutes * 60;
+  const buckets = {};
+  for (const snap of series) {
+    const bucketTs = Math.floor(snap.ts / secPerBucket) * secPerBucket;
+    if (!buckets[bucketTs]) {
+      buckets[bucketTs] = { ts: bucketTs, flows: { ...(snap.flows || {}) } };
+    } else {
+      for (const [k, v] of Object.entries(snap.flows || {})) {
+        buckets[bucketTs].flows[k] = (buckets[bucketTs].flows[k] || 0) + v;
+      }
+    }
+  }
+  return Object.values(buckets).sort((a, b) => a.ts - b.ts);
+}
+
 /* ════════════════════════════════════════════════════════
    COMPONENT
 ════════════════════════════════════════════════════════ */
-export default function OrderflowChart({ candles, symbol, features = {}, hftSeries = [] }) {
+export default function OrderflowChart({ candles, symbol, features = {}, hftSeries = [], timeFrameMinutes = 1 }) {
   const showOI  = features.showOI  ?? true;
   const showHFT = features.showHFT ?? false;
 
@@ -396,12 +414,13 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
   }, [showHFT, hftPaneH]);
 
   /* ── HFT overlay: update series data when hftSeries prop changes ────────── */
-  /* Same chart = shared time axis; bars align by design. Phantom bars still help
-     fill gaps where HFT has no data so the time axis spans the full candle range. */
+  /* Aggregate HFT to match chart timeframe so bars align with candles. */
   useEffect(() => {
     if (!showHFT || !hftSeries?.length) return;
     const refs = hftFlowRefs.current;
     if (!Object.keys(refs).length) return;
+
+    const aggregated = aggregateHftForOverlay(hftSeries, timeFrameMinutes);
 
     const dataByType = {};
     HFT_STACK_ORDER.forEach((ft) => { dataByType[ft] = {}; });
@@ -410,8 +429,8 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
       HFT_STACK_ORDER.forEach((ft) => { dataByType[ft][t] = 0; });
     });
 
-    hftSeries.forEach((snap) => {
-      const chartTime = Math.floor(snap.ts / 60) * 60 + 19800;
+    aggregated.forEach((snap) => {
+      const chartTime = snap.ts + 19800;
       let cumSum = 0;
       HFT_STACK_ORDER.forEach((ft) => {
         cumSum += snap.flows?.[ft] ?? 0;
@@ -425,7 +444,7 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
         .sort((a, b) => a.time - b.time);
       refs[ft]?.setData(sorted);
     });
-  }, [hftSeries, showHFT]);
+  }, [hftSeries, showHFT, timeFrameMinutes]);
 
   /* ── Drag handle: resize HFT strip (adjusts scaleMargins) ─────────────── */
   const handleDragStart = useCallback((e) => {
