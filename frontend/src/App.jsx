@@ -705,7 +705,7 @@ export default function App() {
       // Tell backend which symbols we want live ticks for (reduces broadcast load)
       const sym = activeSymbolRef.current;
       const syms = activeSymbolsRef.current;
-      const viewing = sym ? [sym, ...syms.filter((s) => s !== sym).slice(0, 9)] : syms.slice(0, 10);
+      const viewing = sym ? [sym, ...syms.filter((s) => s !== sym).slice(0, 24)] : syms.slice(0, 25);
       ws.send(JSON.stringify({ type: "set_viewing", symbols: viewing.length ? viewing : ["*"] }));
       // After backend finishes sending the initial snapshot (~4s for 452 symbols),
       // request full history for whatever symbol the user is viewing
@@ -791,9 +791,9 @@ export default function App() {
   useEffect(() => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    // Include active chart + all tabs (up to 10) so tab switches get fresh data
+    // Include active chart + all tabs (up to 25) so tab switches feel instant
     const base = activeSymbol ? [activeSymbol] : [];
-    const rest = activeSymbols.filter((s) => s !== activeSymbol).slice(0, 9);
+    const rest = activeSymbols.filter((s) => s !== activeSymbol).slice(0, 24);
     const symbols = [...new Set([...base, ...rest])];
     if (symbols.length > 0) {
       ws.send(JSON.stringify({ type: "set_viewing", symbols }));

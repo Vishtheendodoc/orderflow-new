@@ -1486,23 +1486,36 @@ async def demo_feed_task():
         await asyncio.sleep(0.25)
 
 
+def _client_wants_symbol(ws: WebSocket, sym_upper: str) -> bool:
+    """True if this client should receive broadcasts for this symbol."""
+    viewing = client_viewing.get(ws)
+    if not viewing:  # None or empty = receive all
+        return True
+    for v in viewing:
+        if not v:
+            continue
+        vu = v.upper()
+        if sym_upper == vu or sym_upper.startswith(vu + " "):
+            return True
+    return False
+
+
 async def broadcast_state(symbol: str):
     """Push live tick update to connected clients.
-    Only sends to clients that have this symbol in their viewing set (or all if empty).
-    Sends only last BROADCAST_CANDLES_LIMIT candles (default 5) to keep payloads tiny."""
+    Skips entirely if no client wants this symbol — avoids event-loop saturation when 400+ symbols tick."""
     if symbol not in engines:
+        return
+    sym_upper = symbol.upper()
+    # Early exit: skip expensive work if no client wants this symbol
+    if not any(_client_wants_symbol(ws, sym_upper) for ws in connected_clients):
         return
     state = engines[symbol].get_state_live()
     msg = json.dumps({"type": "orderflow", "data": state})
 
     dead = set()
-    sym_upper = symbol.upper()
     for ws in connected_clients:
-        viewing = client_viewing.get(ws)
-        # None/empty = receive all. With symbols: send if any viewing symbol matches (partial match)
-        if viewing:
-            if not any(v and v.upper() in sym_upper for v in viewing):
-                continue
+        if not _client_wants_symbol(ws, sym_upper):
+            continue
         try:
             await ws.send_text(msg)
         except Exception:
