@@ -824,8 +824,16 @@ export default function App() {
     requestHistory(activeSymbol);
   }, [activeSymbol, requestHistory]);
 
+  const flow = activeSymbol ? flows[activeSymbol] : null;
+  const candles = flow?.candles || [];
+  const maxDelta = Math.max(...candles.map((c) => Math.abs(c.delta)), 1);
+  const closedCandles = candles.filter((c) => c.closed);
+  const liveCandle = candles.find((c) => !c.closed);
+  const [viewMode, setViewMode] = useState("chart"); // "chart" | "footprint" | "heatmap" | "gex"
+
   // Footprint live update: poll /api/state/{symbol} every 2s when footprint tab is active.
   // Live batches strip price levels (for size), so we re-fetch full state with levels here.
+  // MUST be declared after viewMode useState — uses viewMode in dependency array.
   useEffect(() => {
     if (viewMode !== "footprint" || !activeSymbol) return;
     const base = API_URL || window.location.origin;
@@ -838,7 +846,6 @@ export default function App() {
         setFlows((prev) => {
           const existing = prev[d.symbol];
           if (!existing?.candles?.length) return { ...prev, [d.symbol]: d };
-          // Merge incoming candles (with levels) over existing candles (preserving history length)
           const newByTime = {};
           (d.candles || []).forEach((c) => { newByTime[c.open_time] = c; });
           const merged = (existing.candles || []).map((c) => newByTime[c.open_time] ?? c);
@@ -855,14 +862,6 @@ export default function App() {
     const id = setInterval(poll, 2000);
     return () => clearInterval(id);
   }, [viewMode, activeSymbol]);
-
-
-  const flow = activeSymbol ? flows[activeSymbol] : null;
-  const candles = flow?.candles || [];
-  const maxDelta = Math.max(...candles.map((c) => Math.abs(c.delta)), 1);
-  const closedCandles = candles.filter((c) => c.closed);
-  const liveCandle = candles.find((c) => !c.closed);
-  const [viewMode, setViewMode] = useState("chart"); // "chart" | "footprint" | "heatmap" | "gex"
 
   // True when the active symbol is a NIFTY / BANKNIFTY / FINNIFTY index future
   const isIndexFuture = useMemo(() => {
