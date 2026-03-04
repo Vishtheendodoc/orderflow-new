@@ -624,13 +624,11 @@ export default function App() {
   const historyLoadedRef = useRef(new Set());
   // Ref copy of activeSymbol so WS callbacks can read it without stale closures
   const activeSymbolRef = useRef(activeSymbol);
-  const activeSymbolsRef = useRef(activeSymbols);
   /* ── Feature toggles ── */
   const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true });
   const [featMenuOpen, setFeatMenuOpen] = useState(false);
   const featMenuRef = useRef(null);
   useEffect(() => { activeSymbolRef.current = activeSymbol; }, [activeSymbol]);
-  useEffect(() => { activeSymbolsRef.current = activeSymbols; }, [activeSymbols]);
 
   /* close dropdown on outside click */
   useEffect(() => {
@@ -702,19 +700,13 @@ export default function App() {
       staleTimerRef.current = setInterval(() => {
         if (Date.now() - lastMsgRef.current > 50000) ws.close();
       }, 15000);
-      // Tell backend which symbols we want live ticks for (reduces broadcast load)
-      const sym = activeSymbolRef.current;
-      const syms = activeSymbolsRef.current;
-      const viewing = sym ? [sym, ...syms.filter((s) => s !== sym).slice(0, 24)] : syms.slice(0, 25);
-      ws.send(JSON.stringify({ type: "set_viewing", symbols: viewing.length ? viewing : ["*"] }));
-      // After backend finishes sending the initial snapshot (~4s for 452 symbols),
-      // request full history for whatever symbol the user is viewing
+      // After backend sends the initial batch snapshot, request full history for active symbol
       setTimeout(() => {
         const s = activeSymbolRef.current;
         if (s && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "request_history", symbol: s }));
         }
-      }, 5000);
+      }, 3000);
     };
 
     ws.onmessage = (e) => {
@@ -722,18 +714,51 @@ export default function App() {
       try {
         const msg = JSON.parse(e.data);
 
+        // Batched update: one message contains all ticked symbols → single React state update
+        if (msg.type === "batch") {
+          const batchData = msg.data;
+          const entries = Object.entries(batchData);
+          if (!entries.length) return;
+
+          setFlows((prev) => {
+            const next = { ...prev };
+            for (const [sym, d] of entries) {
+              const existing = next[sym];
+              if (existing && historyLoadedRef.current.has(sym) && existing.candles?.length > (d.candles?.length ?? 0)) {
+                const newByTime = {};
+                (d.candles || []).forEach((c) => { newByTime[c.open_time] = c; });
+                const merged = (existing.candles || []).map((c) => newByTime[c.open_time] ?? c);
+                const existingTimes = new Set((existing.candles || []).map((c) => c.open_time));
+                (d.candles || []).forEach((c) => {
+                  if (!existingTimes.has(c.open_time)) merged.push(c);
+                });
+                merged.sort((a, b) => a.open_time - b.open_time);
+                next[sym] = { ...d, candles: merged };
+              } else {
+                next[sym] = d;
+              }
+            }
+            return next;
+          });
+
+          // Register any newly seen symbols as active tabs
+          const newSyms = entries.map(([s]) => s);
+          setActiveSymbol((cur) => cur || newSyms[0]);
+          setActiveSymbols((prev) => {
+            const toAdd = newSyms.filter((s) => !prev.includes(s));
+            return toAdd.length ? [...prev, ...toAdd] : prev;
+          });
+        }
+
+        // Legacy single-symbol update (backward compat)
         if (msg.type === "orderflow") {
           const d = msg.data;
           setFlows((prev) => {
             const existing = prev[d.symbol];
-            // If we already have full history for this symbol, smartly merge the live candles
-            // instead of replacing (keeps the full day visible while updating the live candle)
             if (existing && historyLoadedRef.current.has(d.symbol) && existing.candles?.length > (d.candles?.length ?? 0)) {
               const newByTime = {};
               (d.candles || []).forEach((c) => { newByTime[c.open_time] = c; });
-              // Update matching candles; keep everything else intact
               const merged = (existing.candles || []).map((c) => newByTime[c.open_time] ?? c);
-              // Append any candles that are new (open_time not seen before)
               const existingTimes = new Set((existing.candles || []).map((c) => c.open_time));
               (d.candles || []).forEach((c) => {
                 if (!existingTimes.has(c.open_time)) merged.push(c);
@@ -750,7 +775,6 @@ export default function App() {
         }
 
         if (msg.type === "history") {
-          // Full-day disk history arrived — replace the symbol's data entirely
           const d = msg.data;
           historyLoadedRef.current.add(d.symbol);
           setFlows((prev) => ({ ...prev, [d.symbol]: d }));
@@ -787,18 +811,6 @@ export default function App() {
     requestHistory(activeSymbol);
   }, [activeSymbol, requestHistory]);
 
-  // Tell backend which symbol(s) we want live ticks for — reduces broadcast load when NSE+MCX both live
-  useEffect(() => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    // Include active chart + all tabs (up to 25) so tab switches feel instant
-    const base = activeSymbol ? [activeSymbol] : [];
-    const rest = activeSymbols.filter((s) => s !== activeSymbol).slice(0, 24);
-    const symbols = [...new Set([...base, ...rest])];
-    if (symbols.length > 0) {
-      ws.send(JSON.stringify({ type: "set_viewing", symbols }));
-    }
-  }, [activeSymbol, activeSymbols]);
 
   const flow = activeSymbol ? flows[activeSymbol] : null;
   const candles = flow?.candles || [];

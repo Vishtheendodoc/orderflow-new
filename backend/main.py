@@ -18,6 +18,16 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta, date
 from typing import Dict, List, Optional, Set
 import logging
+try:
+    import orjson as _json_lib
+    def _dumps(obj: object) -> str:
+        return _json_lib.dumps(obj).decode()
+    def _loads(s: str) -> object:
+        return _json_lib.loads(s)
+except ImportError:
+    import json as _json_lib
+    _dumps = _json_lib.dumps
+    _loads = _json_lib.loads
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import JSONResponse
@@ -70,7 +80,7 @@ GC_INTERVAL_TICKS = int(os.getenv("GC_INTERVAL_TICKS", "10000"))  # Run gc every
 # Minimum interval between broadcasts per symbol (seconds).
 # Without this, every tick triggers a full JSON serialize + WS send, saturating the event loop
 # and causing 5-10s lag queues. 0.1 = 10 updates/sec max; plenty for a footprint chart.
-BROADCAST_MIN_INTERVAL = float(os.getenv("BROADCAST_MIN_INTERVAL", "0.1"))
+BATCH_INTERVAL = float(os.getenv("BATCH_INTERVAL", "0.05"))  # 50ms = 20 batches/sec; one msg per client per interval
 
 # ── Liquidity Heatmap (200-level order book) ─────────────────────────────────
 # Separate Dhan token — avoids rate-limiting the main feed token.
@@ -381,14 +391,12 @@ class OrderFlowEngine:
 
 engines: Dict[str, OrderFlowEngine] = {}
 connected_clients: Set[WebSocket] = set()
-# ws -> set of symbols this client is viewing (empty = receive all, for backward compat)
-client_viewing: Dict[WebSocket, set] = {}
 # symbol -> { "security_id": str, "exchange_segment": str }
 subscribed_symbols: Dict[str, dict] = {}
 _tick_counter: int = 0  # For periodic gc
 _last_reset_date: Optional[str] = None  # IST date "YYYY-MM-DD" of last daily reset
-# Rate-limiter: last time each symbol was broadcast (monotonic seconds)
-_last_broadcast: Dict[str, float] = {}
+# Dirty set: symbols updated since last batch broadcast
+_dirty_symbols: Set[str] = set()
 # Token expiry / reconnect state
 _dhan_reconnect_delay: int = 5          # seconds; doubles on auth failure, resets on success
 _dhan_token_event: asyncio.Event = asyncio.Event()  # set when token is updated via API
@@ -498,7 +506,7 @@ def _append_candle_to_disk(symbol: str, candle_dict: dict) -> None:
         os.makedirs(SNAPSHOT_DIR, exist_ok=True)
         path = os.path.join(SNAPSHOT_DIR, f"{symbol}.jsonl")
         with open(path, "a") as fh:
-            fh.write(json.dumps(candle_dict) + "\n")
+            fh.write(_dumps(candle_dict) + "\n")
     except Exception as e:
         logger.warning(f"Disk append failed [{symbol}]: {e}")
 
@@ -524,7 +532,7 @@ def load_history_from_disk(symbol: str, limit: int = 400) -> list:
         result = []
         for ln in lines[start:]:
             try:
-                result.append(json.loads(ln))
+                result.append(_loads(ln))
             except Exception:
                 pass
         return result
@@ -738,7 +746,7 @@ def _append_depth_to_disk(symbol: str, snap: dict) -> None:
         os.makedirs(DEPTH_DIR, exist_ok=True)
         path = os.path.join(DEPTH_DIR, f"{symbol}.depth.jsonl")
         with open(path, "a") as fh:
-            fh.write(json.dumps(snap) + "\n")
+            fh.write(_dumps(snap) + "\n")
 
         # Every 100 appends, truncate if file exceeds MAX_DEPTH_FILE_LINES
         _depth_append_count[symbol] = _depth_append_count.get(symbol, 0) + 1
@@ -769,7 +777,7 @@ def _load_depth_from_disk(symbol: str, n: int) -> list:
         if not lines:
             return []
         lines = lines[-n:] if len(lines) > n else lines
-        return [json.loads(l) for l in lines if l.strip()]
+        return [_loads(l) for l in lines if l.strip()]
     except Exception as e:
         logger.warning(f"Depth disk load failed [{symbol}]: {e}")
         return []
@@ -850,7 +858,7 @@ async def _depth_ws_single(sym: str, sid: str, seg: str):
             async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10) as ws:
                 retry_delay = 5
                 # 200-level subscribe: single-instrument format (no InstrumentList)
-                await ws.send(json.dumps({
+                await ws.send(_dumps({
                     "RequestCode": 23,
                     "ExchangeSegment": seg,
                     "SecurityId": str(sid),
@@ -1242,7 +1250,7 @@ async def dhan_feed_task():
                 ]
                 for i in range(0, len(instruments), 100):
                     batch = instruments[i : i + 100]
-                    await ws.send(json.dumps({
+                    await ws.send(_dumps({
                         "RequestCode": 17,
                         "InstrumentCount": len(batch),
                         "InstrumentList": batch,
@@ -1257,7 +1265,7 @@ async def dhan_feed_task():
                                 await handle_dhan_tick(parsed)
                         else:
                             try:
-                                await handle_dhan_tick(json.loads(raw))
+                                await handle_dhan_tick(_loads(raw))
                             except Exception:
                                 pass
                     except Exception as e:
@@ -1392,15 +1400,12 @@ async def handle_dhan_tick(msg: dict):
     if not symbol or symbol not in engines:
         return
 
-    # OI-only packet: update OI then broadcast (no tick processing needed)
+    # OI-only packet: update OI and mark dirty; batch broadcaster will send update
     if msg_type == "oi":
         oi_val = data.get("openInterest")
         if oi_val is not None:
             engines[symbol].update_oi(float(oi_val))
-            now = time.monotonic()
-            if now - _last_broadcast.get(symbol, 0) >= BROADCAST_MIN_INTERVAL:
-                _last_broadcast[symbol] = now
-                await broadcast_state(symbol)
+            _dirty_symbols.add(symbol)
         return
 
     ltp = float(data.get("LTP", data.get("ltp", 0)))
@@ -1431,13 +1436,8 @@ async def handle_dhan_tick(msg: dict):
                                  total_sell_qty=total_sell,
                                  oi=oi)
 
-    # Rate-limit broadcasts per symbol to avoid event-loop saturation.
-    # All ticks are processed in memory; clients receive latest state at most
-    # every BROADCAST_MIN_INTERVAL seconds (default 100 ms = 10 updates/sec).
-    now = time.monotonic()
-    if now - _last_broadcast.get(symbol, 0) >= BROADCAST_MIN_INTERVAL:
-        _last_broadcast[symbol] = now
-        await broadcast_state(symbol)
+    # Mark symbol dirty; batch_broadcaster_task sends one combined msg every BATCH_INTERVAL
+    _dirty_symbols.add(symbol)
 
     # Periodic gc to prevent memory drift over 24h
     global _tick_counter
@@ -1478,49 +1478,43 @@ async def demo_feed_task():
             vol = random.randint(50, 500)
             ts = int(time.time() * 1000)
             engines[symbol].process_tick(ltp, bid, ask, vol, ts)
-            now = time.monotonic()
-            if now - _last_broadcast.get(symbol, 0) >= BROADCAST_MIN_INTERVAL:
-                _last_broadcast[symbol] = now
-                await broadcast_state(symbol)
+            _dirty_symbols.add(symbol)
 
         await asyncio.sleep(0.25)
 
 
-def _client_wants_symbol(ws: WebSocket, sym_upper: str) -> bool:
-    """True if this client should receive broadcasts for this symbol."""
-    viewing = client_viewing.get(ws)
-    if not viewing:  # None or empty = receive all
-        return True
-    for v in viewing:
-        if not v:
+async def batch_broadcaster_task():
+    """Send one batched WebSocket message every BATCH_INTERVAL containing all updated symbols.
+    Replaces per-symbol broadcast_state calls — collapses thousands of individual sends/sec
+    into ~20 messages/sec per client regardless of how many symbols are ticking simultaneously.
+    """
+    while True:
+        await asyncio.sleep(BATCH_INTERVAL)
+        if not connected_clients or not _dirty_symbols:
             continue
-        vu = v.upper()
-        if sym_upper == vu or sym_upper.startswith(vu + " "):
-            return True
-    return False
 
+        # Drain dirty set atomically
+        to_send = _dirty_symbols.copy()
+        _dirty_symbols.clear()
 
-async def broadcast_state(symbol: str):
-    """Push live tick update to connected clients.
-    Skips entirely if no client wants this symbol — avoids event-loop saturation when 400+ symbols tick."""
-    if symbol not in engines:
-        return
-    sym_upper = symbol.upper()
-    # Early exit: skip expensive work if no client wants this symbol
-    if not any(_client_wants_symbol(ws, sym_upper) for ws in connected_clients):
-        return
-    state = engines[symbol].get_state_live()
-    msg = json.dumps({"type": "orderflow", "data": state})
+        # Build batch payload: symbol → live state
+        batch_data = {}
+        for sym in to_send:
+            if sym in engines:
+                batch_data[sym] = engines[sym].get_state_live()
 
-    dead = set()
-    for ws in connected_clients:
-        if not _client_wants_symbol(ws, sym_upper):
+        if not batch_data:
             continue
-        try:
-            await ws.send_text(msg)
-        except Exception:
-            dead.add(ws)
-    connected_clients.difference_update(dead)
+
+        msg = _dumps({"type": "batch", "data": batch_data})
+
+        dead = set()
+        for ws in connected_clients:
+            try:
+                await ws.send_text(msg)
+            except Exception:
+                dead.add(ws)
+        connected_clients.difference_update(dead)
 
 
 # ─────────────────────────────────────────────
@@ -1867,38 +1861,30 @@ async def websocket_endpoint(ws: WebSocket):
     logger.info(f"Client connected. Total: {len(connected_clients)}")
 
     try:
-        # On connect: send in-memory state (last ~20 candles) for all engines.
+        # On connect: send in-memory state for all engines in one batch message.
         # This is fast (no disk reads). Clients request full history per symbol separately.
+        initial_batch = {}
         for symbol, engine in list(engines.items()):
             if not engine.candles and engine.current_candle is None:
-                continue  # skip engines with no data yet
-            state = engine.get_state()
-            await ws.send_text(json.dumps({"type": "orderflow", "data": state}))
-            await asyncio.sleep(0.01)  # 10ms between — 452 symbols ≈ 4.5s max
+                continue
+            initial_batch[symbol] = engine.get_state()
+        if initial_batch:
+            await ws.send_text(_dumps({"type": "batch", "data": initial_batch}))
 
         while True:
             msg = await ws.receive_text()
             try:
-                data = json.loads(msg)
-            except (json.JSONDecodeError, TypeError):
+                data = _loads(msg)
+            except Exception:
                 continue
 
             msg_type = data.get("type")
 
             if msg_type == "ping":
-                await ws.send_text(json.dumps({"type": "pong"}))
+                await ws.send_text(_dumps({"type": "pong"}))
 
             elif msg_type == "set_viewing":
-                # Client declares which symbols it wants live updates for.
-                # ["*"] or empty = receive all. Otherwise partial match: "NIFTY" matches "NIFTY MAR FUT".
-                syms = data.get("symbols", [])
-                if isinstance(syms, list):
-                    if "*" in syms or not syms:
-                        client_viewing.pop(ws, None)  # receive all
-                    else:
-                        client_viewing[ws] = {str(s).upper() for s in syms if s}
-                else:
-                    client_viewing.pop(ws, None)
+                pass  # No-op: batch broadcaster sends all symbols to all clients
 
             elif msg_type == "request_history":
                 # Client asks for full-day disk history for one symbol.
@@ -1907,7 +1893,7 @@ async def websocket_endpoint(ws: WebSocket):
                 if symbol in engines:
                     try:
                         state = build_full_state(symbol, engines[symbol])
-                        await ws.send_text(json.dumps({"type": "history", "data": state}))
+                        await ws.send_text(_dumps({"type": "history", "data": state}))
                     except Exception as e:
                         logger.warning(f"History request failed [{symbol}]: {e}")
 
@@ -1917,7 +1903,6 @@ async def websocket_endpoint(ws: WebSocket):
         logger.warning(f"WebSocket error: {e}")
     finally:
         connected_clients.discard(ws)
-        client_viewing.pop(ws, None)
         logger.info(f"Client disconnected. Total: {len(connected_clients)}")
 
 
@@ -2003,6 +1988,7 @@ async def startup():
     asyncio.create_task(_snapshot_task())
     asyncio.create_task(depth_poller_task())
     asyncio.create_task(options_poller_task())
+    asyncio.create_task(batch_broadcaster_task())
     logger.info("OrderFlow Engine started (daily reset at IST midnight, disk snapshots every 5 min)")
 
 

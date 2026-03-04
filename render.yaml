@@ -5,7 +5,7 @@ services:
     runtime: python
     rootDir: backend
     region: singapore     # Closest Render region to NSE/Dhan servers (Mumbai). Cuts ~200ms vs US.
-    plan: standard        # Standard: 1 CPU, 2GB RAM — faster live ticks when NSE+MCX both live
+    plan: pro             # Pro: 2 CPU, 4GB RAM — full tick speed for all 450+ symbols simultaneously
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     disk:
@@ -31,8 +31,8 @@ services:
         value: "1000"         # no cap — all CSV instruments get engines (RAM is flat at 20 candles each)
       - key: GC_INTERVAL_TICKS
         value: "10000"
-      - key: BROADCAST_MIN_INTERVAL
-        value: "0.05"         # 50ms = 20 updates/sec for live tick feel (Standard plan)
+      - key: BATCH_INTERVAL
+        value: "0.05"         # 50ms = 20 batch msgs/sec; one combined msg per client covers all symbols
       - key: BROADCAST_CANDLES_LIMIT
         value: "5"            # live tick broadcasts send only last 5 candles; full history via request_history
       - key: SNAPSHOT_DIR
