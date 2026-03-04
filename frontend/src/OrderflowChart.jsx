@@ -441,10 +441,13 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
     const dataByType = {};
     HFT_STACK_ORDER.forEach((ft) => { dataByType[ft] = []; });
     hftSeries.forEach((snap) => {
+      // Price chart uses Dhan IST-epoch seconds (Unix + 19800).
+      // HFT snap.ts is real UTC Unix epoch — add 19800 to align on the same x-axis.
+      const chartTime = snap.ts + 19800;
       let cumSum = 0;
       HFT_STACK_ORDER.forEach((ft) => {
         cumSum += snap.flows?.[ft] ?? 0;
-        dataByType[ft].push({ time: snap.ts, value: cumSum });
+        dataByType[ft].push({ time: chartTime, value: cumSum });
       });
     });
     HFT_STACK_ORDER.forEach((ft) => { refs[ft]?.setData(dataByType[ft]); });

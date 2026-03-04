@@ -848,9 +848,18 @@ export default function App() {
         setFlows((prev) => {
           const existing = prev[d.symbol];
           if (!existing?.candles?.length) return { ...prev, [d.symbol]: d };
+          // Build lookup from poll result
           const newByTime = {};
           (d.candles || []).forEach((c) => { newByTime[c.open_time] = c; });
-          const merged = (existing.candles || []).map((c) => newByTime[c.open_time] ?? c);
+          // Only replace the LIVE (open) candle — closed candles keep their disk-loaded
+          // levels from request_history. Replacing closed candles would overwrite rich
+          // disk data with potentially empty RAM data (e.g. after a backend restart).
+          const merged = (existing.candles || []).map((c) => {
+            const polled = newByTime[c.open_time];
+            if (polled && !c.closed) return polled;  // update live candle only
+            return c;
+          });
+          // Append any brand-new candle (open_time not seen in existing)
           const existingTimes = new Set(existing.candles.map((c) => c.open_time));
           (d.candles || []).forEach((c) => {
             if (!existingTimes.has(c.open_time)) merged.push(c);
