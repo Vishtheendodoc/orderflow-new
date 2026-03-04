@@ -392,23 +392,21 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
     hftChartRef.current    = chart;
     hftFlowRefs.current    = refs;
 
-    // TIME-RANGE sync (not logical-range) so HFT bars align by absolute IST-epoch
-    // second with the matching price candle, regardless of bar-count differences.
+    // Sync: subscribe to logical-range changes on the price chart (fires reliably
+    // on every scroll/zoom), then use getVisibleRange() + setVisibleRange() for
+    // absolute-time alignment so HFT bars track the correct candle positions.
+    // The HFT chart is non-interactive (handleScroll/Scale: false) so only the
+    // price→HFT direction is needed.
     const priceChart = priceChartRef.current;
-    const onPriceRange = (range) => {
-      if (hftSyncingRef.current || !range) return;
+    const onPriceRange = () => {
+      if (hftSyncingRef.current) return;
+      const timeRange = priceChart?.timeScale().getVisibleRange();
+      if (!timeRange) return;
       hftSyncingRef.current = true;
-      try { chart.timeScale().setVisibleRange(range); } catch (_) {}
+      try { chart.timeScale().setVisibleRange(timeRange); } catch (_) {}
       hftSyncingRef.current = false;
     };
-    const onHFTRange = (range) => {
-      if (hftSyncingRef.current || !range) return;
-      hftSyncingRef.current = true;
-      try { priceChart?.timeScale().setVisibleRange(range); } catch (_) {}
-      hftSyncingRef.current = false;
-    };
-    priceChart?.timeScale().subscribeVisibleTimeRangeChange(onPriceRange);
-    chart.timeScale().subscribeVisibleTimeRangeChange(onHFTRange);
+    priceChart?.timeScale().subscribeVisibleLogicalRangeChange(onPriceRange);
 
     // Immediately copy the price chart's current visible time range
     const cur = priceChart?.timeScale().getVisibleRange();
@@ -426,8 +424,7 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
 
     return () => {
       ro.disconnect();
-      try { priceChart?.timeScale().unsubscribeVisibleTimeRangeChange(onPriceRange); } catch (_) {}
-      try { chart.timeScale().unsubscribeVisibleTimeRangeChange(onHFTRange); } catch (_) {}
+      try { priceChart?.timeScale().unsubscribeVisibleLogicalRangeChange(onPriceRange); } catch (_) {}
       chart.remove();
       hftChartRef.current = null;
       hftFlowRefs.current = {};

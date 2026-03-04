@@ -23,22 +23,22 @@ const IST_OFFSET = 19800;   // UTC+5:30 in seconds
 const _pad = (n) => String(n).padStart(2, "0");
 
 /**
- * Both chart panes (price and flow) use real UTC Unix seconds as the chart-time
- * value.  This formatter adds IST_OFFSET before calling getUTCHours so the x-axis
- * always shows IST wall-clock labels (e.g. "09:15").
+ * Both panes use Dhan IST-epoch seconds as the chart-time value — identical to
+ * OrderflowChart.  IST-epoch = Unix + 19800, so reading getUTCHours() on an
+ * IST-epoch Date directly surfaces the correct IST wall-clock digit without
+ * any extra offset addition.
  */
-const fmtIST = (utcSec) => {
-  const ist = (typeof utcSec === "number" ? utcSec : 0) + IST_OFFSET;
-  const d   = new Date(ist * 1000);
+const fmtIST = (istEpochSec) => {
+  const d = new Date((typeof istEpochSec === "number" ? istEpochSec : 0) * 1000);
   return `${_pad(d.getUTCHours())}:${_pad(d.getUTCMinutes())}`;
 };
 
 /**
- * Floor a UTC Unix-second to its minute boundary.
- * Used for HFT flow bars AND for candle open_time conversion so both panes
- * share the same UTC time axis and bars line up candle-by-candle.
+ * Convert a raw UTC Unix-second (snap.ts from backend) to an IST-epoch second
+ * floored to the nearest minute, so it aligns with candle open_time / 1000
+ * (which is already IST-epoch at the minute boundary).
  */
-const toChartTime = (utcSec) => Math.floor(utcSec / 60) * 60;
+const toChartTime = (utcSec) => Math.floor(utcSec / 60) * 60 + IST_OFFSET;
 
 const fmtFlow = (v) => {
   const n = Math.abs(Number(v));
@@ -290,10 +290,10 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
     const data = candles
       .filter((c) => c.open_time && c.open && c.high && c.low && c.close)
       .map((c) => ({
-        // open_time is Dhan IST-epoch ms (IST-epoch = Unix + 19800).
-        // Convert to UTC Unix seconds so it matches the flow pane's time axis:
-        //   UTC seconds = floor(open_time / 1000) - IST_OFFSET
-        time:  Math.floor(c.open_time / 1000) - IST_OFFSET,
+        // open_time is Dhan IST-epoch milliseconds.  Dividing by 1000 gives
+        // IST-epoch seconds — the same unit toChartTime() produces for flow
+        // bars, so both panes share an identical time axis.
+        time:  Math.floor(c.open_time / 1000),
         open:  c.open,
         high:  c.high,
         low:   c.low,
@@ -356,15 +356,17 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
 
     if (!hasInitialFit.current && series.length > 0) {
       hasInitialFit.current = true;
-      // Fit the flow chart to all HFT bars, then copy that exact time range to
-      // the price chart so both panes open to the same time window.
+      // Fit the flow chart first, then after one JS tick (so layout settles),
+      // copy its visible time range to the price chart.
       chart.timeScale().fitContent();
-      const range = chart.timeScale().getVisibleRange();
-      if (range) {
-        try { priceChartRef.current?.timeScale().setVisibleRange(range); } catch (_) {}
-      } else {
-        priceChartRef.current?.timeScale().fitContent();
-      }
+      setTimeout(() => {
+        const range = chart.timeScale().getVisibleRange();
+        if (range) {
+          try { priceChartRef.current?.timeScale().setVisibleRange(range); } catch (_) {}
+        } else {
+          priceChartRef.current?.timeScale().fitContent();
+        }
+      }, 0);
     }
 
     const lastSnap = series[series.length - 1];
