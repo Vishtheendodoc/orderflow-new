@@ -392,26 +392,27 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
     hftChartRef.current    = chart;
     hftFlowRefs.current    = refs;
 
-    // Sync time range with price chart
+    // TIME-RANGE sync (not logical-range) so HFT bars align by absolute IST-epoch
+    // second with the matching price candle, regardless of bar-count differences.
     const priceChart = priceChartRef.current;
     const onPriceRange = (range) => {
       if (hftSyncingRef.current || !range) return;
       hftSyncingRef.current = true;
-      chart.timeScale().setVisibleLogicalRange(range);
+      try { chart.timeScale().setVisibleRange(range); } catch (_) {}
       hftSyncingRef.current = false;
     };
     const onHFTRange = (range) => {
       if (hftSyncingRef.current || !range) return;
       hftSyncingRef.current = true;
-      priceChart?.timeScale().setVisibleLogicalRange(range);
+      try { priceChart?.timeScale().setVisibleRange(range); } catch (_) {}
       hftSyncingRef.current = false;
     };
-    priceChart?.timeScale().subscribeVisibleLogicalRangeChange(onPriceRange);
-    chart.timeScale().subscribeVisibleLogicalRangeChange(onHFTRange);
+    priceChart?.timeScale().subscribeVisibleTimeRangeChange(onPriceRange);
+    chart.timeScale().subscribeVisibleTimeRangeChange(onHFTRange);
 
-    // Copy current visible range immediately
-    const cur = priceChart?.timeScale().getVisibleLogicalRange();
-    if (cur) chart.timeScale().setVisibleLogicalRange(cur);
+    // Immediately copy the price chart's current visible time range
+    const cur = priceChart?.timeScale().getVisibleRange();
+    if (cur) try { chart.timeScale().setVisibleRange(cur); } catch (_) {}
 
     const ro = new ResizeObserver(() => {
       if (hftChartRef.current && hftContainerRef.current) {
@@ -425,7 +426,8 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
 
     return () => {
       ro.disconnect();
-      try { priceChart?.timeScale().unsubscribeVisibleLogicalRangeChange(onPriceRange); } catch (_) {}
+      try { priceChart?.timeScale().unsubscribeVisibleTimeRangeChange(onPriceRange); } catch (_) {}
+      try { chart.timeScale().unsubscribeVisibleTimeRangeChange(onHFTRange); } catch (_) {}
       chart.remove();
       hftChartRef.current = null;
       hftFlowRefs.current = {};
@@ -453,9 +455,9 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
     });
     HFT_STACK_ORDER.forEach((ft) => { refs[ft]?.setData(dataByType[ft]); });
 
-    // Fit HFT range to match price chart
-    const cur = priceChartRef.current?.timeScale().getVisibleLogicalRange();
-    if (cur) hftChartRef.current?.timeScale().setVisibleLogicalRange(cur);
+    // After data is set, align the HFT chart to the price chart's current time window
+    const cur = priceChartRef.current?.timeScale().getVisibleRange();
+    if (cur) try { hftChartRef.current?.timeScale().setVisibleRange(cur); } catch (_) {}
   }, [hftSeries, showHFT]);
 
   /* ── Drag handle: resize HFT pane ────────────────────────────────────── */

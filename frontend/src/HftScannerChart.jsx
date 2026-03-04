@@ -234,21 +234,23 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
     flowChartRef.current   = flowChart;
     flowSeriesRefs.current = refs;
 
-    // ── Sync scroll / zoom between charts ──
+    // ── TIME-RANGE sync: use absolute time values so bars align by candle time,
+    //    not by bar index.  Both panes share the same UTC time axis so the same
+    //    {from, to} range is valid for both charts.
     const syncFromPrice = (range) => {
-      if (syncingRef.current) return;
+      if (syncingRef.current || !range) return;
       syncingRef.current = true;
-      flowChart.timeScale().setVisibleLogicalRange(range);
+      try { flowChart.timeScale().setVisibleRange(range); } catch (_) {}
       syncingRef.current = false;
     };
     const syncFromFlow = (range) => {
-      if (syncingRef.current) return;
+      if (syncingRef.current || !range) return;
       syncingRef.current = true;
-      priceChart.timeScale().setVisibleLogicalRange(range);
+      try { priceChart.timeScale().setVisibleRange(range); } catch (_) {}
       syncingRef.current = false;
     };
-    priceChart.timeScale().subscribeVisibleLogicalRangeChange(syncFromPrice);
-    flowChart.timeScale().subscribeVisibleLogicalRangeChange(syncFromFlow);
+    priceChart.timeScale().subscribeVisibleTimeRangeChange(syncFromPrice);
+    flowChart.timeScale().subscribeVisibleTimeRangeChange(syncFromFlow);
 
     // ── Resize observer ──
     const ro = new ResizeObserver(() => {
@@ -270,8 +272,8 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
 
     return () => {
       ro.disconnect();
-      priceChart.timeScale().unsubscribeVisibleLogicalRangeChange(syncFromPrice);
-      flowChart.timeScale().unsubscribeVisibleLogicalRangeChange(syncFromFlow);
+      try { priceChart.timeScale().unsubscribeVisibleTimeRangeChange(syncFromPrice); } catch (_) {}
+      try { flowChart.timeScale().unsubscribeVisibleTimeRangeChange(syncFromFlow); } catch (_) {}
       priceChart.remove();
       flowChart.remove();
       priceChartRef.current   = null;
@@ -354,8 +356,15 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
 
     if (!hasInitialFit.current && series.length > 0) {
       hasInitialFit.current = true;
+      // Fit the flow chart to all HFT bars, then copy that exact time range to
+      // the price chart so both panes open to the same time window.
       chart.timeScale().fitContent();
-      priceChartRef.current?.timeScale().fitContent();
+      const range = chart.timeScale().getVisibleRange();
+      if (range) {
+        try { priceChartRef.current?.timeScale().setVisibleRange(range); } catch (_) {}
+      } else {
+        priceChartRef.current?.timeScale().fitContent();
+      }
     }
 
     const lastSnap = series[series.length - 1];
