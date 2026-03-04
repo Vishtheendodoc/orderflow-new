@@ -1038,6 +1038,7 @@ export default function App() {
                   <HftScannerChart
                     symbol={activeSymbol}
                     apiBase={API_URL || window.location.origin}
+                    candles={flow?.candles || []}
                   />
                 </div>
               ) : null}

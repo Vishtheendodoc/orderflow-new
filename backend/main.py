@@ -91,10 +91,11 @@ HEATMAP_SNAPSHOTS_IN_RAM = int(os.getenv("HEATMAP_SNAPSHOTS_IN_RAM", "50"))
 # Disk: append to JSONL; when file exceeds this many lines, truncate to keep last N
 MAX_DEPTH_FILE_LINES = int(os.getenv("MAX_DEPTH_FILE_LINES", "500"))
 DEPTH_DIR = os.path.join(SNAPSHOT_DIR, "depth")
+HFT_DIR   = os.path.join(SNAPSHOT_DIR, "hft")
 
 # ── Options GEX ──────────────────────────────────────────────────────────────
 DHAN_TOKEN_OPTIONS  = os.getenv("DHAN_TOKEN_OPTIONS", "")
-OPTIONS_POLL_SEC    = float(os.getenv("OPTIONS_POLL_SEC", "300"))         # poll every 5 min (4 indices × 300s = well within rate limit)
+OPTIONS_POLL_SEC    = float(os.getenv("OPTIONS_POLL_SEC", "60"))          # poll every 60s → 1-min HFT candles (4 indices × 5s gap = 20s fetch; 40s idle)
 # Underlying security IDs (NSE index) used for options chain
 UNDERLYING_IDS = {
     "NIFTY":      "13",
@@ -454,6 +455,8 @@ def _do_daily_reset():
         eng.prev_total_sell = 0.0
     depth_snapshots.clear()
     _depth_append_count.clear()
+    hft_scanner_history.clear()
+    hft_prev_data.clear()
 
     # Only wipe disk when crossing midnight — NOT on cold start (restart/redeploy)
     # On cold start we keep disk so load_all_snapshots can restore
@@ -463,6 +466,13 @@ def _do_daily_reset():
                 if fname.endswith(".depth.jsonl"):
                     try:
                         os.remove(os.path.join(DEPTH_DIR, fname))
+                    except Exception:
+                        pass
+        if os.path.isdir(HFT_DIR):
+            for fname in os.listdir(HFT_DIR):
+                if fname.endswith(".hft.jsonl"):
+                    try:
+                        os.remove(os.path.join(HFT_DIR, fname))
                     except Exception:
                         pass
         if os.path.isdir(SNAPSHOT_DIR):
@@ -783,6 +793,56 @@ def _load_depth_from_disk(symbol: str, n: int) -> list:
         return []
 
 
+def _append_hft_to_disk(index_name: str, snap: dict) -> None:
+    """Append one HFT snapshot to its JSONL file. Called on every new snapshot."""
+    try:
+        os.makedirs(HFT_DIR, exist_ok=True)
+        path = os.path.join(HFT_DIR, f"{index_name}.hft.jsonl")
+        with open(path, "a") as fh:
+            fh.write(_dumps(snap) + "\n")
+    except Exception as e:
+        logger.warning(f"HFT disk append failed [{index_name}]: {e}")
+
+
+def _load_hft_from_disk(index_name: str) -> list:
+    """Load today's HFT snapshots from disk. Returns [] on missing file or error."""
+    path = os.path.join(HFT_DIR, f"{index_name}.hft.jsonl")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r") as fh:
+            lines = fh.readlines()
+        snaps = []
+        for ln in lines:
+            ln = ln.strip()
+            if ln:
+                try:
+                    snaps.append(_loads(ln))
+                except Exception:
+                    pass
+        return snaps[-HFT_MAX_SNAPSHOTS:]
+    except Exception as e:
+        logger.warning(f"HFT disk load failed [{index_name}]: {e}")
+        return []
+
+
+def load_hft_from_disk() -> None:
+    """Restore all index HFT histories from disk on cold start."""
+    if not os.path.isdir(HFT_DIR):
+        return
+    loaded = 0
+    for fname in os.listdir(HFT_DIR):
+        if not fname.endswith(".hft.jsonl"):
+            continue
+        idx = fname[: -len(".hft.jsonl")]
+        snaps = _load_hft_from_disk(idx)
+        if snaps:
+            hft_scanner_history[idx] = snaps
+            loaded += 1
+    if loaded:
+        logger.info(f"HFT history restored from disk: {loaded} indices")
+
+
 def _parse_binary_depth(raw: bytes, symbol: str) -> None:
     """Parse 200-level binary depth packet from Dhan full-depth feed.
 
@@ -1038,16 +1098,18 @@ def _compute_hft_snapshot(index_name: str, spot: float, oc: dict) -> None:
 
     # ── Store snapshot ────────────────────────────────────────────────────────
     now_ist  = datetime.now(IST)
-    history  = hft_scanner_history[index_name]
-    history.append({
-        "t":     now_ist.strftime("%H:%M"),
-        "ts":    int(time.time()),
-        "spot":  round(spot, 2),
-        "mfi":   round(mfi, 2),
+    snap = {
+        "t":    now_ist.strftime("%H:%M"),
+        "ts":   int(time.time()),
+        "spot": round(spot, 2),
+        "mfi":  round(mfi, 2),
         "flows": {k: round(v, 2) for k, v in flows.items() if v > 0},
-    })
+    }
+    history = hft_scanner_history[index_name]
+    history.append(snap)
     if len(history) > HFT_MAX_SNAPSHOTS:
         hft_scanner_history[index_name] = history[-HFT_MAX_SNAPSHOTS:]
+    _append_hft_to_disk(index_name, snap)
 
     # ── Update prev-data for next cycle's change computation ─────────────────
     new_prev: dict = {}
@@ -1731,6 +1793,11 @@ async def get_hft_scanner(symbol: str):
         return JSONResponse({"error": f"Unknown index: {symbol}"}, status_code=400)
 
     history = list(hft_scanner_history.get(idx, []))
+    # Fall back to disk if RAM is empty (cold start before first poll cycle)
+    if not history:
+        history = _load_hft_from_disk(idx)
+        if history:
+            hft_scanner_history[idx] = history  # warm up RAM cache
     if not history:
         token_hint = "" if DHAN_TOKEN_OPTIONS else " — set DHAN_TOKEN_OPTIONS to enable"
         return JSONResponse(
@@ -1983,6 +2050,7 @@ async def startup():
     auto_subscribe_from_csv()
     _do_daily_reset()       # sets _last_reset_date = today; clears stale state
     load_all_snapshots()    # restore today's candles from disk (no-op if no disk mounted)
+    load_hft_from_disk()    # restore today's HFT scanner history from disk
     asyncio.create_task(dhan_feed_task())
     asyncio.create_task(_daily_reset_task())
     asyncio.create_task(_snapshot_task())

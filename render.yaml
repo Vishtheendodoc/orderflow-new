@@ -51,7 +51,7 @@ services:
       - key: DHAN_TOKEN_OPTIONS
         sync: false             # set manually in Render dashboard
       - key: OPTIONS_POLL_SEC
-        value: "300"          # 5 min between full cycles; 5 s gap between each index
+        value: "60"           # 60s between full cycles → 1-min HFT candles (4 indices × 5s = 20s fetch + 40s idle)
     healthCheckPath: /api/health
 
   # Frontend static site

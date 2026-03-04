@@ -1,30 +1,37 @@
 /**
  * HftScannerChart
  *
- * TradingView-style chart (lightweight-charts) showing ONLY the stacked
- * institutional flow bars — same look, header, Fit button, fullscreen toggle,
- * zoom / pan / crosshair as OrderflowChart.
+ * Two-pane TradingView-style chart:
+ *   Top  (~35%) — Price candlestick chart (from orderflow candles prop)
+ *   Bottom (~65%) — Stacked institutional flow bars (from HFT scanner API)
  *
- * Stacking trick: multiple HistogramSeries are added in REVERSE cumulative
- * order.  Each series i holds the cumulative sum of flow types 0…i.  Because
- * series added later are rendered on top, the visual result is a proper
- * colour-stacked bar — only the "delta" between consecutive cumulative values
- * shows through in each colour.
- *
- * Data: GET /api/hft_scanner/{index}  polled every POLL_MS ms.
+ * Features:
+ *  • IST timestamps (UTC +05:30)
+ *  • Synchronized scroll / zoom between both panes
+ *  • Timeframe selector: 1m / 5m / 15m / 1h (client-side aggregation)
+ *  • Per-flow-type visibility toggles
+ *  • Disk-backed history on backend; fetched on mount and every POLL_MS
  */
 
 import { useEffect, useRef, useCallback, useState, useMemo } from "react";
 import { createChart } from "lightweight-charts";
 
-const POLL_MS = 60_000;
+const POLL_MS   = 65_000;  // slightly over 60s to avoid racing the backend write
+const IST_OFFSET = 19800;  // UTC+5:30 in seconds
 
-/* ── helpers (same as OrderflowChart) ─────────────────────────────────────── */
+/* ── helpers ─────────────────────────────────────────────────────────────── */
 const _pad   = (n) => String(n).padStart(2, "0");
+
+/** Convert a UTC Unix-second timestamp to an IST HH:MM label. */
 const fmtIST = (utcSec) => {
-  const d = new Date(utcSec * 1000);
+  const ist = (typeof utcSec === "number" ? utcSec : 0) + IST_OFFSET;
+  const d   = new Date(ist * 1000);
   return `${_pad(d.getUTCHours())}:${_pad(d.getUTCMinutes())}`;
 };
+
+/** Convert a UTC Unix-second to the lightweight-charts "time" value (UTC-aligned). */
+const toChartTime = (utcSec) => utcSec;  // lightweight-charts expects UTC seconds; we set timezone offset in options
+
 const fmtFlow = (v) => {
   const n = Math.abs(Number(v));
   if (n >= 1e9) return (Number(v) / 1e9).toFixed(1) + "B";
@@ -33,23 +40,18 @@ const fmtFlow = (v) => {
   return String(Math.round(Number(v)));
 };
 
-/* ── flow colours (matches Streamlit palette) ──────────────────────────────── */
+/* ── flow colours ────────────────────────────────────────────────────────── */
 const FLOW_COLORS = {
-  "Aggressive Call Buy": "#059669",  // emerald — strongest bullish signal
-  "Heavy Put Write":     "#10b981",  // green — writing puts (bullish)
-  "Put Write":           "#6ee7b7",  // light green — mild put write
-  "Dark Pool CE":        "#818cf8",  // indigo — stealth call
-  "Dark Pool PE":        "#a78bfa",  // violet — stealth put
-  "Call Short":          "#fca5a5",  // light red — mild call short
-  "Heavy Call Short":    "#ef4444",  // red — aggressive call short
-  "Aggressive Put Buy":  "#dc2626",  // dark red — strongest bearish signal
+  "Aggressive Call Buy": "#059669",
+  "Heavy Put Write":     "#10b981",
+  "Put Write":           "#6ee7b7",
+  "Dark Pool CE":        "#818cf8",
+  "Dark Pool PE":        "#a78bfa",
+  "Call Short":          "#fca5a5",
+  "Heavy Call Short":    "#ef4444",
+  "Aggressive Put Buy":  "#dc2626",
 };
 
-/**
- * Drawing / cumulative-sum order.
- * STACK_ORDER[0] gets the SMALLEST cumulative value → drawn LAST → sits on top visually.
- * STACK_ORDER[last] gets the LARGEST cumulative value → drawn FIRST → sits at bottom.
- */
 const STACK_ORDER = [
   "Aggressive Call Buy",
   "Heavy Put Write",
@@ -61,37 +63,78 @@ const STACK_ORDER = [
   "Aggressive Put Buy",
 ];
 
-/* ── lightweight-charts config (identical to OrderflowChart) ───────────────── */
-const CHART_OPTIONS = {
-  layout: {
-    background: { color: "transparent" },
-    textColor:  "#64748b",
-    fontFamily: "JetBrains Mono, monospace",
-    fontSize:   11,
-  },
-  localization: {
-    timeFormatter: (t) => fmtIST(typeof t === "number" ? t : 0),
-  },
-  grid: {
-    vertLines: { color: "rgba(0,0,0,0.06)" },
-    horzLines: { color: "rgba(0,0,0,0.06)" },
-  },
-  rightPriceScale: {
-    borderColor: "rgba(0,0,0,0.06)",
-    autoScale:   true,
-    scaleMargins: { top: 0.05, bottom: 0.02 },
-  },
-  timeScale: {
-    borderColor:      "rgba(0,0,0,0.06)",
-    timeVisible:      true,
-    secondsVisible:   false,
-    tickMarkFormatter: (t) => fmtIST(typeof t === "number" ? t : 0),
-  },
-  crosshair: {
-    vertLine: { color: "rgba(2,132,199,0.5)", width: 1 },
-    horzLine: { color: "rgba(2,132,199,0.5)", width: 1 },
-  },
-};
+/* ── timeframe config ────────────────────────────────────────────────────── */
+const TIMEFRAMES = [
+  { label: "1m",  minutes: 1  },
+  { label: "5m",  minutes: 5  },
+  { label: "15m", minutes: 15 },
+  { label: "1h",  minutes: 60 },
+];
+
+/**
+ * Aggregate raw 1-min HFT snapshots into higher-timeframe candles.
+ * Each bucket spans `tfMin` minutes; flows are summed, spot uses open/close.
+ */
+function aggregateHFT(series, tfMin) {
+  if (!series?.length || tfMin <= 1) return series;
+  const buckets = {};
+  const secPerBucket = tfMin * 60;
+  for (const snap of series) {
+    const bucketTs = Math.floor(snap.ts / secPerBucket) * secPerBucket;
+    if (!buckets[bucketTs]) {
+      buckets[bucketTs] = {
+        t:     snap.t,
+        ts:    bucketTs,
+        spot:  snap.spot,
+        mfi:   snap.mfi,
+        flows: { ...snap.flows },
+      };
+    } else {
+      const b = buckets[bucketTs];
+      b.spot = snap.spot; // last spot in bucket = close
+      for (const [k, v] of Object.entries(snap.flows || {})) {
+        b.flows[k] = (b.flows[k] || 0) + v;
+      }
+    }
+  }
+  return Object.values(buckets).sort((a, b) => a.ts - b.ts);
+}
+
+/* ── shared chart options ────────────────────────────────────────────────── */
+function makeChartOptions(height) {
+  return {
+    layout: {
+      background: { color: "transparent" },
+      textColor:  "#64748b",
+      fontFamily: "JetBrains Mono, monospace",
+      fontSize:   11,
+    },
+    localization: {
+      timeFormatter: (t) => fmtIST(typeof t === "number" ? t : 0),
+    },
+    grid: {
+      vertLines: { color: "rgba(0,0,0,0.06)" },
+      horzLines: { color: "rgba(0,0,0,0.06)" },
+    },
+    rightPriceScale: {
+      borderColor: "rgba(0,0,0,0.06)",
+      autoScale:   true,
+    },
+    timeScale: {
+      borderColor:       "rgba(0,0,0,0.06)",
+      timeVisible:       true,
+      secondsVisible:    false,
+      tickMarkFormatter: (t) => fmtIST(typeof t === "number" ? t : 0),
+    },
+    crosshair: {
+      vertLine: { color: "rgba(2,132,199,0.5)", width: 1 },
+      horzLine: { color: "rgba(2,132,199,0.5)", width: 1 },
+    },
+    height,
+    handleScroll:  true,
+    handleScale:   true,
+  };
+}
 
 function resolveIdx(symbol) {
   const s = String(symbol || "").toUpperCase();
@@ -105,101 +148,158 @@ function resolveIdx(symbol) {
 /* ═══════════════════════════════════════════════════════════════════════════
    COMPONENT
 ═══════════════════════════════════════════════════════════════════════════ */
-export default function HftScannerChart({ symbol, apiBase }) {
-  const containerRef    = useRef(null);
-  const chartRef        = useRef(null);
-  const seriesRefs      = useRef({});   // flowType → IHistogramSeriesApi
-  const hasInitialFit   = useRef(false);
-  const rawSeriesRef    = useRef([]);   // last fetched series, for re-applying visibility
+export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
+  const priceContainerRef = useRef(null);
+  const flowContainerRef  = useRef(null);
+  const priceChartRef     = useRef(null);
+  const flowChartRef      = useRef(null);
+  const candleSeriesRef   = useRef(null);
+  const flowSeriesRefs    = useRef({});
+  const hasInitialFit     = useRef(false);
+  const rawSeriesRef      = useRef([]);
+  const syncingRef        = useRef(false); // prevent scroll-sync feedback loop
 
   const [isFullscreen,  setIsFullscreen]  = useState(false);
   const [snapCount,     setSnapCount]     = useState(0);
   const [spotPrice,     setSpotPrice]     = useState(null);
   const [dominantFlow,  setDominantFlow]  = useState(null);
   const [statusMsg,     setStatusMsg]     = useState("waiting…");
+  const [tfMin,         setTfMin]         = useState(1);
+  const [visibleFlows,  setVisibleFlows]  = useState(() => new Set(STACK_ORDER));
 
-  /* all flow types visible by default */
-  const [visibleFlows, setVisibleFlows] = useState(() => new Set(STACK_ORDER));
+  const visibleFlowsRef = useRef(visibleFlows);
+  useEffect(() => { visibleFlowsRef.current = visibleFlows; }, [visibleFlows]);
 
-  /* ── Effect 1: create / destroy chart ──────────────────────────────────── */
+  /* ── Effect 1: create / destroy both charts ───────────────────────────── */
   useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
+    const priceEl = priceContainerRef.current;
+    const flowEl  = flowContainerRef.current;
+    if (!priceEl || !flowEl) return;
 
-    const chart = createChart(el, {
-      ...CHART_OPTIONS,
-      width:  el.clientWidth  || 600,
-      height: el.clientHeight || 400,
+    const priceH = priceEl.clientHeight || 200;
+    const flowH  = flowEl.clientHeight  || 320;
+
+    // ── Price chart ──
+    const priceChart = createChart(priceEl, {
+      ...makeChartOptions(priceH),
+      width: priceEl.clientWidth || 600,
     });
+    const candleSeries = priceChart.addCandlestickSeries({
+      upColor:          "#22c55e",
+      downColor:        "#ef4444",
+      borderUpColor:    "#22c55e",
+      borderDownColor:  "#ef4444",
+      wickUpColor:      "#22c55e",
+      wickDownColor:    "#ef4444",
+      lastValueVisible: true,
+      priceLineVisible: false,
+    });
+    priceChartRef.current    = priceChart;
+    candleSeriesRef.current  = candleSeries;
 
-    /**
-     * Add HistogramSeries in REVERSE STACK_ORDER so the series with the
-     * LARGEST cumulative value is added first (drawn at the back / bottom)
-     * and the one with the SMALLEST cumulative value is added last (drawn
-     * in front / top).  Combined with the cumulative-sum data trick this
-     * produces proper colour-stacked bars without any canvas hacks.
-     */
+    // ── Flow chart ──
+    const flowChart = createChart(flowEl, {
+      ...makeChartOptions(flowH),
+      width: flowEl.clientWidth || 600,
+    });
     const refs = {};
     [...STACK_ORDER].reverse().forEach((flowType) => {
-      refs[flowType] = chart.addHistogramSeries({
-        color:             FLOW_COLORS[flowType],
-        priceScaleId:      "right",
-        lastValueVisible:  false,
-        priceLineVisible:  false,
-        priceFormat: {
-          type:      "custom",
-          minMove:   1,
-          formatter: fmtFlow,
-        },
+      refs[flowType] = flowChart.addHistogramSeries({
+        color:            FLOW_COLORS[flowType],
+        priceScaleId:     "right",
+        lastValueVisible: false,
+        priceLineVisible: false,
+        priceFormat: { type: "custom", minMove: 1, formatter: fmtFlow },
       });
     });
+    flowChartRef.current   = flowChart;
+    flowSeriesRefs.current = refs;
 
-    chartRef.current   = chart;
-    seriesRefs.current = refs;
+    // ── Sync scroll / zoom between charts ──
+    const syncFromPrice = (range) => {
+      if (syncingRef.current) return;
+      syncingRef.current = true;
+      flowChart.timeScale().setVisibleLogicalRange(range);
+      syncingRef.current = false;
+    };
+    const syncFromFlow = (range) => {
+      if (syncingRef.current) return;
+      syncingRef.current = true;
+      priceChart.timeScale().setVisibleLogicalRange(range);
+      syncingRef.current = false;
+    };
+    priceChart.timeScale().subscribeVisibleLogicalRangeChange(syncFromPrice);
+    flowChart.timeScale().subscribeVisibleLogicalRangeChange(syncFromFlow);
 
-    /* Resize observer — keeps chart in sync with its container */
+    // ── Resize observer ──
     const ro = new ResizeObserver(() => {
-      if (chartRef.current && containerRef.current) {
-        chartRef.current.applyOptions({
-          width:  containerRef.current.clientWidth,
-          height: containerRef.current.clientHeight,
+      if (priceChartRef.current && priceContainerRef.current) {
+        priceChartRef.current.applyOptions({
+          width:  priceContainerRef.current.clientWidth,
+          height: priceContainerRef.current.clientHeight,
+        });
+      }
+      if (flowChartRef.current && flowContainerRef.current) {
+        flowChartRef.current.applyOptions({
+          width:  flowContainerRef.current.clientWidth,
+          height: flowContainerRef.current.clientHeight,
         });
       }
     });
-    ro.observe(el);
+    ro.observe(priceEl);
+    ro.observe(flowEl);
 
     return () => {
       ro.disconnect();
-      chart.remove();
-      chartRef.current   = null;
-      seriesRefs.current = {};
+      priceChart.timeScale().unsubscribeVisibleLogicalRangeChange(syncFromPrice);
+      flowChart.timeScale().unsubscribeVisibleLogicalRangeChange(syncFromFlow);
+      priceChart.remove();
+      flowChart.remove();
+      priceChartRef.current   = null;
+      flowChartRef.current    = null;
+      candleSeriesRef.current = null;
+      flowSeriesRefs.current  = {};
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ── Effect 2: clear stale data when symbol changes ────────────────────── */
+  /* ── Effect 2: push orderflow candles into price chart ─────────────────── */
+  useEffect(() => {
+    const series = candleSeriesRef.current;
+    if (!series || !candles?.length) return;
+    const data = candles
+      .filter((c) => c.open_time && c.open && c.high && c.low && c.close)
+      .map((c) => ({
+        time:  toChartTime(Math.floor(c.open_time / 1000)), // open_time is ms
+        open:  c.open,
+        high:  c.high,
+        low:   c.low,
+        close: c.close,
+      }))
+      .sort((a, b) => a.time - b.time);
+    if (data.length) {
+      try { series.setData(data); } catch (_) {}
+    }
+  }, [candles]);
+
+  /* ── Effect 3: clear stale data on symbol change ──────────────────────── */
   useEffect(() => {
     hasInitialFit.current = false;
+    rawSeriesRef.current  = [];
     setSnapCount(0);
     setSpotPrice(null);
     setDominantFlow(null);
     setStatusMsg("waiting…");
-    Object.values(seriesRefs.current).forEach((s) => {
+    Object.values(flowSeriesRefs.current).forEach((s) => {
       try { s?.setData([]); } catch (_) {}
     });
+    try { candleSeriesRef.current?.setData([]); } catch (_) {}
   }, [symbol]);
 
-  /**
-   * Core render: re-computes cumulative sums for ONLY the visible flow types
-   * and pushes data to each series.  Hidden series receive empty arrays so
-   * they disappear while visible neighbours remain correctly stacked.
-   *
-   * Called both after a fresh fetch AND whenever the user toggles visibility.
-   */
+  /* ── applyVisibility: recompute cumulative sums for visible flows ─────── */
   const applyVisibility = useCallback((series, visible) => {
-    const refs = seriesRefs.current;
+    const refs = flowSeriesRefs.current;
     if (!series?.length || !Object.keys(refs).length) return;
 
-    // Per-type data arrays (populated only for visible types)
     const dataByType = {};
     STACK_ORDER.forEach((ft) => { dataByType[ft] = []; });
 
@@ -208,9 +308,8 @@ export default function HftScannerChart({ symbol, apiBase }) {
       STACK_ORDER.forEach((flowType) => {
         if (visible.has(flowType)) {
           cumSum += snap.flows?.[flowType] ?? 0;
-          dataByType[flowType].push({ time: snap.ts, value: cumSum });
+          dataByType[flowType].push({ time: toChartTime(snap.ts), value: cumSum });
         }
-        // Hidden types keep an empty array → series will be cleared below
       });
     });
 
@@ -219,20 +318,22 @@ export default function HftScannerChart({ symbol, apiBase }) {
     });
   }, []);
 
-  /* ── push fresh data into the chart ────────────────────────────────────── */
-  const updateChart = useCallback((series, visible) => {
-    const chart = chartRef.current;
-    if (!chart || !series?.length) return;
+  /* ── updateChart: push new data + stats ──────────────────────────────── */
+  const updateChart = useCallback((rawSeries, tfMinVal, visible) => {
+    const chart = flowChartRef.current;
+    if (!chart || !rawSeries?.length) return;
 
-    rawSeriesRef.current = series;   // store for re-use when visibility changes
+    const series = aggregateHFT(rawSeries, tfMinVal);
+    rawSeriesRef.current = rawSeries;
+
     applyVisibility(series, visible);
 
     if (!hasInitialFit.current && series.length > 0) {
       hasInitialFit.current = true;
       chart.timeScale().fitContent();
+      priceChartRef.current?.timeScale().fitContent();
     }
 
-    /* Header stats — dominant VISIBLE flow in the latest snapshot */
     const lastSnap = series[series.length - 1];
     if (lastSnap?.flows) {
       const top = Object.entries(lastSnap.flows)
@@ -240,9 +341,13 @@ export default function HftScannerChart({ symbol, apiBase }) {
         .sort((a, b) => b[1] - a[1])[0];
       setDominantFlow(top ? top[0] : null);
     }
+    setSnapCount(series.length);
   }, [applyVisibility]);
 
-  /* ── fetch ─────────────────────────────────────────────────────────────── */
+  /* ── fetch ────────────────────────────────────────────────────────────── */
+  const tfMinRef = useRef(tfMin);
+  useEffect(() => { tfMinRef.current = tfMin; }, [tfMin]);
+
   const fetchData = useCallback(async () => {
     if (!symbol || !apiBase) return;
     const idx = resolveIdx(symbol);
@@ -254,46 +359,41 @@ export default function HftScannerChart({ symbol, apiBase }) {
         return;
       }
       setStatusMsg("");
-      setSnapCount(json.series?.length ?? 0);
       setSpotPrice(json.spot ?? null);
-      // Pass current visibleFlows at call time via ref to avoid stale closure
-      updateChart(json.series, visibleFlowsRef.current);
+      updateChart(json.series || [], tfMinRef.current, visibleFlowsRef.current);
     } catch {
       setStatusMsg("fetch error");
     }
   }, [symbol, apiBase, updateChart]);
 
-  /* Keep a ref in sync so fetchData never captures a stale visibleFlows */
-  const visibleFlowsRef = useRef(visibleFlows);
-  useEffect(() => { visibleFlowsRef.current = visibleFlows; }, [visibleFlows]);
-
-  /* ── re-render whenever visibility toggles (no re-fetch needed) ─────────── */
-  useEffect(() => {
-    if (rawSeriesRef.current.length) {
-      applyVisibility(rawSeriesRef.current, visibleFlows);
-      /* update dominant-flow stat for new visible set */
-      const lastSnap = rawSeriesRef.current[rawSeriesRef.current.length - 1];
-      if (lastSnap?.flows) {
-        const top = Object.entries(lastSnap.flows)
-          .filter(([k]) => visibleFlows.has(k))
-          .sort((a, b) => b[1] - a[1])[0];
-        setDominantFlow(top ? top[0] : null);
-      }
-    }
-  }, [visibleFlows, applyVisibility]);
-
-  /* ── polling ────────────────────────────────────────────────────────────── */
+  /* ── Polling ────────────────────────────────────────────────────────────── */
   useEffect(() => {
     fetchData();
     const id = setInterval(fetchData, POLL_MS);
     return () => clearInterval(id);
   }, [fetchData]);
 
+  /* ── Re-render when visibility or timeframe changes ──────────────────── */
+  useEffect(() => {
+    if (!rawSeriesRef.current.length) return;
+    const series = aggregateHFT(rawSeriesRef.current, tfMin);
+    applyVisibility(series, visibleFlows);
+    const lastSnap = series[series.length - 1];
+    if (lastSnap?.flows) {
+      const top = Object.entries(lastSnap.flows)
+        .filter(([k]) => visibleFlows.has(k))
+        .sort((a, b) => b[1] - a[1])[0];
+      setDominantFlow(top ? top[0] : null);
+    }
+    setSnapCount(series.length);
+  }, [visibleFlows, tfMin, applyVisibility]);
+
   const handleFit = useCallback(() => {
-    chartRef.current?.timeScale().fitContent();
+    flowChartRef.current?.timeScale().fitContent();
+    priceChartRef.current?.timeScale().fitContent();
   }, []);
 
-  /* ── derived header values ──────────────────────────────────────────────── */
+  /* ── derived ─────────────────────────────────────────────────────────── */
   const dominantColor = dominantFlow ? FLOW_COLORS[dominantFlow] : "#64748b";
 
   const quickBtnStyle = useMemo(() => ({
@@ -311,11 +411,27 @@ export default function HftScannerChart({ symbol, apiBase }) {
   return (
     <div className={`orderflow-chart${isFullscreen ? " of-fullscreen" : ""}`}>
 
-      {/* ── Header (identical structure to OrderflowChart) ── */}
+      {/* ── Header ── */}
       <div className="chart-header">
         <span className="chart-title">{resolveIdx(symbol)} — Institutional Flow</span>
 
         <div className="chart-actions">
+          {/* Timeframe buttons */}
+          {TIMEFRAMES.map(({ label, minutes }) => (
+            <button
+              key={label}
+              type="button"
+              className="chart-fit-btn"
+              onClick={() => setTfMin(minutes)}
+              style={{
+                fontWeight:      tfMin === minutes ? 700 : 400,
+                color:           tfMin === minutes ? "#0ea5e9" : undefined,
+                borderColor:     tfMin === minutes ? "#0ea5e9" : undefined,
+              }}
+            >
+              {label}
+            </button>
+          ))}
           <button type="button" className="chart-fit-btn" onClick={handleFit}>
             Fit [A]
           </button>
@@ -341,18 +457,18 @@ export default function HftScannerChart({ symbol, apiBase }) {
               {dominantFlow}
             </span>
           ) : (
-            <span style={{ opacity: 0.55 }}>{statusMsg || `${snapCount} snapshots`}</span>
+            <span style={{ opacity: 0.55 }}>{statusMsg || `${snapCount} bars`}</span>
           )}
           {dominantFlow && snapCount > 0 && (
             <>
               <span className="chart-sep">|</span>
-              <span>{snapCount} snapshots</span>
+              <span>{snapCount} bars</span>
             </>
           )}
         </div>
       </div>
 
-      {/* ── Legend / visibility toggles ── */}
+      {/* ── Flow type visibility toggles ── */}
       <div style={{
         display:      "flex",
         flexWrap:     "wrap",
@@ -364,25 +480,10 @@ export default function HftScannerChart({ symbol, apiBase }) {
         fontFamily:   "JetBrains Mono, monospace",
         userSelect:   "none",
       }}>
-        {/* All / None quick-selects */}
-        <button
-          onClick={() => setVisibleFlows(new Set(STACK_ORDER))}
-          style={quickBtnStyle}
-          title="Show all flow types"
-        >
-          All
-        </button>
-        <button
-          onClick={() => setVisibleFlows(new Set())}
-          style={quickBtnStyle}
-          title="Hide all flow types"
-        >
-          None
-        </button>
-
+        <button onClick={() => setVisibleFlows(new Set(STACK_ORDER))} style={quickBtnStyle} title="Show all">All</button>
+        <button onClick={() => setVisibleFlows(new Set())}            style={quickBtnStyle} title="Hide all">None</button>
         <span style={{ width: 1, height: 14, background: "rgba(0,0,0,0.10)", margin: "0 2px" }} />
 
-        {/* One toggle pill per flow type */}
         {STACK_ORDER.map((label) => {
           const active = visibleFlows.has(label);
           const color  = FLOW_COLORS[label];
@@ -398,30 +499,24 @@ export default function HftScannerChart({ symbol, apiBase }) {
               }
               title={active ? `Hide "${label}"` : `Show "${label}"`}
               style={{
-                display:       "inline-flex",
-                alignItems:    "center",
-                gap:           3,
-                padding:       "2px 7px",
-                border:        `1px solid ${active ? color : "rgba(0,0,0,0.12)"}`,
-                borderRadius:  3,
-                background:    active ? `${color}18` : "transparent",
-                color:         active ? color : "#94a3b8",
-                fontFamily:    "JetBrains Mono, monospace",
-                fontSize:      10,
-                fontWeight:    active ? 700 : 400,
-                cursor:        "pointer",
+                display: "inline-flex", alignItems: "center", gap: 3,
+                padding: "2px 7px",
+                border: `1px solid ${active ? color : "rgba(0,0,0,0.12)"}`,
+                borderRadius: 3,
+                background:   active ? `${color}18` : "transparent",
+                color:        active ? color : "#94a3b8",
+                fontFamily:   "JetBrains Mono, monospace",
+                fontSize:     10,
+                fontWeight:   active ? 700 : 400,
+                cursor:       "pointer",
                 textDecoration: active ? "none" : "line-through",
-                transition:    "all 0.15s",
-                whiteSpace:    "nowrap",
+                transition:   "all 0.15s",
+                whiteSpace:   "nowrap",
               }}
             >
               <span style={{
-                display:      "inline-block",
-                width:        8,
-                height:       8,
-                borderRadius: 2,
-                background:   active ? color : "#cbd5e1",
-                flexShrink:   0,
+                display: "inline-block", width: 8, height: 8, borderRadius: 2,
+                background: active ? color : "#cbd5e1", flexShrink: 0,
               }} />
               {label}
             </button>
@@ -429,9 +524,22 @@ export default function HftScannerChart({ symbol, apiBase }) {
         })}
       </div>
 
-      {/* ── Chart pane — fills remaining height, same class as OrderflowChart ── */}
-      <div ref={containerRef} className="chart-pane chart-pane-price" />
+      {/* ── Two-pane chart area ── */}
+      <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
 
+        {/* Top: Price candle chart */}
+        <div
+          ref={priceContainerRef}
+          style={{ flex: "0 0 35%", minHeight: 0, borderBottom: "1px solid rgba(0,0,0,0.06)" }}
+        />
+
+        {/* Bottom: HFT flow histogram */}
+        <div
+          ref={flowContainerRef}
+          style={{ flex: "0 0 65%", minHeight: 0 }}
+        />
+
+      </div>
     </div>
   );
 }
