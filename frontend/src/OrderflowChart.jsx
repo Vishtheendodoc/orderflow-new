@@ -163,9 +163,10 @@ function aggregateHftForOverlay(series, targetMinutes) {
 /* ════════════════════════════════════════════════════════
    COMPONENT
 ════════════════════════════════════════════════════════ */
-export default function OrderflowChart({ candles, symbol, features = {}, hftSeries = [], timeFrameMinutes = 1 }) {
+export default function OrderflowChart({ candles, symbol, features = {}, isIndexFuture = false, hftSeries = [], timeFrameMinutes = 1 }) {
   const showOI  = features.showOI  ?? true;
   const showHFT = features.showHFT ?? false;
+  const showHftOverlay = showHFT && isIndexFuture;
 
   const priceContainerRef = useRef(null);
   const priceChartRef     = useRef(null);
@@ -377,13 +378,13 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
   /* Reset fit flag on fresh mount */
   useEffect(() => { hasInitialFit.current = false; }, []);
 
-  /* ── HFT overlay: add/remove histogram series on SAME chart when showHFT toggles ── */
+  /* ── HFT overlay: add/remove histogram series on SAME chart when showHftOverlay toggles ── */
   /* Single chart = perfect alignment; no sync logic needed. */
   useEffect(() => {
     const chart = priceChartRef.current;
     if (!chart) return;
 
-    if (showHFT) {
+    if (showHftOverlay) {
       const refs = {};
       [...HFT_STACK_ORDER].reverse().forEach((ft) => {
         refs[ft] = chart.addHistogramSeries({
@@ -399,24 +400,24 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
       Object.values(hftFlowRefs.current).forEach((s) => { try { chart.removeSeries(s); } catch (_) {} });
       hftFlowRefs.current = {};
     }
-  }, [showHFT]);
+  }, [showHftOverlay]);
 
   /* ── HFT scale margins: candles top, HFT bottom; hftPaneH = fraction for HFT ── */
   useEffect(() => {
     const chart = priceChartRef.current;
     if (!chart) return;
-    if (showHFT) {
+    if (showHftOverlay) {
       const hftFrac = Math.max(HFT_PANE_MIN, Math.min(HFT_PANE_MAX, hftPaneH));
       chart.priceScale("right").applyOptions({ scaleMargins: { top: 0.08, bottom: hftFrac } });
       chart.priceScale("hft").applyOptions({ scaleMargins: { top: 1 - hftFrac, bottom: 0.02 } });
     } else {
       chart.priceScale("right").applyOptions({ scaleMargins: { top: 0.08, bottom: 0.08 } });
     }
-  }, [showHFT, hftPaneH]);
+  }, [showHftOverlay, hftPaneH]);
 
   /* ── HFT overlay: update series data when hftSeries or visibility changes ── */
   useEffect(() => {
-    if (!showHFT || !hftSeries?.length) return;
+    if (!showHftOverlay || !hftSeries?.length) return;
     const refs = hftFlowRefs.current;
     if (!Object.keys(refs).length) return;
 
@@ -449,7 +450,7 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
         : [];
       refs[ft]?.setData(sorted);
     });
-  }, [hftSeries, showHFT, timeFrameMinutes, hftVisibleFlows]);
+  }, [hftSeries, showHftOverlay, timeFrameMinutes, hftVisibleFlows]);
 
   /* ── Drag handle: resize HFT strip (adjusts scaleMargins) ─────────────── */
   const handleDragStart = useCallback((e) => {
@@ -521,7 +522,7 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
       </div>
 
       {/* ── Single chart: candlesticks + HFT bars (same chart, separate price scales) ── */}
-      {showHFT && (
+      {showHftOverlay && (
         <div style={{
           display: "flex", flexWrap: "wrap", alignItems: "center", gap: "4px 8px",
           padding: "4px 8px", borderBottom: "1px solid rgba(0,0,0,0.06)",
@@ -561,7 +562,7 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
       )}
       <div ref={priceContainerRef} className="chart-pane chart-pane-price" style={{ position: "relative" }} />
 
-      {showHFT && (
+      {showHftOverlay && (
         <div
           onMouseDown={handleDragStart}
           title="Drag to resize HFT strip"

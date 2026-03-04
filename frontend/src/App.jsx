@@ -1101,6 +1101,7 @@ export default function App() {
                     candles={displayCandles}
                     symbol={flow.symbol}
                     features={features}
+                    isIndexFuture={isIndexFuture}
                     timeFrameMinutes={timeFrameMinutes}
                     hftSeries={(() => {
                       const s = (activeSymbol || "").toUpperCase();
