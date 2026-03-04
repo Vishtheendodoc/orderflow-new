@@ -627,7 +627,9 @@ export default function App() {
   // Ref copy of activeSymbol so WS callbacks can read it without stale closures
   const activeSymbolRef = useRef(activeSymbol);
   /* ── Feature toggles ── */
-  const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true });
+  const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true, showHFT: false });
+  // HFT overlay data cache: idx → [{ts, flows, spot, mfi}]
+  const [hftSeriesCache, setHftSeriesCache] = useState({});
   const [featMenuOpen, setFeatMenuOpen] = useState(false);
   const featMenuRef = useRef(null);
   useEffect(() => { activeSymbolRef.current = activeSymbol; }, [activeSymbol]);
@@ -868,6 +870,26 @@ export default function App() {
     const s = (activeSymbol || "").toUpperCase();
     return ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"].some(n => s.includes(n));
   }, [activeSymbol]);
+
+  // HFT overlay: poll scanner data when showHFT is enabled on an index future (chart view only)
+  useEffect(() => {
+    if (!features.showHFT || !isIndexFuture || !activeSymbol) return;
+    const base = API_URL || window.location.origin;
+    const s = activeSymbol.toUpperCase();
+    const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n)) || s;
+    const poll = async () => {
+      try {
+        const res = await fetch(`${base}/api/hft_scanner/${encodeURIComponent(idx)}`);
+        if (!res.ok) return;
+        const d = await res.json();
+        if (d.series?.length) setHftSeriesCache((prev) => ({ ...prev, [idx]: d.series }));
+      } catch (_) {}
+    };
+    poll();
+    const id = setInterval(poll, 65_000);
+    return () => clearInterval(id);
+  }, [features.showHFT, isIndexFuture, activeSymbol]);
+
   const [timeFrameMinutes, setTimeFrameMinutes] = useState(1); // TradingView-style: 1,5,10,15,30,45,60,120
   const [sidebarOpen, setSidebarOpen] = useState(false); // mobile drawer
 
@@ -991,6 +1013,19 @@ export default function App() {
                           {label}
                         </label>
                       ))}
+                      {isIndexFuture && (
+                        <>
+                          <div className="feat-dropdown-title" style={{ marginTop: 6 }}>HFT Overlay</div>
+                          <label className="feat-row">
+                            <input
+                              type="checkbox"
+                              checked={features.showHFT ?? false}
+                              onChange={(e) => setFeatures((f) => ({ ...f, showHFT: e.target.checked }))}
+                            />
+                            Institutional Flow Bars
+                          </label>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1057,6 +1092,11 @@ export default function App() {
                     candles={displayCandles}
                     symbol={flow.symbol}
                     features={features}
+                    hftSeries={(() => {
+                      const s = (activeSymbol || "").toUpperCase();
+                      const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n));
+                      return idx ? (hftSeriesCache[idx] || []) : [];
+                    })()}
                   />
                 </div>
               ) : viewMode === "footprint" ? (
