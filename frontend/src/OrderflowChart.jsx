@@ -178,6 +178,7 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
   // ── HFT overlay (same chart, separate price scale) ───────────────────────
   const hftFlowRefs      = useRef({});   // flowType → IHistogramSeriesApi
   const [hftPaneH, setHftPaneH] = useState(HFT_PANE_DEFAULT);  // fraction 0.2–0.55
+  const [hftVisibleFlows, setHftVisibleFlows] = useState(() => new Set(HFT_STACK_ORDER));
   const isDraggingRef    = useRef(false);
   const dragStartYRef    = useRef(0);
   const dragStartHRef    = useRef(0);
@@ -413,14 +414,14 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
     }
   }, [showHFT, hftPaneH]);
 
-  /* ── HFT overlay: update series data when hftSeries prop changes ────────── */
-  /* Aggregate HFT to match chart timeframe so bars align with candles. */
+  /* ── HFT overlay: update series data when hftSeries or visibility changes ── */
   useEffect(() => {
     if (!showHFT || !hftSeries?.length) return;
     const refs = hftFlowRefs.current;
     if (!Object.keys(refs).length) return;
 
     const aggregated = aggregateHftForOverlay(hftSeries, timeFrameMinutes);
+    const visible = hftVisibleFlows;
 
     const dataByType = {};
     HFT_STACK_ORDER.forEach((ft) => { dataByType[ft] = {}; });
@@ -433,18 +434,22 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
       const chartTime = snap.ts + 19800;
       let cumSum = 0;
       HFT_STACK_ORDER.forEach((ft) => {
-        cumSum += snap.flows?.[ft] ?? 0;
-        dataByType[ft][chartTime] = cumSum;
+        if (visible.has(ft)) {
+          cumSum += snap.flows?.[ft] ?? 0;
+          dataByType[ft][chartTime] = cumSum;
+        }
       });
     });
 
     HFT_STACK_ORDER.forEach((ft) => {
-      const sorted = Object.entries(dataByType[ft])
-        .map(([t, v]) => ({ time: Number(t), value: v }))
-        .sort((a, b) => a.time - b.time);
+      const sorted = visible.has(ft)
+        ? Object.entries(dataByType[ft])
+            .map(([t, v]) => ({ time: Number(t), value: v }))
+            .sort((a, b) => a.time - b.time)
+        : [];
       refs[ft]?.setData(sorted);
     });
-  }, [hftSeries, showHFT, timeFrameMinutes]);
+  }, [hftSeries, showHFT, timeFrameMinutes, hftVisibleFlows]);
 
   /* ── Drag handle: resize HFT strip (adjusts scaleMargins) ─────────────── */
   const handleDragStart = useCallback((e) => {
@@ -516,20 +521,45 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
       </div>
 
       {/* ── Single chart: candlesticks + HFT bars (same chart, separate price scales) ── */}
-      <div ref={priceContainerRef} className="chart-pane chart-pane-price" style={{ position: "relative" }}>
-        {showHFT && (
-          <div style={{
-            position: "absolute", top: 0, left: 0, right: 0, zIndex: 1,
-            display: "flex", flexWrap: "wrap", gap: "2px 6px", padding: "2px 6px",
-            background: "rgba(255,255,255,0.75)", fontSize: 9, fontFamily: "JetBrains Mono, monospace",
-            pointerEvents: "none",
-          }}>
-            {HFT_STACK_ORDER.map((ft) => (
-              <span key={ft} style={{ color: HFT_FLOW_COLORS[ft], fontWeight: 700 }}>■ {ft}</span>
-            ))}
-          </div>
-        )}
-      </div>
+      {showHFT && (
+        <div style={{
+          display: "flex", flexWrap: "wrap", alignItems: "center", gap: "4px 8px",
+          padding: "4px 8px", borderBottom: "1px solid rgba(0,0,0,0.06)",
+          fontSize: 10, fontFamily: "JetBrains Mono, monospace", userSelect: "none",
+        }}>
+          <button type="button" className="chart-fit-btn" onClick={() => setHftVisibleFlows(new Set(HFT_STACK_ORDER))}>All</button>
+          <button type="button" className="chart-fit-btn" onClick={() => setHftVisibleFlows(new Set())}>None</button>
+          <span style={{ width: 1, height: 14, background: "rgba(0,0,0,0.1)", margin: "0 2px" }} />
+          {HFT_STACK_ORDER.map((ft) => {
+            const active = hftVisibleFlows.has(ft);
+            const color = HFT_FLOW_COLORS[ft];
+            return (
+              <button
+                key={ft}
+                type="button"
+                onClick={() => setHftVisibleFlows((prev) => {
+                  const next = new Set(prev);
+                  next.has(ft) ? next.delete(ft) : next.add(ft);
+                  return next;
+                })}
+                title={active ? `Hide ${ft}` : `Show ${ft}`}
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 3,
+                  padding: "2px 7px", border: `1px solid ${active ? color : "rgba(0,0,0,0.12)"}`,
+                  borderRadius: 3, background: active ? `${color}18` : "transparent",
+                  color: active ? color : "#94a3b8", fontFamily: "JetBrains Mono, monospace",
+                  fontSize: 10, fontWeight: active ? 700 : 400, cursor: "pointer",
+                  textDecoration: active ? "none" : "line-through",
+                }}
+              >
+                <span style={{ width: 8, height: 8, borderRadius: 2, background: active ? color : "#cbd5e1" }} />
+                {ft}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <div ref={priceContainerRef} className="chart-pane chart-pane-price" style={{ position: "relative" }} />
 
       {showHFT && (
         <div

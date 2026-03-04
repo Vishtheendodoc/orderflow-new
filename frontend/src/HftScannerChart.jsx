@@ -176,7 +176,7 @@ function resolveIdx(symbol) {
 
 const PRICE_PANE_MIN = 15;   // % of chart area
 const PRICE_PANE_MAX = 75;
-const PRICE_PANE_DEF = 30;
+const PRICE_PANE_DEF = 50;   // 50% candles / 50% HFT — reduces HFT bar height
 
 /* ═══════════════════════════════════════════════════════════════════════════
    COMPONENT
@@ -262,28 +262,33 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
     };
   }, []);
 
-  /* ── Scale margins: candles top (pricePaneH%), flow bottom ───────────────── */
+  /* ── Scale margins: candles top (pricePaneH%), flow bottom; +0.15 top margin
+     on HFT scale compresses bar height ─────────────────────────────────────── */
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
     const pct = Math.max(PRICE_PANE_MIN / 100, Math.min(PRICE_PANE_MAX / 100, pricePaneH / 100));
     chart.priceScale("right").applyOptions({ scaleMargins: { top: 0.08, bottom: 0.92 - pct } });
-    chart.priceScale("hft").applyOptions({ scaleMargins: { top: pct, bottom: 0.02 } });
+    chart.priceScale("hft").applyOptions({ scaleMargins: { top: Math.min(0.85, pct + 0.15), bottom: 0.02 } });
   }, [pricePaneH]);
 
   /* ── Effect 2: push candles into price chart (aggregated by tfMin) ──────── */
   useEffect(() => {
     const series = candleSeriesRef.current;
     if (!series || !candles?.length) return;
-    const filtered = candles.filter((c) => c.open_time && c.open && c.high && c.low && c.close);
+    const filtered = candles.filter((c) => c.open_time && (c.open != null || c.close != null));
     const merged = aggregateCandlesForHft(filtered, tfMin);
-    const data = merged.map((c) => ({
-      time:  c.time ?? Math.floor((c.open_time || 0) / 1000),
-      open:  c.open,
-      high:  c.high,
-      low:   c.low,
-      close: c.close,
-    })).sort((a, b) => a.time - b.time);
+    const data = merged.map((c) => {
+      const o = c.open ?? c.close ?? 0;
+      const cl = c.close ?? c.open ?? 0;
+      return {
+        time:  c.time ?? Math.floor((c.open_time || 0) / 1000),
+        open:  o,
+        high:  (c.high ?? Math.max(o, cl)) || cl,
+        low:   (c.low ?? Math.min(o, cl)) || o,
+        close: cl,
+      };
+    }).filter((c) => c.high > 0 && c.low > 0 && c.low < 1e8).sort((a, b) => a.time - b.time);
     if (data.length) {
       try { series.setData(data); } catch (_) {}
       if (!hasInitialFit.current) {
