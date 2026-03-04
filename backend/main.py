@@ -1496,10 +1496,13 @@ async def broadcast_state(symbol: str):
     msg = json.dumps({"type": "orderflow", "data": state})
 
     dead = set()
+    sym_upper = symbol.upper()
     for ws in connected_clients:
         viewing = client_viewing.get(ws)
-        if viewing is not None and symbol not in viewing:
-            continue  # Client only wants specific symbols; skip this one
+        # None/empty = receive all. With symbols: send if any viewing symbol matches (partial match)
+        if viewing:
+            if not any(v and v.upper() in sym_upper for v in viewing):
+                continue
         try:
             await ws.send_text(msg)
         except Exception:
@@ -1874,10 +1877,13 @@ async def websocket_endpoint(ws: WebSocket):
 
             elif msg_type == "set_viewing":
                 # Client declares which symbols it wants live updates for.
-                # Reduces broadcast load when NSE+MCX both live (400+ symbols).
+                # ["*"] or empty = receive all. Otherwise partial match: "NIFTY" matches "NIFTY MAR FUT".
                 syms = data.get("symbols", [])
                 if isinstance(syms, list):
-                    client_viewing[ws] = {str(s).upper() for s in syms if s}
+                    if "*" in syms or not syms:
+                        client_viewing.pop(ws, None)  # receive all
+                    else:
+                        client_viewing[ws] = {str(s).upper() for s in syms if s}
                 else:
                     client_viewing.pop(ws, None)
 

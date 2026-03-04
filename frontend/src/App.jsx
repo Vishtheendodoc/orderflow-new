@@ -702,13 +702,11 @@ export default function App() {
       staleTimerRef.current = setInterval(() => {
         if (Date.now() - lastMsgRef.current > 50000) ws.close();
       }, 15000);
-      // Tell backend which symbol we want live ticks for (reduces broadcast load)
+      // Tell backend which symbols we want live ticks for (reduces broadcast load)
       const sym = activeSymbolRef.current;
       const syms = activeSymbolsRef.current;
-      const viewing = sym ? [sym] : syms.slice(0, 5);
-      if (viewing.length > 0) {
-        ws.send(JSON.stringify({ type: "set_viewing", symbols: viewing }));
-      }
+      const viewing = sym ? [sym, ...syms.filter((s) => s !== sym).slice(0, 9)] : syms.slice(0, 10);
+      ws.send(JSON.stringify({ type: "set_viewing", symbols: viewing.length ? viewing : ["*"] }));
       // After backend finishes sending the initial snapshot (~4s for 452 symbols),
       // request full history for whatever symbol the user is viewing
       setTimeout(() => {
@@ -793,8 +791,10 @@ export default function App() {
   useEffect(() => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    // Only the viewed chart needs live ticks; tabs can stay stale until user switches
-    const symbols = activeSymbol ? [activeSymbol] : activeSymbols.slice(0, 5);
+    // Include active chart + all tabs (up to 10) so tab switches get fresh data
+    const base = activeSymbol ? [activeSymbol] : [];
+    const rest = activeSymbols.filter((s) => s !== activeSymbol).slice(0, 9);
+    const symbols = [...new Set([...base, ...rest])];
     if (symbols.length > 0) {
       ws.send(JSON.stringify({ type: "set_viewing", symbols }));
     }
