@@ -16,21 +16,28 @@
 import { useEffect, useRef, useCallback, useState, useMemo } from "react";
 import { createChart } from "lightweight-charts";
 
-const POLL_MS   = 65_000;  // slightly over 60s to avoid racing the backend write
-const IST_OFFSET = 19800;  // UTC+5:30 in seconds
+const POLL_MS    = 65_000;  // slightly over 60s to avoid racing the backend write
+const IST_OFFSET = 19800;   // UTC+5:30 in seconds
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
-const _pad   = (n) => String(n).padStart(2, "0");
+const _pad = (n) => String(n).padStart(2, "0");
 
-/** Convert a UTC Unix-second timestamp to an IST HH:MM label. */
-const fmtIST = (utcSec) => {
-  const ist = (typeof utcSec === "number" ? utcSec : 0) + IST_OFFSET;
-  const d   = new Date(ist * 1000);
+/**
+ * Format an IST-epoch second (same convention as Dhan open_time / 1000) as HH:MM.
+ * Because IST-epoch = Unix + 19800, reading getUTCHours() directly yields the
+ * correct IST wall-clock digit without any extra offset addition.
+ */
+const fmtIST = (istEpochSec) => {
+  const d = new Date((typeof istEpochSec === "number" ? istEpochSec : 0) * 1000);
   return `${_pad(d.getUTCHours())}:${_pad(d.getUTCMinutes())}`;
 };
 
-/** Convert a UTC Unix-second to the lightweight-charts "time" value (UTC-aligned). */
-const toChartTime = (utcSec) => utcSec;  // lightweight-charts expects UTC seconds; we set timezone offset in options
+/**
+ * Convert a raw UTC Unix-second (snap.ts from backend) to an IST-epoch second
+ * floored to the minute boundary, so it lands exactly on a candle open_time.
+ * Candle open_time (ms / 1000) is already IST-epoch at the minute start.
+ */
+const toChartTime = (utcSec) => Math.floor(utcSec / 60) * 60 + IST_OFFSET;
 
 const fmtFlow = (v) => {
   const n = Math.abs(Number(v));
@@ -145,6 +152,10 @@ function resolveIdx(symbol) {
   return s;
 }
 
+const PRICE_PANE_MIN = 15;   // % of chart area
+const PRICE_PANE_MAX = 75;
+const PRICE_PANE_DEF = 30;
+
 /* ═══════════════════════════════════════════════════════════════════════════
    COMPONENT
 ═══════════════════════════════════════════════════════════════════════════ */
@@ -159,6 +170,11 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
   const rawSeriesRef      = useRef([]);
   const syncingRef        = useRef(false); // prevent scroll-sync feedback loop
 
+  // Drag state for the resize handle
+  const isDraggingRef    = useRef(false);
+  const dragStartYRef    = useRef(0);
+  const dragStartHRef    = useRef(PRICE_PANE_DEF);
+
   const [isFullscreen,  setIsFullscreen]  = useState(false);
   const [snapCount,     setSnapCount]     = useState(0);
   const [spotPrice,     setSpotPrice]     = useState(null);
@@ -166,6 +182,7 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
   const [statusMsg,     setStatusMsg]     = useState("waiting…");
   const [tfMin,         setTfMin]         = useState(1);
   const [visibleFlows,  setVisibleFlows]  = useState(() => new Set(STACK_ORDER));
+  const [pricePaneH,    setPricePaneH]    = useState(PRICE_PANE_DEF); // % height
 
   const visibleFlowsRef = useRef(visibleFlows);
   useEffect(() => { visibleFlowsRef.current = visibleFlows; }, [visibleFlows]);
@@ -395,6 +412,32 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
     priceChartRef.current?.timeScale().fitContent();
   }, []);
 
+  /* ── Drag handle: resize price pane height ───────────────────────────── */
+  const handleDragStart = useCallback((e) => {
+    isDraggingRef.current   = true;
+    dragStartYRef.current   = e.clientY;
+    dragStartHRef.current   = pricePaneH;
+    e.preventDefault();
+
+    const container = e.currentTarget.closest(".of-hft-pane-area");
+    const totalH    = container ? container.clientHeight : 500;
+
+    const onMove = (ev) => {
+      if (!isDraggingRef.current) return;
+      const delta   = ev.clientY - dragStartYRef.current;
+      const deltaPct = (delta / totalH) * 100;
+      setPricePaneH(Math.min(PRICE_PANE_MAX,
+                    Math.max(PRICE_PANE_MIN, dragStartHRef.current + deltaPct)));
+    };
+    const onUp = () => {
+      isDraggingRef.current = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [pricePaneH]);
+
   /* ── derived ─────────────────────────────────────────────────────────── */
   const dominantColor = dominantFlow ? FLOW_COLORS[dominantFlow] : "#64748b";
 
@@ -527,18 +570,34 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
       </div>
 
       {/* ── Two-pane chart area ── */}
-      <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+      <div className="of-hft-pane-area" style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
 
         {/* Top: Price candle chart */}
         <div
           ref={priceContainerRef}
-          style={{ flex: "0 0 35%", minHeight: 0, borderBottom: "1px solid rgba(0,0,0,0.06)" }}
+          style={{ flex: `0 0 ${pricePaneH}%`, minHeight: 0, overflow: "hidden" }}
         />
+
+        {/* Drag handle */}
+        <div
+          onMouseDown={handleDragStart}
+          title="Drag to resize"
+          style={{
+            flex:       "0 0 5px",
+            background: "rgba(0,0,0,0.06)",
+            cursor:     "row-resize",
+            display:    "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <div style={{ width: 32, height: 2, borderRadius: 1, background: "rgba(0,0,0,0.18)" }} />
+        </div>
 
         {/* Bottom: HFT flow histogram */}
         <div
           ref={flowContainerRef}
-          style={{ flex: "0 0 65%", minHeight: 0 }}
+          style={{ flex: 1, minHeight: 0, overflow: "hidden" }}
         />
 
       </div>

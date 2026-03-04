@@ -442,8 +442,9 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
     HFT_STACK_ORDER.forEach((ft) => { dataByType[ft] = []; });
     hftSeries.forEach((snap) => {
       // Price chart uses Dhan IST-epoch seconds (Unix + 19800).
-      // HFT snap.ts is real UTC Unix epoch — add 19800 to align on the same x-axis.
-      const chartTime = snap.ts + 19800;
+      // HFT snap.ts is real UTC Unix epoch — floor to minute boundary then add 19800
+      // so every HFT bar lands exactly on the matching candle open_time.
+      const chartTime = Math.floor(snap.ts / 60) * 60 + 19800;
       let cumSum = 0;
       HFT_STACK_ORDER.forEach((ft) => {
         cumSum += snap.flows?.[ft] ?? 0;
