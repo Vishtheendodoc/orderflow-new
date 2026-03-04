@@ -79,10 +79,11 @@ const TIMEFRAMES = [
   { label: "1h",  minutes: 60 },
 ];
 
-/** Aggregate 1m candles into N-min candles for the price chart. */
+/** Aggregate 1m candles into N-min candles. Always runs (even for 1m) to deduplicate
+ *  by minute and ensure strictly increasing times — duplicate times crash lightweight-charts. */
 function aggregateCandlesForHft(candles, tfMin) {
-  if (!candles?.length || tfMin <= 1) return candles;
-  const secPerBucket = tfMin * 60;
+  if (!candles?.length) return [];
+  const secPerBucket = Math.max(1, tfMin) * 60;
   const buckets = {};
   for (const c of candles) {
     const tSec = Math.floor((c.open_time || 0) / 1000);
@@ -299,9 +300,6 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
   }, [candles, tfMin]);
 
   /* ── Effect 3: clear stale HFT flow data on symbol change ──────────────── */
-  /* NOTE: do NOT clear candleSeriesRef here — Effect 2 ([candles]) already handles
-     candle data. Clearing here would run AFTER Effect 2 on initial mount and wipe
-     the price chart blank before the user sees anything.                         */
   useEffect(() => {
     hasInitialFit.current = false;
     rawSeriesRef.current  = [];
@@ -313,6 +311,11 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
       try { s?.setData([]); } catch (_) {}
     });
   }, [symbol]);
+
+  /* Reset fit when timeframe changes so chart re-fits to new bar count */
+  useEffect(() => {
+    hasInitialFit.current = false;
+  }, [tfMin]);
 
   /* ── applyVisibility: recompute cumulative sums for visible flows ─────── */
   const applyVisibility = useCallback((series, visible) => {
