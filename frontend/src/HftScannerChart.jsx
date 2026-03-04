@@ -162,18 +162,13 @@ const PRICE_PANE_DEF = 30;
    COMPONENT
 ═══════════════════════════════════════════════════════════════════════════ */
 export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
-  const priceContainerRef = useRef(null);
-  const flowContainerRef  = useRef(null);
-  const priceChartRef     = useRef(null);
-  const flowChartRef      = useRef(null);
+  const chartContainerRef = useRef(null);
+  const chartRef          = useRef(null);
   const candleSeriesRef   = useRef(null);
   const flowSeriesRefs    = useRef({});
   const hasInitialFit     = useRef(false);
   const rawSeriesRef      = useRef([]);
-  const syncingRef        = useRef(false); // prevent scroll-sync feedback loop
-  const candleTimesRef    = useRef([]);   // IST-epoch seconds of every loaded candle
 
-  // Drag state for the resize handle
   const isDraggingRef    = useRef(false);
   const dragStartYRef    = useRef(0);
   const dragStartHRef    = useRef(PRICE_PANE_DEF);
@@ -190,21 +185,18 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
   const visibleFlowsRef = useRef(visibleFlows);
   useEffect(() => { visibleFlowsRef.current = visibleFlows; }, [visibleFlows]);
 
-  /* ── Effect 1: create / destroy both charts ───────────────────────────── */
+  /* ── Effect 1: create single chart with candlestick + flow histogram ──── */
+  /* Same chart = shared time axis; candles and HFT bars align by design. */
   useEffect(() => {
-    const priceEl = priceContainerRef.current;
-    const flowEl  = flowContainerRef.current;
-    if (!priceEl || !flowEl) return;
+    const el = chartContainerRef.current;
+    if (!el) return;
 
-    const priceH = priceEl.clientHeight || 200;
-    const flowH  = flowEl.clientHeight  || 320;
-
-    // ── Price chart ──
-    const priceChart = createChart(priceEl, {
-      ...makeChartOptions(priceH),
-      width: priceEl.clientWidth || 600,
+    const chart = createChart(el, {
+      ...makeChartOptions(el.clientHeight || 500),
+      width: el.clientWidth || 600,
     });
-    const candleSeries = priceChart.addCandlestickSeries({
+
+    const candleSeries = chart.addCandlestickSeries({
       upColor:          "#22c55e",
       downColor:        "#ef4444",
       borderUpColor:    "#22c55e",
@@ -213,76 +205,51 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
       wickDownColor:    "#ef4444",
       lastValueVisible: true,
       priceLineVisible: false,
+      priceScaleId:     "right",
     });
-    priceChartRef.current    = priceChart;
-    candleSeriesRef.current  = candleSeries;
 
-    // ── Flow chart ──
-    const flowChart = createChart(flowEl, {
-      ...makeChartOptions(flowH),
-      width: flowEl.clientWidth || 600,
-    });
     const refs = {};
     [...STACK_ORDER].reverse().forEach((flowType) => {
-      refs[flowType] = flowChart.addHistogramSeries({
+      refs[flowType] = chart.addHistogramSeries({
         color:            FLOW_COLORS[flowType],
-        priceScaleId:     "right",
+        priceScaleId:     "hft",
         lastValueVisible: false,
         priceLineVisible: false,
-        priceFormat: { type: "custom", minMove: 1, formatter: fmtFlow },
+        priceFormat:      { type: "custom", minMove: 1, formatter: fmtFlow },
       });
     });
-    flowChartRef.current   = flowChart;
+
+    chartRef.current       = chart;
+    candleSeriesRef.current = candleSeries;
     flowSeriesRefs.current = refs;
 
-    // ── TIME-RANGE sync: use absolute time values so bars align by candle time,
-    //    not by bar index.  Both panes share the same UTC time axis so the same
-    //    {from, to} range is valid for both charts.
-    const syncFromPrice = (range) => {
-      if (syncingRef.current || !range) return;
-      syncingRef.current = true;
-      try { flowChart.timeScale().setVisibleRange(range); } catch (_) {}
-      syncingRef.current = false;
-    };
-    const syncFromFlow = (range) => {
-      if (syncingRef.current || !range) return;
-      syncingRef.current = true;
-      try { priceChart.timeScale().setVisibleRange(range); } catch (_) {}
-      syncingRef.current = false;
-    };
-    priceChart.timeScale().subscribeVisibleTimeRangeChange(syncFromPrice);
-    flowChart.timeScale().subscribeVisibleTimeRangeChange(syncFromFlow);
-
-    // ── Resize observer ──
     const ro = new ResizeObserver(() => {
-      if (priceChartRef.current && priceContainerRef.current) {
-        priceChartRef.current.applyOptions({
-          width:  priceContainerRef.current.clientWidth,
-          height: priceContainerRef.current.clientHeight,
-        });
-      }
-      if (flowChartRef.current && flowContainerRef.current) {
-        flowChartRef.current.applyOptions({
-          width:  flowContainerRef.current.clientWidth,
-          height: flowContainerRef.current.clientHeight,
+      if (chartRef.current && chartContainerRef.current) {
+        chartRef.current.applyOptions({
+          width:  chartContainerRef.current.clientWidth,
+          height: chartContainerRef.current.clientHeight,
         });
       }
     });
-    ro.observe(priceEl);
-    ro.observe(flowEl);
+    ro.observe(el);
 
     return () => {
       ro.disconnect();
-      try { priceChart.timeScale().unsubscribeVisibleTimeRangeChange(syncFromPrice); } catch (_) {}
-      try { flowChart.timeScale().unsubscribeVisibleTimeRangeChange(syncFromFlow); } catch (_) {}
-      priceChart.remove();
-      flowChart.remove();
-      priceChartRef.current   = null;
-      flowChartRef.current    = null;
+      chart.remove();
+      chartRef.current       = null;
       candleSeriesRef.current = null;
-      flowSeriesRefs.current  = {};
+      flowSeriesRefs.current = {};
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* ── Scale margins: candles top (pricePaneH%), flow bottom ───────────────── */
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const pct = Math.max(PRICE_PANE_MIN / 100, Math.min(PRICE_PANE_MAX / 100, pricePaneH / 100));
+    chart.priceScale("right").applyOptions({ scaleMargins: { top: 0.08, bottom: 0.92 - pct } });
+    chart.priceScale("hft").applyOptions({ scaleMargins: { top: pct, bottom: 0.02 } });
+  }, [pricePaneH]);
 
   /* ── Effect 2: push orderflow candles into price chart ─────────────────── */
   useEffect(() => {
@@ -302,24 +269,11 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
       }))
       .sort((a, b) => a.time - b.time);
     if (data.length) {
-      // Keep a list of IST-epoch seconds for every loaded candle so applyVisibility
-      // can seed the flow chart with phantom bars at these same timestamps — without
-      // this the two separate chart instances have different bar densities and bars
-      // appear at different horizontal pixel positions even with the same time range.
-      candleTimesRef.current = data.map((c) => c.time);
       try { series.setData(data); } catch (_) {}
-      // After candles are written, sync the price pane to whatever time window the flow
-      // chart is already showing.  This handles the race where flow data arrives first
-      // (updateChart runs before Effect 2), leaving the price chart with a stale/null
-      // range.  If the flow chart isn't fitted yet we just fit all candles.
-      setTimeout(() => {
-        const flowRange = flowChartRef.current?.timeScale().getVisibleRange();
-        if (flowRange) {
-          try { priceChartRef.current?.timeScale().setVisibleRange(flowRange); } catch (_) {}
-        } else {
-          priceChartRef.current?.timeScale().fitContent();
-        }
-      }, 0);
+      if (!hasInitialFit.current) {
+        hasInitialFit.current = true;
+        chartRef.current?.timeScale().fitContent();
+      }
     }
   }, [candles]);
 
@@ -344,47 +298,28 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
     const refs = flowSeriesRefs.current;
     if (!series?.length || !Object.keys(refs).length) return;
 
-    // KEY FIX: use a time→value map so we can seed every visible flow type with
-    // phantom 0-value bars at ALL candle timestamps.  This gives the flow chart the
-    // same bar density as the price chart (one slot per IST minute), which ensures
-    // setVisibleRange() lands HFT bars at the same pixel columns as the candles.
-    // Real HFT data simply overwrites the phantom where it exists.
     const dataByType = {};
-    STACK_ORDER.forEach((ft) => { dataByType[ft] = {}; });
+    STACK_ORDER.forEach((ft) => { dataByType[ft] = []; });
 
-    // 1. Phantom bars at every candle time (value = 0)
-    candleTimesRef.current.forEach((t) => {
-      STACK_ORDER.forEach((ft) => { dataByType[ft][t] = 0; });
-    });
-
-    // 2. Real HFT data
     series.forEach((snap) => {
       const t = toChartTime(snap.ts);
       let cumSum = 0;
       STACK_ORDER.forEach((flowType) => {
         if (visible.has(flowType)) {
           cumSum += snap.flows?.[flowType] ?? 0;
-          dataByType[flowType][t] = cumSum;
+          dataByType[flowType].push({ time: t, value: cumSum });
         }
       });
     });
 
-    // 3. Convert maps → sorted arrays; invisible types receive empty arrays
     STACK_ORDER.forEach((flowType) => {
-      if (visible.has(flowType)) {
-        const sorted = Object.entries(dataByType[flowType])
-          .map(([t, v]) => ({ time: Number(t), value: v }))
-          .sort((a, b) => a.time - b.time);
-        refs[flowType]?.setData(sorted);
-      } else {
-        refs[flowType]?.setData([]);
-      }
+      refs[flowType]?.setData(visible.has(flowType) ? dataByType[flowType] : []);
     });
   }, []);
 
   /* ── updateChart: push new data + stats ──────────────────────────────── */
   const updateChart = useCallback((rawSeries, tfMinVal, visible) => {
-    const chart = flowChartRef.current;
+    const chart = chartRef.current;
     if (!chart || !rawSeries?.length) return;
 
     const series = aggregateHFT(rawSeries, tfMinVal);
@@ -394,19 +329,7 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
 
     if (!hasInitialFit.current && series.length > 0) {
       hasInitialFit.current = true;
-      // Fit the flow chart first, then after one JS tick (so layout settles),
-      // copy its visible time range to the price chart.
       chart.timeScale().fitContent();
-      // 50 ms gives the chart layout time to commit the fit before we read
-      // getVisibleRange(); 0 ms is too short and often returns null.
-      setTimeout(() => {
-        const range = chart.timeScale().getVisibleRange();
-        if (range) {
-          try { priceChartRef.current?.timeScale().setVisibleRange(range); } catch (_) {}
-        } else {
-          priceChartRef.current?.timeScale().fitContent();
-        }
-      }, 50);
     }
 
     const lastSnap = series[series.length - 1];
@@ -464,15 +387,7 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
   }, [visibleFlows, tfMin, applyVisibility]);
 
   const handleFit = useCallback(() => {
-    flowChartRef.current?.timeScale().fitContent();
-    setTimeout(() => {
-      const range = flowChartRef.current?.timeScale().getVisibleRange();
-      if (range) {
-        try { priceChartRef.current?.timeScale().setVisibleRange(range); } catch (_) {}
-      } else {
-        priceChartRef.current?.timeScale().fitContent();
-      }
-    }, 50);
+    chartRef.current?.timeScale().fitContent();
   }, []);
 
   /* ── Drag handle: resize price pane height ───────────────────────────── */
@@ -482,8 +397,7 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
     dragStartHRef.current   = pricePaneH;
     e.preventDefault();
 
-    const container = e.currentTarget.closest(".of-hft-pane-area");
-    const totalH    = container ? container.clientHeight : 500;
+    const totalH = chartContainerRef.current?.clientHeight || 500;
 
     const onMove = (ev) => {
       if (!isDraggingRef.current) return;
@@ -632,37 +546,26 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
         })}
       </div>
 
-      {/* ── Two-pane chart area ── */}
-      <div className="of-hft-pane-area" style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+      {/* ── Single chart: candles + HFT flow (same chart, separate price scales) ── */}
+      <div
+        ref={chartContainerRef}
+        style={{ flex: 1, minHeight: 0, overflow: "hidden" }}
+      />
 
-        {/* Top: Price candle chart */}
-        <div
-          ref={priceContainerRef}
-          style={{ flex: `0 0 ${pricePaneH}%`, minHeight: 0, overflow: "hidden" }}
-        />
-
-        {/* Drag handle */}
-        <div
-          onMouseDown={handleDragStart}
-          title="Drag to resize"
-          style={{
-            flex:       "0 0 5px",
-            background: "rgba(0,0,0,0.06)",
-            cursor:     "row-resize",
-            display:    "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <div style={{ width: 32, height: 2, borderRadius: 1, background: "rgba(0,0,0,0.18)" }} />
-        </div>
-
-        {/* Bottom: HFT flow histogram */}
-        <div
-          ref={flowContainerRef}
-          style={{ flex: 1, minHeight: 0, overflow: "hidden" }}
-        />
-
+      {/* Drag handle: resize candle vs flow split */}
+      <div
+        onMouseDown={handleDragStart}
+        title="Drag to resize"
+        style={{
+          flex:       "0 0 5px",
+          background: "rgba(0,0,0,0.06)",
+          cursor:     "row-resize",
+          display:    "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <div style={{ width: 32, height: 2, borderRadius: 1, background: "rgba(0,0,0,0.18)" }} />
       </div>
     </div>
   );

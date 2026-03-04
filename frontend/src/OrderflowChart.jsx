@@ -138,9 +138,9 @@ const fmtFlow = (v) => {
   if (n >= 1e3) return (Number(v) / 1e3).toFixed(0) + "K";
   return String(Math.round(Number(v)));
 };
-const HFT_PANE_MIN = 60;
-const HFT_PANE_MAX = 400;
-const HFT_PANE_DEFAULT = 150;
+const HFT_PANE_MIN = 0.2;   // min fraction of chart for HFT (20%)
+const HFT_PANE_MAX = 0.55;  // max fraction (55%)
+const HFT_PANE_DEFAULT = 0.35;  // default 35% for HFT strip
 
 /* ════════════════════════════════════════════════════════
    COMPONENT
@@ -157,12 +157,9 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
   const rafRef            = useRef(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  // ── HFT overlay ─────────────────────────────────────────────────────────
-  const hftContainerRef  = useRef(null);
-  const hftChartRef      = useRef(null);
+  // ── HFT overlay (same chart, separate price scale) ───────────────────────
   const hftFlowRefs      = useRef({});   // flowType → IHistogramSeriesApi
-  const hftSyncingRef    = useRef(false);
-  const [hftPaneH, setHftPaneH] = useState(HFT_PANE_DEFAULT);
+  const [hftPaneH, setHftPaneH] = useState(HFT_PANE_DEFAULT);  // fraction 0.2–0.55
   const isDraggingRef    = useRef(false);
   const dragStartYRef    = useRef(0);
   const dragStartHRef    = useRef(0);
@@ -361,100 +358,58 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
   /* Reset fit flag on fresh mount */
   useEffect(() => { hasInitialFit.current = false; }, []);
 
-  /* ── HFT chart: create / destroy when showHFT toggles ─────────────────── */
+  /* ── HFT overlay: add/remove histogram series on SAME chart when showHFT toggles ── */
+  /* Single chart = perfect alignment; no sync logic needed. */
   useEffect(() => {
-    if (!showHFT) return;
-    const el = hftContainerRef.current;
-    if (!el) return;
+    const chart = priceChartRef.current;
+    if (!chart) return;
 
-    const chart = createChart(el, {
-      layout:   { background: { color: "transparent" }, textColor: "#64748b", fontFamily: "JetBrains Mono, monospace", fontSize: 10 },
-      grid:     { vertLines: { color: "rgba(0,0,0,0.05)" }, horzLines: { color: "rgba(0,0,0,0.05)" } },
-      rightPriceScale: { borderColor: "rgba(0,0,0,0.06)", autoScale: true, scaleMargins: { top: 0.05, bottom: 0.02 } },
-      timeScale: { visible: false },  // hide — synced with price chart
-      crosshair: { vertLine: { color: "rgba(2,132,199,0.4)", width: 1 }, horzLine: { visible: false } },
-      width:  el.clientWidth  || 600,
-      height: el.clientHeight || HFT_PANE_DEFAULT,
-      handleScroll: false,
-      handleScale:  false,
-    });
-
-    const refs = {};
-    [...HFT_STACK_ORDER].reverse().forEach((ft) => {
-      refs[ft] = chart.addHistogramSeries({
-        color:            HFT_FLOW_COLORS[ft],
-        priceScaleId:     "right",
-        lastValueVisible: false,
-        priceLineVisible: false,
-        priceFormat:      { type: "custom", minMove: 1, formatter: fmtFlow },
-      });
-    });
-    hftChartRef.current    = chart;
-    hftFlowRefs.current    = refs;
-
-    // Sync: subscribe to logical-range changes on the price chart (fires reliably
-    // on every scroll/zoom), then use getVisibleRange() + setVisibleRange() for
-    // absolute-time alignment so HFT bars track the correct candle positions.
-    // The HFT chart is non-interactive (handleScroll/Scale: false) so only the
-    // price→HFT direction is needed.
-    const priceChart = priceChartRef.current;
-    const onPriceRange = () => {
-      if (hftSyncingRef.current) return;
-      const timeRange = priceChart?.timeScale().getVisibleRange();
-      if (!timeRange) return;
-      hftSyncingRef.current = true;
-      try { chart.timeScale().setVisibleRange(timeRange); } catch (_) {}
-      hftSyncingRef.current = false;
-    };
-    priceChart?.timeScale().subscribeVisibleLogicalRangeChange(onPriceRange);
-
-    // Immediately copy the price chart's current visible time range
-    const cur = priceChart?.timeScale().getVisibleRange();
-    if (cur) try { chart.timeScale().setVisibleRange(cur); } catch (_) {}
-
-    const ro = new ResizeObserver(() => {
-      if (hftChartRef.current && hftContainerRef.current) {
-        hftChartRef.current.applyOptions({
-          width:  hftContainerRef.current.clientWidth,
-          height: hftContainerRef.current.clientHeight,
+    if (showHFT) {
+      const refs = {};
+      [...HFT_STACK_ORDER].reverse().forEach((ft) => {
+        refs[ft] = chart.addHistogramSeries({
+          color:            HFT_FLOW_COLORS[ft],
+          priceScaleId:     "hft",
+          lastValueVisible: false,
+          priceLineVisible: false,
+          priceFormat:      { type: "custom", minMove: 1, formatter: fmtFlow },
         });
-      }
-    });
-    ro.observe(el);
-
-    return () => {
-      ro.disconnect();
-      try { priceChart?.timeScale().unsubscribeVisibleLogicalRangeChange(onPriceRange); } catch (_) {}
-      chart.remove();
-      hftChartRef.current = null;
+      });
+      hftFlowRefs.current = refs;
+    } else {
+      Object.values(hftFlowRefs.current).forEach((s) => { try { chart.removeSeries(s); } catch (_) {} });
       hftFlowRefs.current = {};
-    };
-  }, [showHFT]); // eslint-disable-line react-hooks/exhaustive-deps
+    }
+  }, [showHFT]);
 
-  /* ── HFT chart: update series data when hftSeries prop changes ─────────── */
+  /* ── HFT scale margins: candles top, HFT bottom; hftPaneH = fraction for HFT ── */
+  useEffect(() => {
+    const chart = priceChartRef.current;
+    if (!chart) return;
+    if (showHFT) {
+      const hftFrac = Math.max(HFT_PANE_MIN, Math.min(HFT_PANE_MAX, hftPaneH));
+      chart.priceScale("right").applyOptions({ scaleMargins: { top: 0.08, bottom: hftFrac } });
+      chart.priceScale("hft").applyOptions({ scaleMargins: { top: 1 - hftFrac, bottom: 0.02 } });
+    } else {
+      chart.priceScale("right").applyOptions({ scaleMargins: { top: 0.08, bottom: 0.08 } });
+    }
+  }, [showHFT, hftPaneH]);
+
+  /* ── HFT overlay: update series data when hftSeries prop changes ────────── */
+  /* Same chart = shared time axis; bars align by design. Phantom bars still help
+     fill gaps where HFT has no data so the time axis spans the full candle range. */
   useEffect(() => {
     if (!showHFT || !hftSeries?.length) return;
     const refs = hftFlowRefs.current;
     if (!Object.keys(refs).length) return;
 
-    // KEY FIX: seed every HFT series with a phantom 0-value bar at each candle
-    // timestamp.  This makes the HFT chart have the same bar density as the price
-    // chart (one slot per IST minute) so setVisibleRange() places bars at the same
-    // pixel columns — without this the two charts have different bar counts and bars
-    // appear shifted even with the same {from,to} range.
-    // Use a time→value map so real HFT data simply overwrites any phantom at that time.
     const dataByType = {};
     HFT_STACK_ORDER.forEach((ft) => { dataByType[ft] = {}; });
 
-    // 1. Phantom bars at every candle timestamp (value = 0, invisible)
     mergedRef.current.forEach(({ chartTime: t }) => {
       HFT_STACK_ORDER.forEach((ft) => { dataByType[ft][t] = 0; });
     });
 
-    // 2. Real HFT data — overwrites phantoms where data exists, adds new times otherwise
-    // Price chart uses Dhan IST-epoch seconds (Unix + 19800).
-    // HFT snap.ts is real UTC Unix epoch — floor to minute boundary then add 19800
-    // so every HFT bar lands exactly on the matching candle open_time.
     hftSeries.forEach((snap) => {
       const chartTime = Math.floor(snap.ts / 60) * 60 + 19800;
       let cumSum = 0;
@@ -464,20 +419,15 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
       });
     });
 
-    // 3. Convert maps → sorted arrays and push to each series
     HFT_STACK_ORDER.forEach((ft) => {
       const sorted = Object.entries(dataByType[ft])
         .map(([t, v]) => ({ time: Number(t), value: v }))
         .sort((a, b) => a.time - b.time);
       refs[ft]?.setData(sorted);
     });
-
-    // After data is set, align the HFT chart to the price chart's current time window
-    const cur = priceChartRef.current?.timeScale().getVisibleRange();
-    if (cur) try { hftChartRef.current?.timeScale().setVisibleRange(cur); } catch (_) {}
   }, [hftSeries, showHFT]);
 
-  /* ── Drag handle: resize HFT pane ────────────────────────────────────── */
+  /* ── Drag handle: resize HFT strip (adjusts scaleMargins) ─────────────── */
   const handleDragStart = useCallback((e) => {
     isDraggingRef.current = true;
     dragStartYRef.current = e.clientY;
@@ -486,8 +436,9 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
 
     const onMove = (ev) => {
       if (!isDraggingRef.current) return;
-      const diff = ev.clientY - dragStartYRef.current; // drag down = bigger pane
-      setHftPaneH(Math.max(HFT_PANE_MIN, Math.min(HFT_PANE_MAX, dragStartHRef.current + diff)));
+      const chartH = priceContainerRef.current?.clientHeight || 400;
+      const deltaFrac = (ev.clientY - dragStartYRef.current) / chartH;
+      setHftPaneH(Math.max(HFT_PANE_MIN, Math.min(HFT_PANE_MAX, dragStartHRef.current + deltaFrac)));
     };
     const onUp = () => {
       isDraggingRef.current = false;
@@ -545,51 +496,34 @@ export default function OrderflowChart({ candles, symbol, features = {}, hftSeri
         </div>
       </div>
 
-      {/* ── Price chart ── */}
-      <div ref={priceContainerRef} className="chart-pane chart-pane-price" />
+      {/* ── Single chart: candlesticks + HFT bars (same chart, separate price scales) ── */}
+      <div ref={priceContainerRef} className="chart-pane chart-pane-price" style={{ position: "relative" }}>
+        {showHFT && (
+          <div style={{
+            position: "absolute", top: 0, left: 0, right: 0, zIndex: 1,
+            display: "flex", flexWrap: "wrap", gap: "2px 6px", padding: "2px 6px",
+            background: "rgba(255,255,255,0.75)", fontSize: 9, fontFamily: "JetBrains Mono, monospace",
+            pointerEvents: "none",
+          }}>
+            {HFT_STACK_ORDER.map((ft) => (
+              <span key={ft} style={{ color: HFT_FLOW_COLORS[ft], fontWeight: 700 }}>■ {ft}</span>
+            ))}
+          </div>
+        )}
+      </div>
 
-      {/* ── HFT overlay pane (between price chart and delta panel) ── */}
       {showHFT && (
-        <>
-          {/* Drag handle */}
-          <div
-            onMouseDown={handleDragStart}
-            title="Drag to resize HFT panel"
-            style={{
-              height:     6,
-              cursor:     "row-resize",
-              background: "rgba(0,0,0,0.07)",
-              display:    "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              flexShrink: 0,
-              userSelect: "none",
-            }}
-          >
-            <span style={{ width: 32, height: 2, borderRadius: 1, background: "rgba(0,0,0,0.25)", display: "block" }} />
-          </div>
-          {/* HFT bars */}
-          <div
-            ref={hftContainerRef}
-            style={{ height: hftPaneH, flexShrink: 0, position: "relative" }}
-          >
-            {/* Legend strip */}
-            <div style={{
-              position: "absolute", top: 0, left: 0, right: 0, zIndex: 1,
-              display: "flex", flexWrap: "wrap", gap: "2px 6px",
-              padding: "2px 6px",
-              background: "rgba(255,255,255,0.75)",
-              fontSize: 9, fontFamily: "JetBrains Mono, monospace",
-              pointerEvents: "none",
-            }}>
-              {HFT_STACK_ORDER.map((ft) => (
-                <span key={ft} style={{ color: HFT_FLOW_COLORS[ft], fontWeight: 700 }}>
-                  ■ {ft}
-                </span>
-              ))}
-            </div>
-          </div>
-        </>
+        <div
+          onMouseDown={handleDragStart}
+          title="Drag to resize HFT strip"
+          style={{
+            height: 6, cursor: "row-resize", background: "rgba(0,0,0,0.07)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            flexShrink: 0, userSelect: "none",
+          }}
+        >
+          <span style={{ width: 32, height: 2, borderRadius: 1, background: "rgba(0,0,0,0.25)", display: "block" }} />
+        </div>
       )}
 
       {/* ── Delta panel: fixed label column + pixel-aligned canvas ── */}
