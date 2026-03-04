@@ -381,6 +381,8 @@ class OrderFlowEngine:
 
 engines: Dict[str, OrderFlowEngine] = {}
 connected_clients: Set[WebSocket] = set()
+# ws -> set of symbols this client is viewing (empty = receive all, for backward compat)
+client_viewing: Dict[WebSocket, set] = {}
 # symbol -> { "security_id": str, "exchange_segment": str }
 subscribed_symbols: Dict[str, dict] = {}
 _tick_counter: int = 0  # For periodic gc
@@ -1486,8 +1488,8 @@ async def demo_feed_task():
 
 async def broadcast_state(symbol: str):
     """Push live tick update to connected clients.
-    Sends only last BROADCAST_CANDLES_LIMIT candles (default 5) to keep payloads tiny.
-    Clients that need full history send a request_history WS message."""
+    Only sends to clients that have this symbol in their viewing set (or all if empty).
+    Sends only last BROADCAST_CANDLES_LIMIT candles (default 5) to keep payloads tiny."""
     if symbol not in engines:
         return
     state = engines[symbol].get_state_live()
@@ -1495,6 +1497,9 @@ async def broadcast_state(symbol: str):
 
     dead = set()
     for ws in connected_clients:
+        viewing = client_viewing.get(ws)
+        if viewing is not None and symbol not in viewing:
+            continue  # Client only wants specific symbols; skip this one
         try:
             await ws.send_text(msg)
         except Exception:
@@ -1867,6 +1872,15 @@ async def websocket_endpoint(ws: WebSocket):
             if msg_type == "ping":
                 await ws.send_text(json.dumps({"type": "pong"}))
 
+            elif msg_type == "set_viewing":
+                # Client declares which symbols it wants live updates for.
+                # Reduces broadcast load when NSE+MCX both live (400+ symbols).
+                syms = data.get("symbols", [])
+                if isinstance(syms, list):
+                    client_viewing[ws] = {str(s).upper() for s in syms if s}
+                else:
+                    client_viewing.pop(ws, None)
+
             elif msg_type == "request_history":
                 # Client asks for full-day disk history for one symbol.
                 # Response: {"type": "history", "data": {symbol, ltp, cvd, candles:[400]}}
@@ -1884,6 +1898,7 @@ async def websocket_endpoint(ws: WebSocket):
         logger.warning(f"WebSocket error: {e}")
     finally:
         connected_clients.discard(ws)
+        client_viewing.pop(ws, None)
         logger.info(f"Client disconnected. Total: {len(connected_clients)}")
 
 

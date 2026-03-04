@@ -5,7 +5,7 @@ services:
     runtime: python
     rootDir: backend
     region: singapore     # Closest Render region to NSE/Dhan servers (Mumbai). Cuts ~200ms vs US.
-    plan: starter         # Starter required for Render Disk + no spin-down on inactivity
+    plan: standard        # Standard: 1 CPU, 2GB RAM — faster live ticks when NSE+MCX both live
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     disk:
@@ -32,7 +32,7 @@ services:
       - key: GC_INTERVAL_TICKS
         value: "10000"
       - key: BROADCAST_MIN_INTERVAL
-        value: "0.1"          # 100ms = 10 updates/sec max per symbol
+        value: "0.05"         # 50ms = 20 updates/sec for live tick feel (Standard plan)
       - key: BROADCAST_CANDLES_LIMIT
         value: "5"            # live tick broadcasts send only last 5 candles; full history via request_history
       - key: SNAPSHOT_DIR

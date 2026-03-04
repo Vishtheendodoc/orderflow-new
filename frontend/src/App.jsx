@@ -624,12 +624,13 @@ export default function App() {
   const historyLoadedRef = useRef(new Set());
   // Ref copy of activeSymbol so WS callbacks can read it without stale closures
   const activeSymbolRef = useRef(activeSymbol);
+  const activeSymbolsRef = useRef(activeSymbols);
   /* ── Feature toggles ── */
   const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true });
   const [featMenuOpen, setFeatMenuOpen] = useState(false);
   const featMenuRef = useRef(null);
-  // Keep ref in sync
   useEffect(() => { activeSymbolRef.current = activeSymbol; }, [activeSymbol]);
+  useEffect(() => { activeSymbolsRef.current = activeSymbols; }, [activeSymbols]);
 
   /* close dropdown on outside click */
   useEffect(() => {
@@ -701,12 +702,19 @@ export default function App() {
       staleTimerRef.current = setInterval(() => {
         if (Date.now() - lastMsgRef.current > 50000) ws.close();
       }, 15000);
+      // Tell backend which symbol we want live ticks for (reduces broadcast load)
+      const sym = activeSymbolRef.current;
+      const syms = activeSymbolsRef.current;
+      const viewing = sym ? [sym] : syms.slice(0, 5);
+      if (viewing.length > 0) {
+        ws.send(JSON.stringify({ type: "set_viewing", symbols: viewing }));
+      }
       // After backend finishes sending the initial snapshot (~4s for 452 symbols),
       // request full history for whatever symbol the user is viewing
       setTimeout(() => {
-        const sym = activeSymbolRef.current;
-        if (sym && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "request_history", symbol: sym }));
+        const s = activeSymbolRef.current;
+        if (s && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "request_history", symbol: s }));
         }
       }, 5000);
     };
@@ -780,6 +788,17 @@ export default function App() {
     if (historyLoadedRef.current.has(activeSymbol)) return;
     requestHistory(activeSymbol);
   }, [activeSymbol, requestHistory]);
+
+  // Tell backend which symbol(s) we want live ticks for — reduces broadcast load when NSE+MCX both live
+  useEffect(() => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    // Only the viewed chart needs live ticks; tabs can stay stale until user switches
+    const symbols = activeSymbol ? [activeSymbol] : activeSymbols.slice(0, 5);
+    if (symbols.length > 0) {
+      ws.send(JSON.stringify({ type: "set_viewing", symbols }));
+    }
+  }, [activeSymbol, activeSymbols]);
 
   const flow = activeSymbol ? flows[activeSymbol] : null;
   const candles = flow?.candles || [];
