@@ -79,13 +79,13 @@ const TIMEFRAMES = [
 ];
 
 /**
- * Aggregate raw 1-min HFT snapshots into higher-timeframe candles.
- * Each bucket spans `tfMin` minutes; flows are summed, spot uses open/close.
+ * Aggregate raw HFT snapshots into timeframe buckets.
+ * Always runs (even for 1m) to deduplicate multiple snaps that may share the
+ * same minute due to polling jitter — duplicate times would crash lightweight-charts.
  */
 function aggregateHFT(series, tfMin) {
-  if (!series?.length || tfMin <= 1) return series;
-  const buckets = {};
-  const secPerBucket = tfMin * 60;
+  if (!series?.length) return series;
+  const secPerBucket = Math.max(1, tfMin) * 60;
   for (const snap of series) {
     const bucketTs = Math.floor(snap.ts / secPerBucket) * secPerBucket;
     if (!buckets[bucketTs]) {
@@ -286,7 +286,10 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
     const data = candles
       .filter((c) => c.open_time && c.open && c.high && c.low && c.close)
       .map((c) => ({
-        time:  toChartTime(Math.floor(c.open_time / 1000)), // open_time is ms
+        // open_time is Dhan IST-epoch milliseconds — divide by 1000 to get
+        // IST-epoch seconds directly. Do NOT apply toChartTime here; that
+        // function is only for converting UTC snap.ts values.
+        time:  Math.floor(c.open_time / 1000),
         open:  c.open,
         high:  c.high,
         low:   c.low,
