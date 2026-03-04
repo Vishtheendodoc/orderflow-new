@@ -302,6 +302,18 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
       .sort((a, b) => a.time - b.time);
     if (data.length) {
       try { series.setData(data); } catch (_) {}
+      // After candles are written, sync the price pane to whatever time window the flow
+      // chart is already showing.  This handles the race where flow data arrives first
+      // (updateChart runs before Effect 2), leaving the price chart with a stale/null
+      // range.  If the flow chart isn't fitted yet we just fit all candles.
+      setTimeout(() => {
+        const flowRange = flowChartRef.current?.timeScale().getVisibleRange();
+        if (flowRange) {
+          try { priceChartRef.current?.timeScale().setVisibleRange(flowRange); } catch (_) {}
+        } else {
+          priceChartRef.current?.timeScale().fitContent();
+        }
+      }, 0);
     }
   }, [candles]);
 
@@ -359,6 +371,8 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
       // Fit the flow chart first, then after one JS tick (so layout settles),
       // copy its visible time range to the price chart.
       chart.timeScale().fitContent();
+      // 50 ms gives the chart layout time to commit the fit before we read
+      // getVisibleRange(); 0 ms is too short and often returns null.
       setTimeout(() => {
         const range = chart.timeScale().getVisibleRange();
         if (range) {
@@ -366,7 +380,7 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
         } else {
           priceChartRef.current?.timeScale().fitContent();
         }
-      }, 0);
+      }, 50);
     }
 
     const lastSnap = series[series.length - 1];
@@ -425,7 +439,14 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
 
   const handleFit = useCallback(() => {
     flowChartRef.current?.timeScale().fitContent();
-    priceChartRef.current?.timeScale().fitContent();
+    setTimeout(() => {
+      const range = flowChartRef.current?.timeScale().getVisibleRange();
+      if (range) {
+        try { priceChartRef.current?.timeScale().setVisibleRange(range); } catch (_) {}
+      } else {
+        priceChartRef.current?.timeScale().fitContent();
+      }
+    }, 50);
   }, []);
 
   /* ── Drag handle: resize price pane height ───────────────────────────── */
