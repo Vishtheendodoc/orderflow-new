@@ -622,6 +622,8 @@ export default function App() {
   const staleTimerRef = useRef(null);
   // Tracks which symbols have received full-day history from disk (not just live 20-candle snapshot)
   const historyLoadedRef = useRef(new Set());
+  // Tracks all symbols ever seen in batch — avoids O(n²) setActiveSymbols check on every batch
+  const knownSymbolsRef = useRef(new Set());
   // Ref copy of activeSymbol so WS callbacks can read it without stale closures
   const activeSymbolRef = useRef(activeSymbol);
   /* ── Feature toggles ── */
@@ -724,10 +726,13 @@ export default function App() {
             const next = { ...prev };
             for (const [sym, d] of entries) {
               const existing = next[sym];
-              if (existing && historyLoadedRef.current.has(sym) && existing.candles?.length > (d.candles?.length ?? 0)) {
+              // Merge: if we already have more candles than the lite batch (which sends only 1-2),
+              // keep history intact and update only the matching candles.
+              // No historyLoadedRef check needed — candle count comparison is sufficient.
+              if (existing?.candles?.length > (d.candles?.length ?? 0)) {
                 const newByTime = {};
                 (d.candles || []).forEach((c) => { newByTime[c.open_time] = c; });
-                const merged = (existing.candles || []).map((c) => newByTime[c.open_time] ?? c);
+                const merged = (existing.candles || []).map((c) => newByTime[c.open_time] ? { ...c, ...newByTime[c.open_time] } : c);
                 const existingTimes = new Set((existing.candles || []).map((c) => c.open_time));
                 (d.candles || []).forEach((c) => {
                   if (!existingTimes.has(c.open_time)) merged.push(c);
@@ -741,13 +746,18 @@ export default function App() {
             return next;
           });
 
-          // Register any newly seen symbols as active tabs
-          const newSyms = entries.map(([s]) => s);
-          setActiveSymbol((cur) => cur || newSyms[0]);
-          setActiveSymbols((prev) => {
-            const toAdd = newSyms.filter((s) => !prev.includes(s));
-            return toAdd.length ? [...prev, ...toAdd] : prev;
-          });
+          // Register newly seen symbols as active tabs — use a Set ref to avoid O(n²) per batch
+          const toAdd = [];
+          for (const [sym] of entries) {
+            if (!knownSymbolsRef.current.has(sym)) {
+              knownSymbolsRef.current.add(sym);
+              toAdd.push(sym);
+            }
+          }
+          if (toAdd.length) {
+            setActiveSymbol((cur) => cur || toAdd[0]);
+            setActiveSymbols((prev) => [...prev, ...toAdd]);
+          }
         }
 
         // Legacy single-symbol update (backward compat)
@@ -775,8 +785,11 @@ export default function App() {
         }
 
         if (msg.type === "history") {
+          // Full history (with levels) arrived — replace symbol data entirely.
+          // Mark it so subsequent lite-batch merges know to preserve this history.
           const d = msg.data;
           historyLoadedRef.current.add(d.symbol);
+          knownSymbolsRef.current.add(d.symbol);
           setFlows((prev) => ({ ...prev, [d.symbol]: d }));
         }
 

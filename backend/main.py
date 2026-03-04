@@ -194,6 +194,25 @@ class FootprintCandle:
             "oi_change": self.oi_change,
         }
 
+    def to_dict_lite(self) -> dict:
+        """Compact candle without price-level data.
+        Used in live batch broadcasts — levels are 150× larger than candle summary
+        and only needed for the footprint view (loaded separately via request_history)."""
+        return {
+            "open_time":  self.open_time,
+            "open":       self.open,
+            "high":       self.high,
+            "low":        self.low,
+            "close":      self.close,
+            "buy_vol":    self.buy_vol,
+            "sell_vol":   self.sell_vol,
+            "delta":      self.delta,
+            "initiative": self.initiative,
+            "closed":     self.closed,
+            "oi":         self.oi,
+            "oi_change":  self.oi_change,
+        }
+
 
 # ─────────────────────────────────────────────
 # OrderFlow Engine per symbol
@@ -384,6 +403,36 @@ class OrderFlowEngine:
         """Compact state for live tick broadcasts: last 5 closed + current candle only.
         Keeps WS payload tiny. Clients with full history merge these in."""
         return self.get_state(limit=BROADCAST_CANDLES_LIMIT)
+
+    def get_state_lite(self) -> dict:
+        """Ultra-compact state for batch broadcasts: last 1 closed + current candle,
+        NO price-level data. Levels are 150× larger than candle summary and are only
+        needed for the footprint chart — loaded on demand via request_history.
+
+        With 450 symbols this keeps each batch message ≈200KB instead of 30MB+.
+        """
+        all_candles = list(self.candles)[-1:] if self.candles else []  # last closed only
+        candle_dicts = [c.to_dict_lite() for c in all_candles]
+
+        running = self.cvd - sum(cd["delta"] for cd in candle_dicts)
+        for cd in candle_dicts:
+            running += cd["delta"]
+            cd["cvd"] = running
+
+        if self.current_candle:
+            live = self.current_candle.to_dict_lite()
+            live["cvd"] = running + live["delta"]
+            candle_dicts.append(live)
+
+        return {
+            "symbol":     self.symbol,
+            "ltp":        self.last_ltp,
+            "bid":        self.last_bid,
+            "ask":        self.last_ask,
+            "cvd":        self.cvd,
+            "tick_count": self.tick_count,
+            "candles":    candle_dicts,
+        }
 
 
 # ─────────────────────────────────────────────
@@ -1559,11 +1608,11 @@ async def batch_broadcaster_task():
         to_send = _dirty_symbols.copy()
         _dirty_symbols.clear()
 
-        # Build batch payload: symbol → live state
+        # Build batch payload: symbol → lite state (no levels; ~200KB total vs 30MB+ with levels)
         batch_data = {}
         for sym in to_send:
             if sym in engines:
-                batch_data[sym] = engines[sym].get_state_live()
+                batch_data[sym] = engines[sym].get_state_lite()
 
         if not batch_data:
             continue
@@ -1928,13 +1977,14 @@ async def websocket_endpoint(ws: WebSocket):
     logger.info(f"Client connected. Total: {len(connected_clients)}")
 
     try:
-        # On connect: send in-memory state for all engines in one batch message.
-        # This is fast (no disk reads). Clients request full history per symbol separately.
+        # On connect: send lite state for all engines in one small batch message.
+        # No price levels — keeps initial payload ≈200KB instead of 30MB+.
+        # Full history (with levels) is loaded on demand via request_history.
         initial_batch = {}
         for symbol, engine in list(engines.items()):
             if not engine.candles and engine.current_candle is None:
                 continue
-            initial_batch[symbol] = engine.get_state()
+            initial_batch[symbol] = engine.get_state_lite()
         if initial_batch:
             await ws.send_text(_dumps({"type": "batch", "data": initial_batch}))
 
