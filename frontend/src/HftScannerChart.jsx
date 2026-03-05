@@ -53,8 +53,8 @@ const FLOW_COLORS = {
   "Aggressive Call Buy": "#059669",
   "Heavy Put Write":     "#10b981",
   "Put Write":           "#6ee7b7",
-  "Dark Pool CE":        "#818cf8",
-  "Dark Pool PE":        "#a78bfa",
+  "Dark Pool CE":        "#0ea5e9",   // sky blue — bullish, distinct from PE
+  "Dark Pool PE":        "#f97316",   // orange — bearish, high contrast
   "Call Short":          "#fca5a5",
   "Heavy Call Short":    "#ef4444",
   "Aggressive Put Buy":  "#dc2626",
