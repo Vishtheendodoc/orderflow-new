@@ -22,7 +22,7 @@ services:
       - key: IMBALANCE_RATIO
         value: "3.0"
       - key: MAX_CANDLES_PER_SYMBOL
-        value: "400"          # max candles kept on disk per symbol (full NSE session = 375)
+        value: "900"          # MCX trades ~895 min/day; must cover full session
       - key: MAX_CANDLES_IN_MEMORY
         value: "100"          # keep 100 closed candles in RAM per engine to cover disk-unavailability at startup
       - key: MAX_LEVELS_PER_CANDLE

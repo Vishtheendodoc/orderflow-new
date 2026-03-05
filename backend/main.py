@@ -66,7 +66,7 @@ IMBALANCE_RATIO = float(os.getenv("IMBALANCE_RATIO", "3.0"))
 CANDLE_OPTIONS = [60, 300, 600, 900, 1800, 2700, 3600, 7200]  # seconds: 1,5,10,15,30,45,60,120 min
 
 # Memory bounds — MCX trades 9AM-11:55PM IST (~895 min); NSE 9:15AM-3:30PM (~375 min)
-MAX_CANDLES_PER_SYMBOL = int(os.getenv("MAX_CANDLES_PER_SYMBOL", "400"))
+MAX_CANDLES_PER_SYMBOL = int(os.getenv("MAX_CANDLES_PER_SYMBOL", "900"))  # MCX trades ~895 min/day; must cover full session
 # Candles kept in RAM per engine; closed candles are also written to disk immediately.
 # Full history is loaded from disk on client request — so RAM usage stays flat.
 MAX_CANDLES_IN_MEMORY = int(os.getenv("MAX_CANDLES_IN_MEMORY", "100"))  # keep enough in RAM to cover disk-unavailability window at startup
@@ -468,7 +468,7 @@ expiry_list_cache: Dict[str, list] = {}
 hft_scanner_history: Dict[str, list] = defaultdict(list)
 # Previous snapshot per index, keyed by "{strike}_CE|PE" → {oi, ltp, iv}
 hft_prev_data: Dict[str, dict] = {}
-HFT_MAX_SNAPSHOTS = int(os.getenv("HFT_MAX_SNAPSHOTS", "400"))  # ~6.5 h at 1-min intervals
+HFT_MAX_SNAPSHOTS = int(os.getenv("HFT_MAX_SNAPSHOTS", "900"))  # cover full MCX day (~895 min)
 
 
 # ─────────────────────────────────────────────
@@ -594,36 +594,35 @@ def _append_candle_to_disk(symbol: str, candle_dict: dict) -> None:
         logger.warning(f"Disk append failed [{symbol}]: {e}")
 
 
-def load_history_from_disk(symbol: str, limit: int = 400) -> list:
-    """Read up to `limit` closed candles for a symbol from disk.
-    Prefers the JSONL append file; falls back to legacy JSON array snapshot.
-    Deduplicates by open_time (keeps last occurrence) to avoid double-printing from history+live merge."""
+def load_history_from_disk(symbol: str, limit: int = 9999) -> list:
+    """Read closed candles for a symbol from disk.
+    Reads ALL lines (no pre-truncation by line count) to avoid cutting off early-day candles
+    when multi-day data accumulates in the JSONL (e.g. from Render restarts without midnight reset).
+    Deduplicates by open_time. Callers should filter by today_start before using."""
     if not os.path.isdir(SNAPSHOT_DIR):
         return []
     jsonl_path = os.path.join(SNAPSHOT_DIR, f"{symbol}.jsonl")
     if os.path.exists(jsonl_path):
-        lines: list[str] = []
+        by_time: dict[int, dict] = {}
         try:
             with open(jsonl_path) as fh:
                 for line in fh:
                     line = line.strip()
-                    if line:
-                        lines.append(line)
+                    if not line:
+                        continue
+                    try:
+                        c = _loads(line)
+                        ot = c.get("open_time")
+                        if ot is not None:
+                            by_time[ot] = c
+                    except Exception:
+                        pass
         except Exception as e:
             logger.warning(f"JSONL read failed [{symbol}]: {e}")
             return []
-        start = max(0, len(lines) - limit)
-        by_time: dict[int, dict] = {}
-        for ln in lines[start:]:
-            try:
-                c = _loads(ln)
-                ot = c.get("open_time")
-                if ot is not None:
-                    by_time[ot] = c
-            except Exception:
-                pass
         result = sorted(by_time.values(), key=lambda x: x.get("open_time", 0))
-        return result
+        # Apply limit AFTER deduplication so today's early candles are never skipped
+        return result[-limit:] if limit < len(result) else result
     # Fallback: legacy JSON array snapshot
     json_path = os.path.join(SNAPSHOT_DIR, f"{symbol}.json")
     if os.path.exists(json_path):
@@ -633,11 +632,12 @@ def load_history_from_disk(symbol: str, limit: int = 400) -> list:
             if not isinstance(data, list):
                 return []
             by_time: dict[int, dict] = {}
-            for c in data[-limit:]:
+            for c in data:
                 ot = c.get("open_time")
                 if ot is not None:
                     by_time[ot] = c
-            return sorted(by_time.values(), key=lambda x: x.get("open_time", 0))
+            result = sorted(by_time.values(), key=lambda x: x.get("open_time", 0))
+            return result[-limit:] if limit < len(result) else result
         except Exception as e:
             logger.warning(f"JSON snapshot read failed [{symbol}]: {e}")
     return []
@@ -743,9 +743,25 @@ def load_all_snapshots():
             continue
         try:
             all_today = [
-                c for c in load_history_from_disk(symbol, limit=MAX_CANDLES_PER_SYMBOL)
+                c for c in load_history_from_disk(symbol)
                 if c.get("closed", True) and c.get("open_time", 0) >= today_start
             ]
+
+            # Compact JSONL to today-only candles on startup.
+            # Prevents multi-day accumulation (Render restarts during the day don't trigger
+            # midnight reset, so old days pile up and cause load_history_from_disk to skip
+            # early-today candles when the file grows large).
+            jsonl_path = os.path.join(SNAPSHOT_DIR, f"{symbol}.jsonl")
+            if os.path.exists(jsonl_path) and all_today:
+                tmp_path = jsonl_path + ".compact.tmp"
+                try:
+                    with open(tmp_path, "w") as fh:
+                        for c in all_today:
+                            fh.write(_dumps(c) + "\n")
+                    os.replace(tmp_path, jsonl_path)
+                except Exception as e:
+                    logger.warning(f"JSONL compact failed [{symbol}]: {e}")
+
             if not all_today:
                 continue
 
@@ -951,27 +967,38 @@ def _append_hft_to_disk(index_name: str, snap: dict) -> None:
         path = os.path.join(HFT_DIR, f"{index_name}.hft.jsonl")
         with open(path, "a") as fh:
             fh.write(_dumps(snap) + "\n")
+    except OSError as e:
+        if e.errno != 2:
+            logger.warning(f"HFT disk append failed [{index_name}]: {e}")
     except Exception as e:
         logger.warning(f"HFT disk append failed [{index_name}]: {e}")
 
 
 def _load_hft_from_disk(index_name: str) -> list:
-    """Load today's HFT snapshots from disk. Returns [] on missing file or error."""
+    """Load today's HFT snapshots from disk.
+    Reads ALL lines (no pre-truncation) and filters to today's data only.
+    Returns [] on missing file or error."""
     path = os.path.join(HFT_DIR, f"{index_name}.hft.jsonl")
     if not os.path.exists(path):
         return []
+    today_start_s = _ist_midnight_ms() / 1000  # HFT snaps use Unix seconds
     try:
-        with open(path, "r") as fh:
-            lines = fh.readlines()
         snaps = []
-        for ln in lines:
-            ln = ln.strip()
-            if ln:
+        with open(path, "r") as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if not ln:
+                    continue
                 try:
-                    snaps.append(_loads(ln))
+                    s = _loads(ln)
+                    # Filter to today only (prevents multi-day accumulation cutoff)
+                    ts = s.get("timestamp", s.get("time", 0))
+                    if ts >= today_start_s:
+                        snaps.append(s)
                 except Exception:
                     pass
-        return snaps[-HFT_MAX_SNAPSHOTS:]
+        # Cap to HFT_MAX_SNAPSHOTS after filtering
+        return snaps[-HFT_MAX_SNAPSHOTS:] if len(snaps) > HFT_MAX_SNAPSHOTS else snaps
     except Exception as e:
         logger.warning(f"HFT disk load failed [{index_name}]: {e}")
         return []
