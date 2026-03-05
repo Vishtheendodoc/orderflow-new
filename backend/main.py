@@ -69,7 +69,7 @@ CANDLE_OPTIONS = [60, 300, 600, 900, 1800, 2700, 3600, 7200]  # seconds: 1,5,10,
 MAX_CANDLES_PER_SYMBOL = int(os.getenv("MAX_CANDLES_PER_SYMBOL", "400"))
 # Candles kept in RAM per engine; closed candles are also written to disk immediately.
 # Full history is loaded from disk on client request — so RAM usage stays flat.
-MAX_CANDLES_IN_MEMORY = int(os.getenv("MAX_CANDLES_IN_MEMORY", "20"))
+MAX_CANDLES_IN_MEMORY = int(os.getenv("MAX_CANDLES_IN_MEMORY", "100"))  # keep enough in RAM to cover disk-unavailability window at startup
 # Send only recent candles in live broadcasts; full history served via request_history WS msg
 BROADCAST_CANDLES_LIMIT = int(os.getenv("BROADCAST_CANDLES_LIMIT", "5"))
 # Persistent snapshot directory — mount a Render Disk at this path so data survives restarts
@@ -569,9 +569,15 @@ def _ist_midnight_ms() -> int:
     return int(midnight.timestamp() * 1000)
 
 
+# Retry queue for candle writes that failed due to disk being unavailable.
+# Flushed by _disk_retry_task every 30s when disk becomes available.
+_failed_disk_writes: list[tuple[str, dict]] = []
+
+
 def _append_candle_to_disk(symbol: str, candle_dict: dict) -> None:
     """Append one closed candle as a JSON line to the symbol's JSONL file.
-    Called on every candle close — data survives restarts even without periodic snapshots."""
+    Called on every candle close — data survives restarts even without periodic snapshots.
+    On ENOENT (disk not yet mounted), queues the write for retry."""
     if not SNAPSHOT_DIR:
         return
     try:
@@ -580,8 +586,8 @@ def _append_candle_to_disk(symbol: str, candle_dict: dict) -> None:
         with open(path, "a") as fh:
             fh.write(_dumps(candle_dict) + "\n")
     except OSError as e:
-        if e.errno == 2:  # ENOENT — disk mount path briefly unavailable
-            pass
+        if e.errno == 2:  # ENOENT — disk not yet mounted; queue for retry
+            _failed_disk_writes.append((symbol, candle_dict))
         else:
             logger.warning(f"Disk append failed [{symbol}]: {e}")
     except Exception as e:
@@ -639,7 +645,7 @@ def load_history_from_disk(symbol: str, limit: int = 400) -> list:
 
 def build_full_state(symbol: str, engine) -> dict:
     """Assemble the full-day state for a symbol by reading disk history + live candle.
-    Used for on-demand history requests — not called on every tick.
+    Also merges in-memory closed candles (not yet on disk due to startup disk unavailability).
     Deduplicates by open_time so history+live merge never produces double candles."""
     today_start = _ist_midnight_ms()
     raw = load_history_from_disk(symbol, limit=MAX_CANDLES_PER_SYMBOL)
@@ -647,6 +653,14 @@ def build_full_state(symbol: str, engine) -> dict:
     for c in raw:
         if c.get("open_time", 0) >= today_start and c.get("closed", True):
             by_time[c["open_time"]] = c
+
+    # Merge in-memory closed candles (may contain early-hours data not yet on disk)
+    for c in engine.candles:
+        ct = c.to_dict()
+        ot = ct.get("open_time", 0)
+        if ot >= today_start and ot not in by_time:
+            by_time[ot] = ct
+
     candle_dicts = sorted(by_time.values(), key=lambda x: x["open_time"])
 
     # Build running CVD from full history
@@ -779,6 +793,41 @@ def load_all_snapshots():
             logger.warning(f"Snapshot load failed [{symbol}]: {e}")
 
     logger.info(f"Snapshot restore complete: {loaded} symbols loaded from {SNAPSHOT_DIR}")
+
+
+async def _disk_retry_task():
+    """Retry candle writes that failed because the Render disk wasn't mounted yet.
+    Runs every 30s. Once disk is available, flushes the queued writes to JSONL files.
+    This recovers early-session candles (e.g. 9:15–9:47) that couldn't be written at startup."""
+    while True:
+        await asyncio.sleep(30)
+        if not _failed_disk_writes:
+            continue
+        if not SNAPSHOT_DIR:
+            continue
+        try:
+            os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+        except OSError:
+            continue  # disk still unavailable
+        if not os.path.isdir(SNAPSHOT_DIR):
+            continue
+
+        # Drain the queue atomically
+        to_retry = list(_failed_disk_writes)
+        _failed_disk_writes.clear()
+
+        written = 0
+        for symbol, candle_dict in to_retry:
+            try:
+                path = os.path.join(SNAPSHOT_DIR, f"{symbol}.jsonl")
+                with open(path, "a") as fh:
+                    fh.write(_dumps(candle_dict) + "\n")
+                written += 1
+            except Exception:
+                _failed_disk_writes.append((symbol, candle_dict))  # re-queue on failure
+
+        if written:
+            logger.info(f"Disk retry: flushed {written}/{len(to_retry)} queued candle writes to disk")
 
 
 async def _snapshot_task():
@@ -2159,6 +2208,7 @@ async def startup():
     asyncio.create_task(_daily_reset_task())
     asyncio.create_task(_post_mcx_cleanup_task())
     asyncio.create_task(_snapshot_task())
+    asyncio.create_task(_disk_retry_task())
     asyncio.create_task(depth_poller_task())
     asyncio.create_task(options_poller_task())
     asyncio.create_task(batch_broadcaster_task())

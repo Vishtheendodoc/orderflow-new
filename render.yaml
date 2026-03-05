@@ -24,7 +24,7 @@ services:
       - key: MAX_CANDLES_PER_SYMBOL
         value: "400"          # max candles kept on disk per symbol (full NSE session = 375)
       - key: MAX_CANDLES_IN_MEMORY
-        value: "10"           # closed candles kept in RAM per engine; rest live on disk
+        value: "100"          # keep 100 closed candles in RAM per engine to cover disk-unavailability at startup
       - key: MAX_LEVELS_PER_CANDLE
         value: "150"          # 150 price levels per candle is more than enough
       - key: MAX_ENGINES
