@@ -740,7 +740,16 @@ export default function App() {
                   if (!existingTimes.has(c.open_time)) merged.push(c);
                 });
                 merged.sort((a, b) => a.open_time - b.open_time);
-                next[sym] = { ...d, candles: merged };
+                // Dedupe by open_time to avoid double-printing and distorted CVD
+                const byTime = new Map();
+                merged.forEach((c) => byTime.set(c.open_time, c));
+                const deduped = [...byTime.values()].sort((a, b) => a.open_time - b.open_time);
+                let runningCvd = 0;
+                deduped.forEach((c) => {
+                  runningCvd += c.delta ?? (c.buy_vol ?? 0) - (c.sell_vol ?? 0);
+                  c.cvd = runningCvd;
+                });
+                next[sym] = { ...d, candles: deduped };
               } else {
                 next[sym] = d;
               }
@@ -776,7 +785,15 @@ export default function App() {
                 if (!existingTimes.has(c.open_time)) merged.push(c);
               });
               merged.sort((a, b) => a.open_time - b.open_time);
-              return { ...prev, [d.symbol]: { ...d, candles: merged } };
+              const byTime = new Map();
+              merged.forEach((c) => byTime.set(c.open_time, c));
+              const deduped = [...byTime.values()].sort((a, b) => a.open_time - b.open_time);
+              let runningCvd = 0;
+              deduped.forEach((c) => {
+                runningCvd += c.delta ?? (c.buy_vol ?? 0) - (c.sell_vol ?? 0);
+                c.cvd = runningCvd;
+              });
+              return { ...prev, [d.symbol]: { ...d, candles: deduped } };
             }
             return { ...prev, [d.symbol]: d };
           });
@@ -788,8 +805,19 @@ export default function App() {
 
         if (msg.type === "history") {
           // Full history (with levels) arrived — replace symbol data entirely.
-          // Mark it so subsequent lite-batch merges know to preserve this history.
+          // Dedupe by open_time to avoid double-printing and distorted CVD.
           const d = msg.data;
+          if (d.candles?.length) {
+            const byTime = new Map();
+            d.candles.forEach((c) => byTime.set(c.open_time, c));
+            const deduped = [...byTime.values()].sort((a, b) => a.open_time - b.open_time);
+            let runningCvd = 0;
+            deduped.forEach((c) => {
+              runningCvd += c.delta ?? (c.buy_vol ?? 0) - (c.sell_vol ?? 0);
+              c.cvd = runningCvd;
+            });
+            d.candles = deduped;
+          }
           historyLoadedRef.current.add(d.symbol);
           knownSymbolsRef.current.add(d.symbol);
           setFlows((prev) => ({ ...prev, [d.symbol]: d }));
@@ -865,7 +893,16 @@ export default function App() {
             if (!existingTimes.has(c.open_time)) merged.push(c);
           });
           merged.sort((a, b) => a.open_time - b.open_time);
-          return { ...prev, [d.symbol]: { ...existing, ltp: d.ltp, bid: d.bid, ask: d.ask, cvd: d.cvd, candles: merged } };
+          // Dedupe by open_time to avoid double-printing and distorted CVD
+          const byTime = new Map();
+          merged.forEach((c) => byTime.set(c.open_time, c));
+          const deduped = [...byTime.values()].sort((a, b) => a.open_time - b.open_time);
+          let runningCvd = 0;
+          deduped.forEach((c) => {
+            runningCvd += c.delta ?? (c.buy_vol ?? 0) - (c.sell_vol ?? 0);
+            c.cvd = runningCvd;
+          });
+          return { ...prev, [d.symbol]: { ...existing, ltp: d.ltp, bid: d.bid, ask: d.ask, cvd: d.cvd, candles: deduped } };
         });
       } catch (_) {}
     };

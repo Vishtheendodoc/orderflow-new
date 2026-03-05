@@ -544,6 +544,19 @@ async def _daily_reset_task():
         _do_daily_reset()
 
 
+async def _post_mcx_cleanup_task():
+    """After MCX closes at 11:55 PM IST, run gc more aggressively to prevent RAM buildup.
+    Memory often spikes when market closes due to final tick burst and connection churn."""
+    while True:
+        await asyncio.sleep(60)  # check every minute
+        now = datetime.now(IST)
+        hour, minute = now.hour, now.minute
+        # MCX closes 11:55 PM; we're in post-close window until midnight
+        if (hour == 23 and minute >= 55) or (hour == 0 and minute < 5):
+            gc.collect()
+            logger.debug("Post-MCX gc.collect() run")
+
+
 # ─────────────────────────────────────────────
 # Disk persistence — survives Render spin-down/restart
 # Mount a Render Disk at /data so these files outlive container restarts.
@@ -572,7 +585,8 @@ def _append_candle_to_disk(symbol: str, candle_dict: dict) -> None:
 
 def load_history_from_disk(symbol: str, limit: int = 400) -> list:
     """Read up to `limit` closed candles for a symbol from disk.
-    Prefers the JSONL append file; falls back to legacy JSON array snapshot."""
+    Prefers the JSONL append file; falls back to legacy JSON array snapshot.
+    Deduplicates by open_time (keeps last occurrence) to avoid double-printing from history+live merge."""
     if not os.path.isdir(SNAPSHOT_DIR):
         return []
     jsonl_path = os.path.join(SNAPSHOT_DIR, f"{symbol}.jsonl")
@@ -588,12 +602,16 @@ def load_history_from_disk(symbol: str, limit: int = 400) -> list:
             logger.warning(f"JSONL read failed [{symbol}]: {e}")
             return []
         start = max(0, len(lines) - limit)
-        result = []
+        by_time: dict[int, dict] = {}
         for ln in lines[start:]:
             try:
-                result.append(_loads(ln))
+                c = _loads(ln)
+                ot = c.get("open_time")
+                if ot is not None:
+                    by_time[ot] = c
             except Exception:
                 pass
+        result = sorted(by_time.values(), key=lambda x: x.get("open_time", 0))
         return result
     # Fallback: legacy JSON array snapshot
     json_path = os.path.join(SNAPSHOT_DIR, f"{symbol}.json")
@@ -601,7 +619,14 @@ def load_history_from_disk(symbol: str, limit: int = 400) -> list:
         try:
             with open(json_path) as fh:
                 data = json.load(fh)
-            return data[-limit:] if isinstance(data, list) else []
+            if not isinstance(data, list):
+                return []
+            by_time: dict[int, dict] = {}
+            for c in data[-limit:]:
+                ot = c.get("open_time")
+                if ot is not None:
+                    by_time[ot] = c
+            return sorted(by_time.values(), key=lambda x: x.get("open_time", 0))
         except Exception as e:
             logger.warning(f"JSON snapshot read failed [{symbol}]: {e}")
     return []
@@ -609,12 +634,16 @@ def load_history_from_disk(symbol: str, limit: int = 400) -> list:
 
 def build_full_state(symbol: str, engine) -> dict:
     """Assemble the full-day state for a symbol by reading disk history + live candle.
-    Used for on-demand history requests — not called on every tick."""
+    Used for on-demand history requests — not called on every tick.
+    Deduplicates by open_time so history+live merge never produces double candles."""
     today_start = _ist_midnight_ms()
-    candle_dicts = [
-        c for c in load_history_from_disk(symbol, limit=MAX_CANDLES_PER_SYMBOL)
-        if c.get("open_time", 0) >= today_start and c.get("closed", True)
-    ]
+    raw = load_history_from_disk(symbol, limit=MAX_CANDLES_PER_SYMBOL)
+    by_time: dict[int, dict] = {}
+    for c in raw:
+        if c.get("open_time", 0) >= today_start and c.get("closed", True):
+            by_time[c["open_time"]] = c
+    candle_dicts = sorted(by_time.values(), key=lambda x: x["open_time"])
+
     # Build running CVD from full history
     running = 0.0
     for cd in candle_dicts:
@@ -623,8 +652,10 @@ def build_full_state(symbol: str, engine) -> dict:
 
     if engine.current_candle:
         live = engine.current_candle.to_dict()
-        live["cvd"] = running + live.get("delta", 0)
-        candle_dicts.append(live)
+        ot = live.get("open_time")
+        if ot is not None and ot not in by_time:
+            live["cvd"] = running + live.get("delta", 0)
+            candle_dicts.append(live)
 
     return {
         "symbol": symbol,
@@ -2103,6 +2134,7 @@ async def startup():
     load_hft_from_disk()    # restore today's HFT scanner history from disk
     asyncio.create_task(dhan_feed_task())
     asyncio.create_task(_daily_reset_task())
+    asyncio.create_task(_post_mcx_cleanup_task())
     asyncio.create_task(_snapshot_task())
     asyncio.create_task(depth_poller_task())
     asyncio.create_task(options_poller_task())
