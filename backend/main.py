@@ -579,6 +579,11 @@ def _append_candle_to_disk(symbol: str, candle_dict: dict) -> None:
         path = os.path.join(SNAPSHOT_DIR, f"{symbol}.jsonl")
         with open(path, "a") as fh:
             fh.write(_dumps(candle_dict) + "\n")
+    except OSError as e:
+        if e.errno == 2:  # ENOENT — disk mount path briefly unavailable
+            pass
+        else:
+            logger.warning(f"Disk append failed [{symbol}]: {e}")
     except Exception as e:
         logger.warning(f"Disk append failed [{symbol}]: {e}")
 
@@ -674,14 +679,23 @@ def save_symbol_snapshot(symbol: str):
     eng = engines.get(symbol)
     if not eng or not eng.candles:
         return
+    if not SNAPSHOT_DIR:
+        return
     try:
         os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+        if not os.path.isdir(SNAPSHOT_DIR):
+            return  # disk mount not ready (e.g. Render disk briefly unavailable)
         path = os.path.join(SNAPSHOT_DIR, f"{symbol}.json")
         tmp  = path + ".tmp"
         candle_dicts = [c.to_dict() for c in eng.candles]
         with open(tmp, "w") as fh:
             json.dump(candle_dicts, fh)
         os.replace(tmp, path)
+    except OSError as e:
+        if e.errno == 2:  # ENOENT — disk mount path may be briefly unavailable (e.g. Render restart)
+            pass  # skip log spam; _snapshot_task logs once if dir unavailable
+        else:
+            logger.warning(f"Snapshot save failed [{symbol}]: {e}")
     except Exception as e:
         logger.warning(f"Snapshot save failed [{symbol}]: {e}")
 
@@ -768,9 +782,17 @@ def load_all_snapshots():
 
 
 async def _snapshot_task():
-    """Background task: save all symbols to disk every 5 minutes."""
+    """Background task: save all symbols to disk every 5 minutes.
+    Waits 30s on startup for Render disk mount; skips cycle if SNAPSHOT_DIR unavailable."""
+    await asyncio.sleep(30)  # let Render disk mount before first save
     while True:
         await asyncio.sleep(300)
+        if not SNAPSHOT_DIR or not os.path.isdir(SNAPSHOT_DIR):
+            try:
+                os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+            except OSError:
+                logger.warning("Snapshot dir unavailable, skipping periodic save (disk not mounted?)")
+                continue
         syms = list(engines.keys())
         for sym in syms:
             save_symbol_snapshot(sym)
@@ -1991,10 +2013,11 @@ def get_symbols(q: str = "", exchange: str = ""):
 
 @app.get("/api/state/{symbol}")
 def get_state(symbol: str):
+    """Return full-day state from disk + live candle so early-hours data is preserved."""
     symbol = symbol.upper()
     if symbol not in engines:
         raise HTTPException(404, "Symbol not subscribed")
-    return engines[symbol].get_state()
+    return build_full_state(symbol, engines[symbol])
 
 
 # ─────────────────────────────────────────────

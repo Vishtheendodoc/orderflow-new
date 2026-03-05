@@ -854,6 +854,28 @@ export default function App() {
     requestHistory(activeSymbol);
   }, [activeSymbol, requestHistory]);
 
+  // Fallback: if WS history failed, fetch full state from API after 5s (Chart/Footprint need early-hours data)
+  useEffect(() => {
+    if (!activeSymbol) return;
+    const t = setTimeout(() => {
+      if (historyLoadedRef.current.has(activeSymbol)) return;
+      const base = API_URL || window.location.origin;
+      fetch(`${base}/api/state/${encodeURIComponent(activeSymbol)}`)
+        .then((res) => res.ok ? res.json() : null)
+        .then((d) => {
+          if (!d?.candles?.length) return;
+          setFlows((prev) => {
+            const existing = prev[d.symbol]?.candles?.length ?? 0;
+            if (d.candles.length <= existing) return prev;
+            return { ...prev, [d.symbol]: d };
+          });
+          historyLoadedRef.current.add(d.symbol);
+        })
+        .catch(() => {});
+    }, 5000);
+    return () => clearTimeout(t);
+  }, [activeSymbol]);
+
   const flow = activeSymbol ? flows[activeSymbol] : null;
   const candles = flow?.candles || [];
   const maxDelta = Math.max(...candles.map((c) => Math.abs(c.delta)), 1);
