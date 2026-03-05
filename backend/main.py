@@ -223,6 +223,10 @@ class OrderFlowEngine:
         self.symbol = symbol
         self.security_id = security_id
         self.candles: List[FootprintCandle] = []
+        # All closed candles for the current trading day — lite (no levels).
+        # Never truncated, so early-session candles survive even if disk was unavailable.
+        # Memory cost: ~200 bytes/candle × 900 candles × 450 symbols ≈ 81 MB — very manageable.
+        self.day_candles: List[dict] = []
         self.current_candle: Optional[FootprintCandle] = None
         self.last_ltp: float = 0.0
         self.last_bid: float = 0.0
@@ -307,7 +311,11 @@ class OrderFlowEngine:
                 else:
                     prev.initiative = None
                 prev.closed = True
-                _append_candle_to_disk(self.symbol, prev.to_dict())  # persist immediately
+                prev_dict = prev.to_dict()
+                _append_candle_to_disk(self.symbol, prev_dict)  # persist immediately
+                # Keep lite copy in day_candles (never evicted, covers full day in RAM)
+                if not self.day_candles or self.day_candles[-1]["open_time"] != prev.open_time:
+                    self.day_candles.append(prev.to_dict_lite())
                 self.candles.append(prev)
                 if len(self.candles) > MAX_CANDLES_IN_MEMORY:
                     self.candles = self.candles[-MAX_CANDLES_IN_MEMORY:]
@@ -497,6 +505,7 @@ def _do_daily_reset():
 
     for eng in engines.values():
         eng.candles.clear()
+        eng.day_candles.clear()
         eng.current_candle = None
         eng.cvd = 0.0
         eng.prev_volume = 0.0
@@ -644,21 +653,36 @@ def load_history_from_disk(symbol: str, limit: int = 9999) -> list:
 
 
 def build_full_state(symbol: str, engine) -> dict:
-    """Assemble the full-day state for a symbol by reading disk history + live candle.
-    Also merges in-memory closed candles (not yet on disk due to startup disk unavailability).
-    Deduplicates by open_time so history+live merge never produces double candles."""
-    today_start = _ist_midnight_ms()
-    raw = load_history_from_disk(symbol, limit=MAX_CANDLES_PER_SYMBOL)
-    by_time: dict[int, dict] = {}
-    for c in raw:
-        if c.get("open_time", 0) >= today_start and c.get("closed", True):
-            by_time[c["open_time"]] = c
+    """Assemble the full-day state for a symbol.
 
-    # Merge in-memory closed candles (may contain early-hours data not yet on disk)
+    Priority (later sources override earlier for the same open_time):
+      1. engine.day_candles  — lite, ALL closed candles for today; guaranteed no gaps even if
+                               disk was unavailable at startup.
+      2. disk JSONL          — full candle with levels; overrides lite where available.
+      3. engine.candles      — last MAX_CANDLES_IN_MEMORY with levels; overrides disk for recency.
+      4. engine.current_candle — live (open) candle appended last.
+
+    Deduplicates by open_time so history+live merge never produces double candles.
+    """
+    today_start = _ist_midnight_ms()
+    by_time: dict[int, dict] = {}
+
+    # 1. Seed with all today's lite candles (guaranteed complete, no early-session gaps)
+    for c in engine.day_candles:
+        ot = c.get("open_time", 0)
+        if ot >= today_start:
+            by_time[ot] = c
+
+    # 2. Override with disk candles (include levels for footprint chart)
+    for c in load_history_from_disk(symbol, limit=MAX_CANDLES_PER_SYMBOL):
+        if c.get("open_time", 0) >= today_start and c.get("closed", True):
+            by_time[c["open_time"]] = c  # disk version has levels — prefer over lite
+
+    # 3. Override with most-recent in-RAM candles (full levels, most accurate)
     for c in engine.candles:
         ct = c.to_dict()
         ot = ct.get("open_time", 0)
-        if ot >= today_start and ot not in by_time:
+        if ot >= today_start:
             by_time[ot] = ct
 
     candle_dicts = sorted(by_time.values(), key=lambda x: x["open_time"])
@@ -803,6 +827,25 @@ def load_all_snapshots():
             engines[symbol].candles  = restored
             engines[symbol].cvd      = full_cvd
             engines[symbol].last_oi  = restored[-1].oi if restored else 0.0
+            # Restore full-day lite history so build_full_state has all candles
+            # regardless of disk availability (early-session gaps are covered)
+            engines[symbol].day_candles = [
+                {
+                    "open_time":  cd["open_time"],
+                    "open":       cd["open"],
+                    "high":       cd["high"],
+                    "low":        cd["low"],
+                    "close":      cd["close"],
+                    "buy_vol":    cd.get("buy_vol", 0),
+                    "sell_vol":   cd.get("sell_vol", 0),
+                    "delta":      cd.get("delta", cd.get("buy_vol", 0) - cd.get("sell_vol", 0)),
+                    "initiative": cd.get("initiative"),
+                    "closed":     True,
+                    "oi":         cd.get("oi", 0),
+                    "oi_change":  cd.get("oi_change", 0),
+                }
+                for cd in all_today
+            ]
             loaded += 1
             logger.info(f"  Restored {len(all_today)} candles for {symbol} (last {len(restored)} in RAM, CVD={full_cvd:.0f})")
         except Exception as e:
@@ -2019,6 +2062,7 @@ async def update_settings(payload: dict):
     # Reset all engines so new candle boundaries take effect
     for eng in engines.values():
         eng.candles.clear()
+        eng.day_candles.clear()
         eng.current_candle = None
     logger.info(f"Candle duration set to {sec} min")
     return {"candle_seconds": CANDLE_SECONDS}
