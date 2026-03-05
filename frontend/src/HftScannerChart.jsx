@@ -157,8 +157,18 @@ function makeChartOptions(height) {
       tickMarkFormatter: (t) => fmtIST(typeof t === "number" ? t : 0),
     },
     crosshair: {
-      vertLine: { color: "rgba(2,132,199,0.5)", width: 1 },
-      horzLine: { color: "rgba(2,132,199,0.5)", width: 1 },
+      vertLine: {
+        color: "rgba(2,132,199,0.8)",
+        width: 1,
+        labelVisible: true,
+        labelBackgroundColor: "rgba(2,132,199,0.9)",
+      },
+      horzLine: {
+        color: "rgba(2,132,199,0.8)",
+        width: 1,
+        labelVisible: true,
+        labelBackgroundColor: "rgba(2,132,199,0.9)",
+      },
     },
     height,
     handleScroll:  true,
@@ -225,7 +235,7 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
       wickUpColor:      "#22c55e",
       wickDownColor:    "#ef4444",
       lastValueVisible: true,
-      priceLineVisible: false,
+      priceLineVisible: true,   // horizontal line at current price
       priceScaleId:     "right",
     });
 
