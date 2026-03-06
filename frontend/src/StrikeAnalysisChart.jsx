@@ -28,8 +28,10 @@ function fmtOI(v) {
 
 export default function StrikeAnalysisChart({ symbol, apiBase, height = 420 }) {
   const [data, setData] = useState(null);
+  const [calibration, setCalibration] = useState(null);
   const [windowMin, setWindowMin] = useState(30);
   const [info, setInfo] = useState("");
+  const [showCalibration, setShowCalibration] = useState(false);
 
   const fetchData = useCallback(async () => {
     if (!symbol || !apiBase) return;
@@ -51,11 +53,32 @@ export default function StrikeAnalysisChart({ symbol, apiBase, height = 420 }) {
     }
   }, [symbol, apiBase, windowMin]);
 
+  const fetchCalibration = useCallback(async () => {
+    if (!symbol || !apiBase) return;
+    const idx = resolveIdx(symbol);
+    if (!idx) return;
+    try {
+      const res = await fetch(`${apiBase}/api/strike_calibration/${encodeURIComponent(idx)}?window=120`);
+      const json = await res.json();
+      if (json.error) {
+        setCalibration({ error: json.error });
+      } else {
+        setCalibration(json);
+      }
+    } catch {
+      setCalibration({ error: "Fetch error" });
+    }
+  }, [symbol, apiBase]);
+
   useEffect(() => {
     fetchData();
     const id = setInterval(fetchData, POLL_MS);
     return () => clearInterval(id);
   }, [fetchData]);
+
+  useEffect(() => {
+    if (symbol && apiBase && showCalibration) fetchCalibration();
+  }, [symbol, apiBase, showCalibration, fetchCalibration]);
 
   if (!symbol) {
     return (
@@ -95,8 +118,20 @@ export default function StrikeAnalysisChart({ symbol, apiBase, height = 420 }) {
             </button>
           ))}
         </div>
+        <button
+          type="button"
+          onClick={() => setShowCalibration((v) => !v)}
+          style={{ padding: "4px 10px", fontSize: 11, marginLeft: 8 }}
+          className="cd-btn"
+        >
+          {showCalibration ? "Hide" : "Show"} calibration
+        </button>
         <span style={{ fontSize: 12, color: "#64748b", marginLeft: "auto" }}>{info}</span>
       </div>
+
+      {showCalibration && (
+        <CalibrationPanel calibration={calibration} onRefresh={fetchCalibration} />
+      )}
 
       <div style={{ flex: 1, overflow: "auto", padding: 12 }}>
         {data?.error ? (
@@ -201,6 +236,74 @@ export default function StrikeAnalysisChart({ symbol, apiBase, height = 420 }) {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+function CalibrationPanel({ calibration, onRefresh }) {
+  if (!calibration) {
+    return (
+      <div style={{ padding: 12, borderBottom: "1px solid #e2e8f0", background: "#f8fafc", fontSize: 12 }}>
+        <button type="button" onClick={onRefresh} className="cd-btn" style={{ padding: "4px 10px" }}>
+          Load calibration
+        </button>
+      </div>
+    );
+  }
+  if (calibration.error) {
+    return (
+      <div style={{ padding: 12, borderBottom: "1px solid #e2e8f0", background: "#fef2f2", fontSize: 12, color: "#dc2626" }}>
+        {calibration.error}
+        <button type="button" onClick={onRefresh} className="cd-btn" style={{ marginLeft: 8, padding: "4px 10px" }}>
+          Retry
+        </button>
+      </div>
+    );
+  }
+  const stats = calibration.stats || {};
+  const cutoffs = calibration.suggested_cutoffs || {};
+  const copyPaste = calibration.copy_paste || "";
+
+  return (
+    <div style={{ padding: 12, borderBottom: "1px solid #e2e8f0", background: "#f8fafc", fontSize: 11 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <strong style={{ color: "#334155" }}>HFT flow calibration ({calibration.symbol}, n={stats.ce_oi_chg?.n ?? 0})</strong>
+        <button type="button" onClick={onRefresh} className="cd-btn" style={{ padding: "2px 8px", fontSize: 10 }}>
+          Refresh
+        </button>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 8, marginBottom: 10 }}>
+        {["ce_oi_chg", "pe_oi_chg", "ce_ltp_chg", "pe_ltp_chg", "ce_vol", "pe_vol"].map((k) => {
+          const s = stats[k];
+          if (!s || s.n === 0) return null;
+          return (
+            <div key={k} style={{ background: "#fff", padding: 6, borderRadius: 4, border: "1px solid #e2e8f0" }}>
+              <div style={{ fontWeight: 600, color: "#64748b", marginBottom: 4 }}>{k}</div>
+              <div style={{ fontFamily: "monospace", fontSize: 10 }}>
+                p25:{s.p25} p50:{s.p50} p75:{s.p75} p90:{s.p90}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ marginBottom: 6 }}>
+        <strong style={{ color: "#334155" }}>Suggested cutoffs (copy & paste for .env):</strong>
+      </div>
+      <pre
+        style={{
+          margin: 0,
+          padding: 8,
+          background: "#1e293b",
+          color: "#e2e8f0",
+          borderRadius: 4,
+          fontSize: 11,
+          overflow: "auto",
+          cursor: "text",
+          userSelect: "all",
+        }}
+      >
+        {copyPaste || JSON.stringify(cutoffs, null, 2)}
+      </pre>
     </div>
   );
 }

@@ -1390,6 +1390,7 @@ def _compute_hft_snapshot(index_name: str, spot: float, oc: dict) -> None:
             "ce_oi": round(s["CE_OI"], 2), "pe_oi": round(s["PE_OI"], 2),
             "ce_ltp": round(s["CE_LTP"], 2), "pe_ltp": round(s["PE_LTP"], 2),
             "ce_iv": round(s["CE_IV"], 4), "pe_iv": round(s["PE_IV"], 4),
+            "ce_vol": round(s["CE_VOL"], 0), "pe_vol": round(s["PE_VOL"], 0),
             "ce_delta": round(s["CE_DELTA"], 4), "pe_delta": round(s["PE_DELTA"], 4),
             "ce_gamma": round(s["CE_GAMMA"], 6), "pe_gamma": round(s["PE_GAMMA"], 6),
             "ce_theta": round(s["CE_THETA"], 2), "pe_theta": round(s["PE_THETA"], 2),
@@ -2295,6 +2296,117 @@ async def get_strike_analysis_timeseries(symbol: str, window: int = 30):
         "symbol": idx,
         "spot":   snaps[-1]["spot"] if snaps else 0,
         "series": series_out,
+    }
+
+
+def _percentile(vals: list, p: float) -> float:
+    """Return pth percentile (0-100). Uses linear interpolation."""
+    if not vals:
+        return 0.0
+    vals = sorted(v for v in vals if v is not None and not (isinstance(v, float) and math.isnan(v)))
+    if not vals:
+        return 0.0
+    k = (len(vals) - 1) * p / 100
+    f = int(math.floor(k))
+    c = int(math.ceil(k))
+    if f == c:
+        return float(vals[f])
+    return float(vals[f]) + (k - f) * (vals[c] - vals[f])
+
+
+@app.get("/api/strike_calibration/{symbol}")
+async def get_strike_calibration(symbol: str, window: int = 120):
+    """Calibration from HFT snapshots on disk/RAM. Returns percentiles and suggested cutoffs.
+
+    Query: ?window=60|120|240 (default 120 = last 2 hours)
+    Use the suggested cutoffs to refine HFT flow formula parameters.
+    """
+    idx = _resolve_index(symbol)
+    if not idx:
+        return JSONResponse({"error": f"Unknown index: {symbol}"}, status_code=400)
+
+    history = list(hft_scanner_history.get(idx, []))
+    if not history:
+        history = _load_hft_from_disk(idx)
+        if history:
+            hft_scanner_history[idx] = history
+
+    if not history:
+        return JSONResponse(
+            {"symbol": idx, "error": "No HFT data on disk. Run options poller to collect data."},
+            status_code=202,
+        )
+
+    snaps = history[-min(window, len(history)):]
+    ce_oi_chg: list = []
+    pe_oi_chg: list = []
+    ce_ltp_chg: list = []
+    pe_ltp_chg: list = []
+    ce_vol: list = []
+    pe_vol: list = []
+
+    prev_raw: dict = {}
+    for snap in snaps:
+        raw = snap.get("strikes_raw") or {}
+        for sk, r in raw.items():
+            ce_oi_chg.append(r.get("ce_oi_chg"))
+            pe_oi_chg.append(r.get("pe_oi_chg"))
+            ce_vol.append(r.get("ce_vol"))
+            pe_vol.append(r.get("pe_vol"))
+            prev = prev_raw.get(sk, {})
+            ce_ltp, pe_ltp = r.get("ce_ltp") or 0, r.get("pe_ltp") or 0
+            ce_ltp_prev, pe_ltp_prev = prev.get("ce_ltp") or 0, prev.get("pe_ltp") or 0
+            if ce_ltp_prev:
+                ce_ltp_chg.append((ce_ltp - ce_ltp_prev) / ce_ltp_prev * 100)
+            if pe_ltp_prev:
+                pe_ltp_chg.append((pe_ltp - pe_ltp_prev) / pe_ltp_prev * 100)
+            prev_raw[sk] = r
+
+    def _stats(arr: list, name: str) -> dict:
+        arr = [x for x in arr if x is not None and not (isinstance(x, float) and math.isnan(x))]
+        if not arr:
+            return {"n": 0, "min": 0, "p25": 0, "p50": 0, "p75": 0, "p90": 0, "max": 0}
+        return {
+            "n": len(arr),
+            "min": round(min(arr), 2),
+            "p25": round(_percentile(arr, 25), 2),
+            "p50": round(_percentile(arr, 50), 2),
+            "p75": round(_percentile(arr, 75), 2),
+            "p90": round(_percentile(arr, 90), 2),
+            "max": round(max(arr), 2),
+        }
+
+    ce_oi_st = _stats(ce_oi_chg, "CE_OI_CHG")
+    pe_oi_st = _stats(pe_oi_chg, "PE_OI_CHG")
+    ce_ltp_st = _stats(ce_ltp_chg, "CE_LTP_CHG")
+    pe_ltp_st = _stats(pe_ltp_chg, "PE_LTP_CHG")
+    ce_vol_st = _stats(ce_vol, "CE_VOL")
+    pe_vol_st = _stats(pe_vol, "PE_VOL")
+
+    return {
+        "symbol": idx,
+        "snapshots_used": sum(1 for snap in snaps if (snap.get("strikes_raw") or {})),
+        "stats": {
+            "ce_oi_chg": ce_oi_st,
+            "pe_oi_chg": pe_oi_st,
+            "ce_ltp_chg": ce_ltp_st,
+            "pe_ltp_chg": pe_ltp_st,
+            "ce_vol": ce_vol_st,
+            "pe_vol": pe_vol_st,
+        },
+        "suggested_cutoffs": {
+            "HFT_OI_CHG_PCT": round((ce_oi_st["p75"] + pe_oi_st["p75"]) / 2, 1),
+            "HFT_LTP_STABLE_PCT": round(max(abs(ce_ltp_st.get("p25", 0)), abs(pe_ltp_st.get("p25", 0)), 1.0), 1),
+            "HFT_CE_VOL_MIN": int(ce_vol_st["p25"]) if ce_vol_st["n"] else 100,
+            "HFT_PE_VOL_MIN": int(pe_vol_st["p25"]) if pe_vol_st["n"] else 50,
+        },
+        "copy_paste": (
+            f"# Suggested from {idx} calibration (n={ce_oi_st['n']} samples)\n"
+            f"HFT_OI_CHG_PCT={round((ce_oi_st['p75'] + pe_oi_st['p75']) / 2, 1)}\n"
+            f"HFT_LTP_STABLE_PCT={round(max(abs(ce_ltp_st.get('p25', 0)), abs(pe_ltp_st.get('p25', 0)), 1.0), 1)}\n"
+            f"HFT_CE_VOL_MIN={int(ce_vol_st['p25']) if ce_vol_st['n'] else 100}\n"
+            f"HFT_PE_VOL_MIN={int(pe_vol_st['p25']) if pe_vol_st['n'] else 50}\n"
+        ),
     }
 
 
