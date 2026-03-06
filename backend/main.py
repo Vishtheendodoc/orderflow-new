@@ -95,7 +95,8 @@ HFT_DIR   = os.path.join(SNAPSHOT_DIR, "hft")
 
 # ── Options GEX ──────────────────────────────────────────────────────────────
 DHAN_TOKEN_OPTIONS  = os.getenv("DHAN_TOKEN_OPTIONS", "")
-OPTIONS_POLL_SEC    = float(os.getenv("OPTIONS_POLL_SEC", "60"))          # poll every 60s → 1-min HFT candles (4 indices × 5s gap = 20s fetch; 40s idle)
+OPTIONS_POLL_SEC    = float(os.getenv("OPTIONS_POLL_SEC", "60"))          # poll every 60s → 1-min HFT candles
+OPTIONS_POLL_GAP    = float(os.getenv("OPTIONS_POLL_GAP", "8"))          # seconds between each index (Dhan: 1 req/3s; 8s safer when market active)
 # Underlying security IDs (NSE index) used for options chain
 UNDERLYING_IDS = {
     "NIFTY":      "13",
@@ -1392,24 +1393,30 @@ async def _fetch_gex_once(index_name: str, underlying_scrip: str, expiry: str) -
     Returns True on success, False on rate-limit / error (caller backs off).
     """
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"{DHAN_API_BASE}/optionchain",
-                headers={
-                    "access-token": DHAN_TOKEN_OPTIONS,
-                    "client-id":    DHAN_CLIENT_ID,
-                    "Content-Type": "application/json",
-                    "Accept":       "application/json",
-                },
-                json={
-                    "UnderlyingScrip": int(underlying_scrip),  # must be int
-                    "UnderlyingSeg":   UNDERLYING_SEG,          # "IDX_I" for indices
-                    "Expiry":          expiry,                  # "YYYY-MM-DD"
-                },
-            )
-            if resp.status_code == 429:
-                logger.warning(f"Options chain 429 [{index_name}] — rate limited, backing off")
-                return False
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for attempt in range(2):  # retry once on 429
+                resp = await client.post(
+                    f"{DHAN_API_BASE}/optionchain",
+                    headers={
+                        "access-token": DHAN_TOKEN_OPTIONS,
+                        "client-id":    DHAN_CLIENT_ID,
+                        "Content-Type": "application/json",
+                        "Accept":       "application/json",
+                    },
+                    json={
+                        "UnderlyingScrip": int(underlying_scrip),  # must be int
+                        "UnderlyingSeg":   UNDERLYING_SEG,          # "IDX_I" for indices
+                        "Expiry":          expiry,                  # "YYYY-MM-DD"
+                    },
+                )
+                if resp.status_code == 429:
+                    if attempt == 0:
+                        logger.warning(f"Options chain 429 [{index_name}] — retrying after 10s")
+                        await asyncio.sleep(10)
+                        continue
+                    logger.warning(f"Options chain 429 [{index_name}] — rate limited, backing off")
+                    return False
+                break
             if not resp.is_success:   # httpx attr (not requests' .ok)
                 logger.warning(
                     f"Options chain {resp.status_code} [{index_name}] "
@@ -1505,11 +1512,12 @@ async def options_poller_task():
     if not DHAN_TOKEN_OPTIONS:
         logger.info("DHAN_TOKEN_OPTIONS not set — options/GEX poller inactive")
         return
-    logger.info(f"Starting options/GEX poller (cycle={OPTIONS_POLL_SEC}s, gap=5s/index)…")
+    gap = OPTIONS_POLL_GAP
+    logger.info(f"Starting options/GEX poller (cycle={OPTIONS_POLL_SEC}s, gap={gap}s/index)…")
     # Pre-fetch expiry lists so the frontend dropdown is populated immediately
     for idx_name in UNDERLYING_IDS:
         await _fetch_expiry_list(idx_name)
-        await asyncio.sleep(5)
+        await asyncio.sleep(gap)
     while True:
         rate_limited = False
         for idx_name, uid in UNDERLYING_IDS.items():
@@ -1519,10 +1527,12 @@ async def options_poller_task():
             ok = await _fetch_gex_once(idx_name, uid, expiry)
             if not ok:
                 rate_limited = True
-                break                   # abort remaining indices this cycle
-            await asyncio.sleep(5)      # 5 s between requests > Dhan's 3 s minimum
+                logger.warning(f"Options poll failed [{idx_name}] — backing off (possible 429 rate limit when market active)")
+                break
+            await asyncio.sleep(gap)
 
-        extra = OPTIONS_POLL_SEC if rate_limited else 0
+        # On rate limit, add 2 min cooldown to avoid hammering Dhan when market is busy
+        extra = 120 if rate_limited else 0
         await asyncio.sleep(OPTIONS_POLL_SEC + extra)
 
 
