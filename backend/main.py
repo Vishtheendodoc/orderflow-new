@@ -80,7 +80,7 @@ GC_INTERVAL_TICKS = int(os.getenv("GC_INTERVAL_TICKS", "10000"))  # Run gc every
 # Minimum interval between broadcasts per symbol (seconds).
 # Without this, every tick triggers a full JSON serialize + WS send, saturating the event loop
 # and causing 5-10s lag queues. 0.1 = 10 updates/sec max; plenty for a footprint chart.
-BATCH_INTERVAL = float(os.getenv("BATCH_INTERVAL", "0.05"))  # 50ms = 20 batches/sec; one msg per client per interval
+BATCH_INTERVAL = float(os.getenv("BATCH_INTERVAL", "0.02"))  # 20ms = 50 batches/sec for faster chart updates
 
 # ── Liquidity Heatmap (200-level order book) ─────────────────────────────────
 # Separate Dhan token — avoids rate-limiting the main feed token.
@@ -889,6 +889,39 @@ async def _disk_retry_task():
             logger.info(f"Disk retry: flushed {written}/{len(to_retry)} queued candle writes to disk")
 
 
+async def _hft_disk_retry_task():
+    """Retry HFT writes that failed because the Render disk wasn't mounted yet.
+    Runs every 30s. Once HFT_DIR is available, flushes queued HFT snapshots."""
+    while True:
+        await asyncio.sleep(30)
+        if not _failed_hft_writes:
+            continue
+        if not SNAPSHOT_DIR or not os.path.isdir(SNAPSHOT_DIR):
+            continue
+        try:
+            os.makedirs(HFT_DIR, exist_ok=True)
+        except OSError:
+            continue
+        if not os.path.isdir(HFT_DIR):
+            continue
+
+        to_retry = list(_failed_hft_writes)
+        _failed_hft_writes.clear()
+
+        written = 0
+        for index_name, snap in to_retry:
+            try:
+                path = os.path.join(HFT_DIR, f"{index_name}.hft.jsonl")
+                with open(path, "a") as fh:
+                    fh.write(_dumps(snap) + "\n")
+                written += 1
+            except Exception:
+                _failed_hft_writes.append((index_name, snap))
+
+        if written:
+            logger.info(f"HFT disk retry: flushed {written}/{len(to_retry)} queued snapshots")
+
+
 async def _snapshot_task():
     """Background task: save all symbols to disk every 5 minutes.
     Waits 30s on startup for Render disk mount; skips cycle if SNAPSHOT_DIR unavailable."""
@@ -1003,15 +1036,21 @@ def _load_depth_from_disk(symbol: str, n: int) -> list:
         return []
 
 
+# Retry queue for HFT writes that failed due to disk being unavailable at startup
+_failed_hft_writes: list[tuple[str, dict]] = []
+
+
 def _append_hft_to_disk(index_name: str, snap: dict) -> None:
-    """Append one HFT snapshot to its JSONL file. Called on every new snapshot."""
+    """Append one HFT snapshot to its JSONL file. On ENOENT, queue for retry."""
     try:
         os.makedirs(HFT_DIR, exist_ok=True)
         path = os.path.join(HFT_DIR, f"{index_name}.hft.jsonl")
         with open(path, "a") as fh:
             fh.write(_dumps(snap) + "\n")
     except OSError as e:
-        if e.errno != 2:
+        if e.errno == 2:  # ENOENT — disk not yet mounted; queue for retry
+            _failed_hft_writes.append((index_name, snap))
+        else:
             logger.warning(f"HFT disk append failed [{index_name}]: {e}")
     except Exception as e:
         logger.warning(f"HFT disk append failed [{index_name}]: {e}")
@@ -1035,7 +1074,8 @@ def _load_hft_from_disk(index_name: str) -> list:
                 try:
                     s = _loads(ln)
                     # Filter to today only (prevents multi-day accumulation cutoff)
-                    ts = s.get("timestamp", s.get("time", 0))
+                    # Snapshot uses "ts" (Unix seconds), not "timestamp"/"time"
+                    ts = s.get("ts", s.get("timestamp", s.get("time", 0)))
                     if ts >= today_start_s:
                         snaps.append(s)
                 except Exception:
@@ -2280,6 +2320,7 @@ async def startup():
     asyncio.create_task(_post_mcx_cleanup_task())
     asyncio.create_task(_snapshot_task())
     asyncio.create_task(_disk_retry_task())
+    asyncio.create_task(_hft_disk_retry_task())
     asyncio.create_task(depth_poller_task())
     asyncio.create_task(options_poller_task())
     asyncio.create_task(batch_broadcaster_task())

@@ -32,7 +32,7 @@ services:
       - key: GC_INTERVAL_TICKS
         value: "10000"
       - key: BATCH_INTERVAL
-        value: "0.05"         # 50ms = 20 batch msgs/sec; one combined msg per client covers all symbols
+        value: "0.02"         # 20ms = 50 batch msgs/sec for faster chart updates
       - key: BROADCAST_CANDLES_LIMIT
         value: "5"            # live tick broadcasts send only last 5 candles; full history via request_history
       - key: SNAPSHOT_DIR
