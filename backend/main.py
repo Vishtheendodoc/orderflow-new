@@ -2104,6 +2104,98 @@ async def get_hft_scanner(symbol: str):
     }
 
 
+# Flow types: bullish (positive score) vs bearish (negative score)
+_STRIKE_BULLISH_FLOWS = {"Aggressive Call Buy", "Dark Pool CE", "Heavy Put Write"}
+_STRIKE_BEARISH_FLOWS = {"Aggressive Put Buy", "Dark Pool PE", "Call Short", "Heavy Call Short", "Put Write"}
+
+
+def _aggregate_flows(snapshots: list) -> dict:
+    """Sum flows across snapshots. Returns dict of flow_name -> total."""
+    out: dict = {}
+    for snap in snapshots:
+        for k, v in (snap.get("flows") or {}).items():
+            out[k] = out.get(k, 0) + v
+    return out
+
+
+def _flow_score(flows: dict) -> float:
+    """Bullish positive, bearish negative. Normalized by total magnitude."""
+    bull = sum(flows.get(k, 0) for k in _STRIKE_BULLISH_FLOWS)
+    bear = sum(flows.get(k, 0) for k in _STRIKE_BEARISH_FLOWS)
+    total = bull + bear
+    if total <= 0:
+        return 0.0
+    return (bull - bear) / total  # -1 to +1
+
+
+@app.get("/api/strike_analysis/{symbol}")
+async def get_strike_analysis(symbol: str, window: int = 5):
+    """Compare current vs previous N-minute options flow for bullish/bearish indication.
+
+    Query: ?window=5|10|15|30 (default 5)
+    Uses HFT scanner history. Returns aggregated flows and a score (-1 to +1).
+    """
+    if window not in (5, 10, 15, 30):
+        window = 5
+    idx = _resolve_index(symbol)
+    if not idx:
+        return JSONResponse({"error": f"Unknown index: {symbol}"}, status_code=400)
+
+    history = list(hft_scanner_history.get(idx, []))
+    if not history:
+        history = _load_hft_from_disk(idx)
+        if history:
+            hft_scanner_history[idx] = history
+    if not history:
+        token_hint = "" if DHAN_TOKEN_OPTIONS else " — set DHAN_TOKEN_OPTIONS to enable"
+        return JSONResponse(
+            {"symbol": idx, "error": f"No HFT data yet{token_hint}"},
+            status_code=202,
+        )
+
+    n = min(window, len(history))
+    if n == 0:
+        return {"symbol": idx, "window_minutes": window, "current": {}, "previous": {}, "delta": {}, "score": 0, "indication": "neutral"}
+
+    current_snaps = history[-n:]
+    previous_snaps = history[-2 * n : -n] if len(history) >= 2 * n else []
+
+    current_flows = _aggregate_flows(current_snaps)
+    previous_flows = _aggregate_flows(previous_snaps)
+
+    delta = {}
+    all_keys = set(current_flows) | set(previous_flows)
+    for k in all_keys:
+        d = current_flows.get(k, 0) - previous_flows.get(k, 0)
+        if d != 0:
+            delta[k] = round(d, 2)
+
+    score_current = _flow_score(current_flows)
+    score_previous = _flow_score(previous_flows)
+    score_delta = score_current - score_previous
+    score = max(-1.0, min(1.0, score_delta))
+
+    if score > 0.1:
+        indication = "bullish"
+    elif score < -0.1:
+        indication = "bearish"
+    else:
+        indication = "neutral"
+
+    return {
+        "symbol":          idx,
+        "window_minutes":  window,
+        "current":         {k: round(v, 2) for k, v in current_flows.items()},
+        "previous":        {k: round(v, 2) for k, v in previous_flows.items()},
+        "delta":           delta,
+        "score":           round(score, 3),
+        "score_current":   round(score_current, 3),
+        "score_previous":  round(score_previous, 3),
+        "indication":      indication,
+        "spot":            current_snaps[-1]["spot"] if current_snaps else 0,
+    }
+
+
 @app.post("/api/token")
 async def update_token(payload: dict):
     """Update Dhan access token at runtime — no restart needed.

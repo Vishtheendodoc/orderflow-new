@@ -4,6 +4,7 @@ import FootprintChart from "./FootprintChart";
 import LiquidityHeatmap from "./LiquidityHeatmap";
 import GexChart from "./GexChart";
 import HftScannerChart from "./HftScannerChart";
+import StrikeAnalysisChart from "./StrikeAnalysisChart";
 
 class ErrorBoundary extends Component {
   state = { hasError: false };
@@ -881,7 +882,7 @@ export default function App() {
   const maxDelta = Math.max(...candles.map((c) => Math.abs(c.delta)), 1);
   const closedCandles = candles.filter((c) => c.closed);
   const liveCandle = candles.find((c) => !c.closed);
-  const [viewMode, setViewMode] = useState("chart"); // "chart" | "footprint" | "heatmap" | "gex"
+  const [viewMode, setViewMode] = useState("chart"); // "chart" | "footprint" | "heatmap" | "gex" | "hft" | "strike"
 
   // Footprint live update: poll /api/state/{symbol} every 2s when footprint tab is active.
   // Live batches strip price levels (for size), so we re-fetch full state with levels here.
@@ -1140,6 +1141,15 @@ export default function App() {
                     HFT
                   </button>
                 )}
+                {isIndexFuture && (
+                  <button
+                    className={`vt-btn ${viewMode === "strike" ? "active" : ""}`}
+                    onClick={() => setViewMode("strike")}
+                    title="Strike Analysis — Current vs previous period flow (bullish/bearish)"
+                  >
+                    Strike
+                  </button>
+                )}
               </div>
               {/* Timeframe selector + Feature toggles */}
               <div className="candle-duration-bar">
@@ -1193,6 +1203,13 @@ export default function App() {
                     symbol={activeSymbol}
                     apiBase={API_URL || window.location.origin}
                     candles={flow?.candles || []}
+                  />
+                </div>
+              ) : viewMode === "strike" ? (
+                <div className="chart-view-wrap">
+                  <StrikeAnalysisChart
+                    symbol={activeSymbol}
+                    apiBase={API_URL || window.location.origin}
                   />
                 </div>
               ) : null}
