@@ -176,6 +176,7 @@ export default function StrikeAnalysisChart({ symbol, apiBase, height = 420 }) {
                     <th style={{ textAlign: "left", padding: "6px 8px", color: "#64748b", fontWeight: 600 }}>Strike</th>
                     <th style={{ textAlign: "right", padding: "6px 8px", color: "#64748b", fontWeight: 600 }}>Score</th>
                     <th style={{ textAlign: "center", padding: "6px 8px", color: "#64748b", fontWeight: 600 }}>Indication</th>
+                    <th style={{ textAlign: "center", padding: "6px 8px", color: "#64748b", fontWeight: 600 }}>Source</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -201,6 +202,9 @@ export default function StrikeAnalysisChart({ symbol, apiBase, height = 420 }) {
                           {s.indication}
                         </span>
                       </td>
+                      <td style={{ padding: "6px 8px", textAlign: "center", fontSize: 11, color: "#94a3b8" }}>
+                        {s.source === "raw" ? "OI" : "flow"}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -210,7 +214,7 @@ export default function StrikeAnalysisChart({ symbol, apiBase, height = 420 }) {
         )}
         {data && !data?.error && (!data?.strikes || data.strikes.length === 0) && (data?.current || data?.previous) && (
           <div style={{ marginTop: 12, fontSize: 12, color: "#94a3b8" }}>
-            Strike-level data will appear after new HFT snapshots (DHAN_TOKEN_OPTIONS).
+            Strike-level data is fetched from Dhan options API (DHAN_TOKEN_OPTIONS required). Refresh to retry.
           </div>
         )}
       </div>

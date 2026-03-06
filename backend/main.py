@@ -1372,11 +1372,18 @@ def _compute_hft_snapshot(index_name: str, spot: float, oc: dict) -> None:
                 flows["Put Write"] += pe_act
                 strike_flows.setdefault(strike, {})["Put Write"] = strike_flows.get(strike, {}).get("Put Write", 0) + pe_act
 
-    # ── Store snapshot ────────────────────────────────────────────────────────
+    # ── Store snapshot (incl. raw OI/LTP for strike-level comparison without flow criteria) ──
     now_ts   = int(time.time())
     minute_ts = (now_ts // 60) * 60  # align to minute boundary for candle sync
     now_ist  = datetime.now(IST)
     strike_flows_ser = {str(k): {fk: round(fv, 2) for fk, fv in v.items() if fv > 0} for k, v in strike_flows.items() if v}
+    strikes_raw_ser = {
+        str(s["strike"]): {
+            "ce_oi": round(s["CE_OI"], 2), "pe_oi": round(s["PE_OI"], 2),
+            "ce_ltp": round(s["CE_LTP"], 2), "pe_ltp": round(s["PE_LTP"], 2),
+        }
+        for s in nearby
+    }
     snap = {
         "t":    now_ist.strftime("%H:%M"),
         "ts":   minute_ts,
@@ -1384,6 +1391,7 @@ def _compute_hft_snapshot(index_name: str, spot: float, oc: dict) -> None:
         "mfi":  round(mfi, 2),
         "flows": {k: round(v, 2) for k, v in flows.items() if v > 0},
         "strike_flows": strike_flows_ser,
+        "strikes_raw": strikes_raw_ser,
     }
     history = hft_scanner_history[index_name]
     # Merge in place if we already have a snap for this minute (avoids duplicate bars
@@ -1399,6 +1407,8 @@ def _compute_hft_snapshot(index_name: str, spot: float, oc: dict) -> None:
                 last["strike_flows"][sk] = {}
             for fk, fv in sv.items():
                 last["strike_flows"][sk][fk] = last["strike_flows"][sk].get(fk, 0) + fv
+        if snap.get("strikes_raw"):
+            last["strikes_raw"] = snap["strikes_raw"]  # latest raw data for this minute
         last["t"] = snap["t"]
         _append_hft_to_disk(index_name, last)  # persist merged
     else:
@@ -2175,10 +2185,28 @@ async def get_strike_analysis(symbol: str, window: int = 5):
         history = _load_hft_from_disk(idx)
         if history:
             hft_scanner_history[idx] = history
+
+    # On-demand fetch from Dhan options API when no history or no strike-level data
+    has_strike_flows = any((s.get("strike_flows") or {}) for s in history)
+    if DHAN_TOKEN_OPTIONS and (not history or not has_strike_flows):
+        expiry = await _default_expiry_from_api(idx)
+        if expiry:
+            uid = UNDERLYING_IDS.get(idx)
+            if uid:
+                ok = await _fetch_gex_once(idx, uid, expiry)
+                if ok:
+                    await asyncio.sleep(4)  # Dhan rate limit ~1 req/3s
+                    await _fetch_gex_once(idx, uid, expiry)
+                history = list(hft_scanner_history.get(idx, []))
+                if not history:
+                    history = _load_hft_from_disk(idx)
+                    if history:
+                        hft_scanner_history[idx] = history
+
     if not history:
         token_hint = "" if DHAN_TOKEN_OPTIONS else " — set DHAN_TOKEN_OPTIONS to enable"
         return JSONResponse(
-            {"symbol": idx, "error": f"No HFT data yet{token_hint}"},
+            {"symbol": idx, "error": f"No options chain data yet{token_hint}"},
             status_code=202,
         )
 
@@ -2211,11 +2239,12 @@ async def get_strike_analysis(symbol: str, window: int = 5):
     else:
         indication = "neutral"
 
-    # ── Phase 2: per-strike bullish/bearish ────────────────────────────────────
+    # ── Phase 2: per-strike bullish/bearish (flow-based or raw OI fallback) ─────
     strikes_out: list = []
     all_strike_keys: set = set()
     for snap in current_snaps + previous_snaps:
         all_strike_keys.update((snap.get("strike_flows") or {}).keys())
+        all_strike_keys.update((snap.get("strikes_raw") or {}).keys())
     def _strike_sort_key(x):
         try:
             return float(x)
@@ -2223,34 +2252,56 @@ async def get_strike_analysis(symbol: str, window: int = 5):
             return 0.0
 
     for sk in sorted(all_strike_keys, key=_strike_sort_key):
+        cur_raw = (current_snaps[-1].get("strikes_raw") or {}).get(sk, {}) if current_snaps else {}
+        prev_raw = (previous_snaps[-1].get("strikes_raw") or {}).get(sk, {}) if previous_snaps else {}
+        # 1) Try flow-based (strike_flows)
         cur_dicts = [s.get("strike_flows", {}).get(sk, {}) for s in current_snaps]
         prev_dicts = [s.get("strike_flows", {}).get(sk, {}) for s in previous_snaps]
         cur_f = _aggregate_flow_dicts(cur_dicts)
         prev_f = _aggregate_flow_dicts(prev_dicts)
-        if not cur_f and not prev_f:
-            continue
-        sc_cur = _flow_score(cur_f)
-        sc_prev = _flow_score(prev_f)
-        sc_d = sc_cur - sc_prev
-        sc = max(-1.0, min(1.0, sc_d))
+        use_flows = bool(cur_f or prev_f)
+
+        if use_flows:
+            sc_cur = _flow_score(cur_f)
+            sc_prev = _flow_score(prev_f)
+            sc_d = sc_cur - sc_prev
+            sc = max(-1.0, min(1.0, sc_d))
+            strike_delta = {k: round(cur_f.get(k, 0) - prev_f.get(k, 0), 2) for k in set(cur_f) | set(prev_f) if cur_f.get(k, 0) != prev_f.get(k, 0)}
+            source = "flow"
+        else:
+            # 2) Fallback: raw OI change (CE_OI up = bullish, PE_OI up = bearish)
+            if not cur_raw and not prev_raw:
+                continue
+            ce_oi_cur = cur_raw.get("ce_oi", 0) or 0
+            pe_oi_cur = cur_raw.get("pe_oi", 0) or 0
+            ce_oi_prev = prev_raw.get("ce_oi", 0) or 0
+            pe_oi_prev = prev_raw.get("pe_oi", 0) or 0
+            if not prev_raw or (ce_oi_prev == 0 and pe_oi_prev == 0):
+                sc = 0.0
+                ce_chg = pe_chg = 0.0
+            else:
+                ce_chg = (ce_oi_cur - ce_oi_prev) / (ce_oi_prev or 1) * 100 if ce_oi_prev else 0
+                pe_chg = (pe_oi_cur - pe_oi_prev) / (pe_oi_prev or 1) * 100 if pe_oi_prev else 0
+                raw_mag = max(abs(ce_chg) + abs(pe_chg), 1)
+                sc = max(-1.0, min(1.0, (ce_chg - pe_chg) / raw_mag))
+            strike_delta = {"ce_oi_chg": round(ce_chg, 2), "pe_oi_chg": round(pe_chg, 2)}
+            source = "raw"
+
         if sc > 0.1:
             ind = "bullish"
         elif sc < -0.1:
             ind = "bearish"
         else:
             ind = "neutral"
-        strike_delta = {}
-        for k in set(cur_f) | set(prev_f):
-            d = cur_f.get(k, 0) - prev_f.get(k, 0)
-            if d != 0:
-                strike_delta[k] = round(d, 2)
+
         strikes_out.append({
-            "strike":   float(sk),
-            "current":  {k: round(v, 2) for k, v in cur_f.items()},
-            "previous": {k: round(v, 2) for k, v in prev_f.items()},
-            "delta":    strike_delta,
-            "score":   round(sc, 3),
+            "strike":     float(sk),
+            "current":    {k: round(v, 2) for k, v in cur_f.items()} if use_flows else {"ce_oi": round(cur_raw.get("ce_oi") or 0, 2), "pe_oi": round(cur_raw.get("pe_oi") or 0, 2)},
+            "previous":   {k: round(v, 2) for k, v in prev_f.items()} if use_flows else {"ce_oi": round(prev_raw.get("ce_oi") or 0, 2), "pe_oi": round(prev_raw.get("pe_oi") or 0, 2)},
+            "delta":      strike_delta,
+            "score":     round(sc, 3),
             "indication": ind,
+            "source":    source,
         })
 
     return {
