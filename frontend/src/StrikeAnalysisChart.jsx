@@ -1,50 +1,26 @@
 /**
- * StrikeAnalysisChart — Current vs Previous period flow comparison.
+ * StrikeAnalysisChart — Strike-wise CE left / PE right, raw OI/LTP/Greeks, running chart.
  *
- * Compares options flow (5/10/15/20/25/30 min) for bullish/bearish indication.
- * Phase 2: per-strike bullish/bearish based on flow comparison.
- * Uses HFT scanner data; polls GET /api/strike_analysis/{symbol}?window=N.
+ * Uses HFT snapshots (raw data only). Polls GET /api/strike_analysis_timeseries/{symbol}?window=N.
  */
 
 import { useEffect, useCallback, useState } from "react";
 
 const POLL_MS = 30_000;
-const WINDOWS = [5, 10, 15, 20, 25, 30];
-
-const FLOW_COLORS = {
-  "Aggressive Call Buy": "#059669",
-  "Heavy Put Write":     "#10b981",
-  "Put Write":           "#6ee7b7",
-  "Dark Pool CE":        "#0ea5e9",
-  "Dark Pool PE":        "#f97316",
-  "Call Short":          "#fca5a5",
-  "Heavy Call Short":    "#ef4444",
-  "Aggressive Put Buy":  "#dc2626",
-};
-
-const FLOW_ORDER = [
-  "Aggressive Call Buy",
-  "Heavy Put Write",
-  "Put Write",
-  "Dark Pool CE",
-  "Dark Pool PE",
-  "Call Short",
-  "Heavy Call Short",
-  "Aggressive Put Buy",
-];
+const WINDOWS = [1, 3, 5, 10, 15, 20, 25, 30];
+const CHART_H = 120;
 
 function resolveIdx(symbol) {
   const s = String(symbol || "").toUpperCase();
   if (s.includes("BANKNIFTY")) return "BANKNIFTY";
-  if (s.includes("FINNIFTY"))  return "FINNIFTY";
+  if (s.includes("FINNIFTY")) return "FINNIFTY";
   if (s.includes("MIDCPNIFTY")) return "MIDCPNIFTY";
-  if (s.includes("NIFTY"))    return "NIFTY";
+  if (s.includes("NIFTY")) return "NIFTY";
   return s;
 }
 
-function fmtFlow(v) {
+function fmtOI(v) {
   const n = Math.abs(Number(v));
-  if (n >= 1e9) return (Number(v) / 1e9).toFixed(1) + "B";
   if (n >= 1e6) return (Number(v) / 1e6).toFixed(1) + "M";
   if (n >= 1e3) return (Number(v) / 1e3).toFixed(0) + "K";
   return String(Math.round(Number(v)));
@@ -52,7 +28,7 @@ function fmtFlow(v) {
 
 export default function StrikeAnalysisChart({ symbol, apiBase, height = 420 }) {
   const [data, setData] = useState(null);
-  const [windowMin, setWindowMin] = useState(5);
+  const [windowMin, setWindowMin] = useState(30);
   const [info, setInfo] = useState("");
 
   const fetchData = useCallback(async () => {
@@ -60,7 +36,7 @@ export default function StrikeAnalysisChart({ symbol, apiBase, height = 420 }) {
     const idx = resolveIdx(symbol);
     if (!idx) return;
     try {
-      const res = await fetch(`${apiBase}/api/strike_analysis/${encodeURIComponent(idx)}?window=${windowMin}`);
+      const res = await fetch(`${apiBase}/api/strike_analysis_timeseries/${encodeURIComponent(idx)}?window=${windowMin}`);
       const json = await res.json();
       if (json.error) {
         setInfo(json.error);
@@ -98,14 +74,15 @@ export default function StrikeAnalysisChart({ symbol, apiBase, height = 420 }) {
     );
   }
 
-  const indication = data?.indication || "neutral";
-  const score = data?.score ?? 0;
+  const series = data?.series || [];
+  const latest = series[series.length - 1];
+  const strikes = latest?.strikes || [];
 
   return (
     <div className="strike-analysis" style={{ display: "flex", flexDirection: "column", height: height || "100%", minHeight: 320 }}>
-      {/* Header: window selector + indication badge */}
+      {/* Header */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 12px", borderBottom: "1px solid #e2e8f0", flexWrap: "wrap" }}>
-        <span style={{ fontWeight: 600, color: "#334155" }}>{idx} — Strike Analysis</span>
+        <span style={{ fontWeight: 600, color: "#334155" }}>{idx} — Strike (CE | PE)</span>
         <div style={{ display: "flex", gap: 4 }}>
           {WINDOWS.map((w) => (
             <button
@@ -118,158 +95,158 @@ export default function StrikeAnalysisChart({ symbol, apiBase, height = 420 }) {
             </button>
           ))}
         </div>
-        <span
-          style={{
-            padding: "4px 10px",
-            borderRadius: 6,
-            fontWeight: 600,
-            fontSize: 13,
-            background: indication === "bullish" ? "rgba(5,150,105,0.15)" : indication === "bearish" ? "rgba(239,68,68,0.15)" : "rgba(148,163,184,0.2)",
-            color: indication === "bullish" ? "#059669" : indication === "bearish" ? "#dc2626" : "#64748b",
-          }}
-        >
-          {indication.toUpperCase()} (score: {score.toFixed(2)})
-        </span>
         <span style={{ fontSize: 12, color: "#64748b", marginLeft: "auto" }}>{info}</span>
       </div>
 
-      {/* Flow comparison: Current vs Previous */}
       <div style={{ flex: 1, overflow: "auto", padding: 12 }}>
         {data?.error ? (
           <div style={{ padding: 24, textAlign: "center", color: "#64748b" }}>{data.error}</div>
-        ) : !data?.current && !data?.previous ? (
+        ) : !series.length ? (
           <div style={{ padding: 24, textAlign: "center", color: "#64748b" }}>
-            Waiting for HFT data (DHAN_TOKEN_OPTIONS required)…
+            Waiting for options data (DHAN_TOKEN_OPTIONS required)…
           </div>
         ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, maxWidth: 720 }}>
-            {/* Current period */}
-            <div>
-              <h4 style={{ margin: "0 0 8px 0", fontSize: 13, color: "#334155" }}>
-                Current {windowMin}m
-              </h4>
-              <FlowBars flows={data?.current || {}} />
-            </div>
-            {/* Previous period */}
-            <div>
-              <h4 style={{ margin: "0 0 8px 0", fontSize: 13, color: "#334155" }}>
-                Previous {windowMin}m
-              </h4>
-              <FlowBars flows={data?.previous || {}} />
-            </div>
-          </div>
-        )}
-        {data?.delta && Object.keys(data.delta).length > 0 && (
-          <div style={{ marginTop: 16 }}>
-            <h4 style={{ margin: "0 0 8px 0", fontSize: 13, color: "#334155" }}>Delta (Current − Previous)</h4>
-            <FlowBars flows={data.delta} isDelta />
-          </div>
-        )}
-        {/* Phase 2: Strike-level bullish/bearish */}
-        {data?.strikes && data.strikes.length > 0 && (
-          <div style={{ marginTop: 20 }}>
-            <h4 style={{ margin: "0 0 8px 0", fontSize: 13, color: "#334155" }}>Strike-level (ATM ±5)</h4>
-            <div style={{ overflowX: "auto", maxHeight: 240, overflowY: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                <thead>
-                  <tr style={{ borderBottom: "1px solid #e2e8f0" }}>
-                    <th style={{ textAlign: "left", padding: "6px 8px", color: "#64748b", fontWeight: 600 }}>Strike</th>
-                    <th style={{ textAlign: "right", padding: "6px 8px", color: "#64748b", fontWeight: 600 }}>Score</th>
-                    <th style={{ textAlign: "center", padding: "6px 8px", color: "#64748b", fontWeight: 600 }}>Indication</th>
-                    <th style={{ textAlign: "center", padding: "6px 8px", color: "#64748b", fontWeight: 600 }}>Source</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.strikes.map((s) => (
-                    <tr key={s.strike} style={{ borderBottom: "1px solid #f1f5f9" }}>
-                      <td style={{ padding: "6px 8px", fontFamily: "monospace", color: "#334155" }}>
-                        {Number(s.strike).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
-                      </td>
-                      <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "monospace", color: "#475569" }}>
-                        {s.score > 0 ? "+" : ""}{s.score?.toFixed(2)}
-                      </td>
-                      <td style={{ padding: "6px 8px", textAlign: "center" }}>
-                        <span
-                          style={{
-                            padding: "2px 8px",
-                            borderRadius: 4,
-                            fontSize: 11,
-                            fontWeight: 600,
-                            background: s.indication === "bullish" ? "rgba(5,150,105,0.15)" : s.indication === "bearish" ? "rgba(239,68,68,0.15)" : "rgba(148,163,184,0.2)",
-                            color: s.indication === "bullish" ? "#059669" : s.indication === "bearish" ? "#dc2626" : "#64748b",
-                          }}
-                        >
-                          {s.indication}
-                        </span>
-                      </td>
-                      <td style={{ padding: "6px 8px", textAlign: "center", fontSize: 11, color: "#94a3b8" }}>
-                        {s.source === "raw" ? "OI" : "flow"}
-                      </td>
+          <>
+            {/* Strike table: CE left, PE right */}
+            <div style={{ marginBottom: 16 }}>
+              <h4 style={{ margin: "0 0 8px 0", fontSize: 13, color: "#334155" }}>Strike-wise (ATM ±5) — CE left, PE right</h4>
+              <div style={{ overflowX: "auto", maxHeight: 280, overflowY: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid #e2e8f0" }}>
+                      <th style={{ textAlign: "left", padding: "4px 6px", color: "#64748b", fontWeight: 600 }}>Strike</th>
+                      <th colSpan={4} style={{ textAlign: "center", padding: "4px 6px", color: "#0ea5e9", fontWeight: 600 }}>CE</th>
+                      <th colSpan={4} style={{ textAlign: "center", padding: "4px 6px", color: "#f97316", fontWeight: 600 }}>PE</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                    <tr style={{ borderBottom: "1px solid #e2e8f0", fontSize: 10 }}>
+                      <th></th>
+                      <th style={{ padding: "2px 4px", color: "#64748b" }}>OI</th>
+                      <th style={{ padding: "2px 4px", color: "#64748b" }}>Δ%</th>
+                      <th style={{ padding: "2px 4px", color: "#64748b" }}>δ γ θ ν</th>
+                      <th style={{ padding: "2px 4px", color: "#64748b" }}>Ind</th>
+                      <th style={{ padding: "2px 4px", color: "#64748b" }}>OI</th>
+                      <th style={{ padding: "2px 4px", color: "#64748b" }}>Δ%</th>
+                      <th style={{ padding: "2px 4px", color: "#64748b" }}>δ γ θ ν</th>
+                      <th style={{ padding: "2px 4px", color: "#64748b" }}>Ind</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {strikes.map((s) => (
+                      <tr key={s.strike} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                        <td style={{ padding: "4px 6px", fontFamily: "monospace", color: "#334155", whiteSpace: "nowrap" }}>
+                          {Number(s.strike).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
+                        </td>
+                        {/* CE */}
+                        <td style={{ padding: "4px 6px", fontFamily: "monospace", color: "#0ea5e9" }}>{fmtOI(s.ce_oi)}</td>
+                        <td style={{ padding: "4px 6px", fontFamily: "monospace", color: (s.ce_oi_chg || 0) >= 0 ? "#16a34a" : "#dc2626" }}>
+                          {(s.ce_oi_chg || 0) >= 0 ? "↑" : "↓"}
+                          {(s.ce_oi_chg || 0) >= 0 ? "+" : ""}
+                          {(s.ce_oi_chg || 0).toFixed(1)}%
+                        </td>
+                        <td style={{ padding: "4px 6px", fontSize: 10, color: "#64748b" }} title={`δ=${s.ce_delta} γ=${s.ce_gamma} θ=${s.ce_theta} ν=${s.ce_vega}`}>
+                          {(s.ce_delta || 0).toFixed(2)} {(s.ce_gamma || 0).toFixed(3)} {(s.ce_theta || 0).toFixed(0)} {(s.ce_vega || 0).toFixed(0)}
+                        </td>
+                        <td style={{ padding: "4px 6px" }}>
+                          <span
+                            style={{
+                              padding: "1px 6px",
+                              borderRadius: 4,
+                              fontSize: 10,
+                              fontWeight: 600,
+                              background: s.ce_ind === "bullish" ? "rgba(5,150,105,0.15)" : s.ce_ind === "bearish" ? "rgba(239,68,68,0.15)" : "rgba(148,163,184,0.2)",
+                              color: s.ce_ind === "bullish" ? "#059669" : s.ce_ind === "bearish" ? "#dc2626" : "#64748b",
+                            }}
+                          >
+                            {s.ce_ind}
+                          </span>
+                        </td>
+                        {/* PE */}
+                        <td style={{ padding: "4px 6px", fontFamily: "monospace", color: "#f97316" }}>{fmtOI(s.pe_oi)}</td>
+                        <td style={{ padding: "4px 6px", fontFamily: "monospace", color: (s.pe_oi_chg || 0) >= 0 ? "#16a34a" : "#dc2626" }}>
+                          {(s.pe_oi_chg || 0) >= 0 ? "↑" : "↓"}
+                          {(s.pe_oi_chg || 0) >= 0 ? "+" : ""}
+                          {(s.pe_oi_chg || 0).toFixed(1)}%
+                        </td>
+                        <td style={{ padding: "4px 6px", fontSize: 10, color: "#64748b" }} title={`δ=${s.pe_delta} γ=${s.pe_gamma} θ=${s.pe_theta} ν=${s.pe_vega}`}>
+                          {(s.pe_delta || 0).toFixed(2)} {(s.pe_gamma || 0).toFixed(3)} {(s.pe_theta || 0).toFixed(0)} {(s.pe_vega || 0).toFixed(0)}
+                        </td>
+                        <td style={{ padding: "4px 6px" }}>
+                          <span
+                            style={{
+                              padding: "1px 6px",
+                              borderRadius: 4,
+                              fontSize: 10,
+                              fontWeight: 600,
+                              background: s.pe_ind === "bullish" ? "rgba(5,150,105,0.15)" : s.pe_ind === "bearish" ? "rgba(239,68,68,0.15)" : "rgba(148,163,184,0.2)",
+                              color: s.pe_ind === "bullish" ? "#059669" : s.pe_ind === "bearish" ? "#dc2626" : "#64748b",
+                            }}
+                          >
+                            {s.pe_ind}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </div>
-        )}
-        {data && !data?.error && (!data?.strikes || data.strikes.length === 0) && (data?.current || data?.previous) && (
-          <div style={{ marginTop: 12, fontSize: 12, color: "#94a3b8" }}>
-            Strike-level data is fetched from Dhan options API (DHAN_TOKEN_OPTIONS required). Refresh to retry.
-          </div>
+
+            {/* Running OI change chart */}
+            {series.length >= 2 && (
+              <div>
+                <h4 style={{ margin: "0 0 8px 0", fontSize: 13, color: "#334155" }}>OI change % (running) — ATM strike</h4>
+                <OiOChangeChart series={series} height={CHART_H} />
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
   );
 }
 
-function FlowBars({ flows, isDelta }) {
-  const entries = FLOW_ORDER.filter((k) => (flows[k] ?? 0) !== 0);
-  if (!entries.length) return <div style={{ fontSize: 12, color: "#94a3b8" }}>No flow data</div>;
+function OiOChangeChart({ series, height }) {
+  const W = 600;
+  const H = height;
+  const pad = { l: 40, r: 12, t: 8, b: 24 };
+  const plotW = W - pad.l - pad.r;
+  const plotH = H - pad.t - pad.b;
 
-  const maxVal = Math.max(...entries.map((k) => Math.abs(flows[k] ?? 0)), 1);
+  if (!series?.length) return null;
+
+  const atmIdx = Math.floor((series[0]?.strikes?.length || 0) / 2);
+  const ceChg = series.map((s) => s.strikes?.[atmIdx]?.ce_oi_chg ?? 0);
+  const peChg = series.map((s) => s.strikes?.[atmIdx]?.pe_oi_chg ?? 0);
+  const times = series.map((s) => s.t || "");
+  const allChg = [...ceChg, ...peChg].filter((v) => !Number.isNaN(v));
+  const minChg = Math.min(...allChg, -1);
+  const maxChg = Math.max(...allChg, 1);
+  const range = maxChg - minChg || 1;
+
+  const toX = (i) => pad.l + (i / Math.max(series.length - 1, 1)) * plotW;
+  const toY = (v) => pad.t + plotH - ((v - minChg) / range) * plotH;
+
+  const cePts = ceChg.map((v, i) => `${toX(i)},${toY(v)}`).join(" ");
+  const pePts = peChg.map((v, i) => `${toX(i)},${toY(v)}`).join(" ");
+  const zeroY = toY(0);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      {entries.map((k) => {
-        const v = flows[k] ?? 0;
-        const pct = maxVal > 0 ? (Math.abs(v) / maxVal) * 100 : 0;
-        const isNeg = v < 0;
-        return (
-          <div key={k} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-            <span style={{ width: 140, color: "#475569" }}>{k}</span>
-            <div
-              style={{
-                flex: 1,
-                height: 20,
-                background: "#e2e8f0",
-                borderRadius: 4,
-                overflow: "hidden",
-                display: "flex",
-              }}
-            >
-              <div
-                style={{
-                  width: `${pct}%`,
-                  height: "100%",
-                  background: isDelta ? (isNeg ? "#f87171" : "#4ade80") : FLOW_COLORS[k] || "#94a3b8",
-                  minWidth: v !== 0 ? 4 : 0,
-                }}
-              />
-            </div>
-            <span
-              style={{
-                width: 56,
-                textAlign: "right",
-                fontFamily: "monospace",
-                color: isDelta ? (isNeg ? "#dc2626" : "#16a34a") : "#334155",
-              }}
-            >
-              {isDelta && v > 0 ? "+" : ""}
-              {fmtFlow(v)}
-            </span>
-          </div>
-        );
-      })}
+    <div style={{ overflowX: "auto" }}>
+      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{ display: "block" }}>
+        <line x1={pad.l} y1={zeroY} x2={pad.l + plotW} y2={zeroY} stroke="#64748b" strokeWidth="1" strokeDasharray="3,3" />
+        <polyline points={cePts} fill="none" stroke="#0ea5e9" strokeWidth="1.5" />
+        <polyline points={pePts} fill="none" stroke="#f97316" strokeWidth="1.5" />
+        {times.map((t, i) => {
+          if (times.length > 12 && i % Math.ceil(times.length / 8) !== 0 && i !== times.length - 1) return null;
+          return (
+            <text key={i} x={toX(i)} y={H - 4} fontSize="10" fill="#64748b" textAnchor="middle">
+              {t}
+            </text>
+          );
+        })}
+        <text x={pad.l - 8} y={pad.t + 10} fontSize="10" fill="#0ea5e9">CE</text>
+        <text x={pad.l - 8} y={pad.t + 22} fontSize="10" fill="#f97316">PE</text>
+      </svg>
     </div>
   );
 }

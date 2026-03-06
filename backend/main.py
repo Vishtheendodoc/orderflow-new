@@ -1285,6 +1285,12 @@ def _compute_hft_snapshot(index_name: str, spot: float, oc: dict) -> None:
         ce_ltp = _f(ce, "last_price");   pe_ltp = _f(pe, "last_price")
         ce_iv  = _f(ce, "implied_volatility"); pe_iv = _f(pe, "implied_volatility")
         ce_vol = _f(ce, "volume");       pe_vol = _f(pe, "volume")
+        ce_g = ce.get("greeks") or {}
+        pe_g = pe.get("greeks") or {}
+        ce_delta = _f(ce_g, "delta");  pe_delta = _f(pe_g, "delta")
+        ce_gamma = _f(ce_g, "gamma");  pe_gamma = _f(pe_g, "gamma")
+        ce_theta = _f(ce_g, "theta");   pe_theta = _f(pe_g, "theta")
+        ce_vega  = _f(ce_g, "vega");    pe_vega  = _f(pe_g, "vega")
 
         pk_ce = f"{strike}_CE";  pk_pe = f"{strike}_PE"
         pc = prev.get(pk_ce, {}); pp = prev.get(pk_pe, {})
@@ -1295,10 +1301,12 @@ def _compute_hft_snapshot(index_name: str, spot: float, oc: dict) -> None:
         strikes_data.append({
             "strike":      strike,
             "CE_OI":       ce_oi,  "CE_LTP":  ce_ltp, "CE_IV":  ce_iv,  "CE_VOL": ce_vol,
+            "CE_DELTA":    ce_delta, "CE_GAMMA": ce_gamma, "CE_THETA": ce_theta, "CE_VEGA": ce_vega,
             "CE_OI_CHG":   _chg(ce_oi,  pc.get("oi",  ce_oi)),
             "CE_LTP_CHG":  _chg(ce_ltp, pc.get("ltp", ce_ltp)),
             "CE_IV_CHG":   _chg(ce_iv,  pc.get("iv",  ce_iv)),
             "PE_OI":       pe_oi,  "PE_LTP":  pe_ltp, "PE_IV":  pe_iv,  "PE_VOL": pe_vol,
+            "PE_DELTA":    pe_delta, "PE_GAMMA": pe_gamma, "PE_THETA": pe_theta, "PE_VEGA": pe_vega,
             "PE_OI_CHG":   _chg(pe_oi,  pp.get("oi",  pe_oi)),
             "PE_LTP_CHG":  _chg(pe_ltp, pp.get("ltp", pe_ltp)),
             "PE_IV_CHG":   _chg(pe_iv,  pp.get("iv",  pe_iv)),
@@ -1381,6 +1389,12 @@ def _compute_hft_snapshot(index_name: str, spot: float, oc: dict) -> None:
         str(s["strike"]): {
             "ce_oi": round(s["CE_OI"], 2), "pe_oi": round(s["PE_OI"], 2),
             "ce_ltp": round(s["CE_LTP"], 2), "pe_ltp": round(s["PE_LTP"], 2),
+            "ce_iv": round(s["CE_IV"], 4), "pe_iv": round(s["PE_IV"], 4),
+            "ce_delta": round(s["CE_DELTA"], 4), "pe_delta": round(s["PE_DELTA"], 4),
+            "ce_gamma": round(s["CE_GAMMA"], 6), "pe_gamma": round(s["PE_GAMMA"], 6),
+            "ce_theta": round(s["CE_THETA"], 2), "pe_theta": round(s["PE_THETA"], 2),
+            "ce_vega": round(s["CE_VEGA"], 2), "pe_vega": round(s["PE_VEGA"], 2),
+            "ce_oi_chg": round(s["CE_OI_CHG"], 2), "pe_oi_chg": round(s["PE_OI_CHG"], 2),
         }
         for s in nearby
     }
@@ -2164,7 +2178,124 @@ def _flow_score(flows: dict) -> float:
     return (bull - bear) / total  # -1 to +1
 
 
-_STRIKE_ANALYSIS_WINDOWS = (5, 10, 15, 20, 25, 30)
+_STRIKE_ANALYSIS_WINDOWS = (1, 3, 5, 10, 15, 20, 25, 30)
+
+
+def _raw_oi_ind(chg: float) -> str:
+    """Derive bullish/bearish from raw OI change. CE OI up = bullish, PE OI up = bearish."""
+    if chg > 0.5:
+        return "bullish"
+    if chg < -0.5:
+        return "bearish"
+    return "neutral"
+
+
+@app.get("/api/strike_analysis_timeseries/{symbol}")
+async def get_strike_analysis_timeseries(symbol: str, window: int = 30):
+    """Time-series strike data from HFT snapshots (raw OI/LTP/Greeks only, no flow).
+
+    Query: ?window=1|3|5|10|15|20|25|30 (default 30)
+    Returns per-minute strikes with CE left, PE right, OI change, Greeks, bullish/bearish.
+    """
+    if window not in _STRIKE_ANALYSIS_WINDOWS:
+        window = 30
+    idx = _resolve_index(symbol)
+    if not idx:
+        return JSONResponse({"error": f"Unknown index: {symbol}"}, status_code=400)
+
+    history = list(hft_scanner_history.get(idx, []))
+    if not history:
+        history = _load_hft_from_disk(idx)
+        if history:
+            hft_scanner_history[idx] = history
+
+    has_raw = any((s.get("strikes_raw") or {}) for s in history)
+    if DHAN_TOKEN_OPTIONS and (not history or not has_raw):
+        expiry = await _default_expiry_from_api(idx)
+        if expiry:
+            uid = UNDERLYING_IDS.get(idx)
+            if uid:
+                ok = await _fetch_gex_once(idx, uid, expiry)
+                if ok:
+                    await asyncio.sleep(4)
+                    await _fetch_gex_once(idx, uid, expiry)
+                history = list(hft_scanner_history.get(idx, []))
+                if not history:
+                    history = _load_hft_from_disk(idx)
+                    if history:
+                        hft_scanner_history[idx] = history
+
+    if not history:
+        token_hint = "" if DHAN_TOKEN_OPTIONS else " — set DHAN_TOKEN_OPTIONS to enable"
+        return JSONResponse(
+            {"symbol": idx, "error": f"No options chain data yet{token_hint}"},
+            status_code=202,
+        )
+
+    snaps = history[-window:] if len(history) >= window else history
+    series_out: list = []
+
+    def _strike_sort_key(x):
+        try:
+            return float(x)
+        except (ValueError, TypeError):
+            return 0.0
+
+    prev_raw_map: dict = {}
+    for snap in snaps:
+        raw = snap.get("strikes_raw") or {}
+        if not raw:
+            continue
+        strikes_list: list = []
+        for sk in sorted(raw.keys(), key=_strike_sort_key):
+            r = raw[sk]
+            ce_oi = r.get("ce_oi") or 0
+            pe_oi = r.get("pe_oi") or 0
+            prev = prev_raw_map.get(sk, {})
+            ce_oi_prev = prev.get("ce_oi") or 0
+            pe_oi_prev = prev.get("pe_oi") or 0
+            ce_chg = r.get("ce_oi_chg")
+            if ce_chg is None and ce_oi_prev:
+                ce_chg = (ce_oi - ce_oi_prev) / ce_oi_prev * 100
+            ce_chg = ce_chg or 0
+            pe_chg = r.get("pe_oi_chg")
+            if pe_chg is None and pe_oi_prev:
+                pe_chg = (pe_oi - pe_oi_prev) / pe_oi_prev * 100
+            pe_chg = pe_chg or 0
+            prev_raw_map[sk] = r
+            strikes_list.append({
+                "strike":   float(sk),
+                "ce_oi":    r.get("ce_oi") or 0,
+                "pe_oi":    r.get("pe_oi") or 0,
+                "ce_ltp":   r.get("ce_ltp") or 0,
+                "pe_ltp":   r.get("pe_ltp") or 0,
+                "ce_iv":    r.get("ce_iv") or 0,
+                "pe_iv":    r.get("pe_iv") or 0,
+                "ce_delta": r.get("ce_delta") or 0,
+                "pe_delta": r.get("pe_delta") or 0,
+                "ce_gamma": r.get("ce_gamma") or 0,
+                "pe_gamma": r.get("pe_gamma") or 0,
+                "ce_theta": r.get("ce_theta") or 0,
+                "pe_theta": r.get("pe_theta") or 0,
+                "ce_vega":  r.get("ce_vega") or 0,
+                "pe_vega":  r.get("pe_vega") or 0,
+                "ce_oi_chg": ce_chg,
+                "pe_oi_chg": pe_chg,
+                "ce_ind":   _raw_oi_ind(ce_chg),
+                "pe_ind":   _raw_oi_ind(pe_chg),
+            })
+        series_out.append({
+            "ts":      snap.get("ts", 0),
+            "t":       snap.get("t", ""),
+            "spot":    snap.get("spot", 0),
+            "strikes": strikes_list,
+        })
+
+    return {
+        "symbol": idx,
+        "spot":   snaps[-1]["spot"] if snaps else 0,
+        "series": series_out,
+    }
 
 
 @app.get("/api/strike_analysis/{symbol}")
