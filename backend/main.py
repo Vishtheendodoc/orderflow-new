@@ -1081,8 +1081,12 @@ def _load_hft_from_disk(index_name: str) -> list:
                         snaps.append(s)
                 except Exception:
                     pass
-        # Cap to HFT_MAX_SNAPSHOTS after filtering
-        return snaps[-HFT_MAX_SNAPSHOTS:] if len(snaps) > HFT_MAX_SNAPSHOTS else snaps
+        # Dedupe by minute (keep last) — avoids double bars when merged snap was appended
+        by_minute: dict[int, dict] = {}
+        for s in snaps:
+            by_minute[s.get("ts", 0) // 60] = s
+        result = sorted(by_minute.values(), key=lambda x: x.get("ts", 0))
+        return result[-HFT_MAX_SNAPSHOTS:] if len(result) > HFT_MAX_SNAPSHOTS else result
     except Exception as e:
         logger.warning(f"HFT disk load failed [{index_name}]: {e}")
         return []
@@ -1359,19 +1363,32 @@ def _compute_hft_snapshot(index_name: str, spot: float, oc: dict) -> None:
                 flows["Put Write"] += pe_act
 
     # ── Store snapshot ────────────────────────────────────────────────────────
+    now_ts   = int(time.time())
+    minute_ts = (now_ts // 60) * 60  # align to minute boundary for candle sync
     now_ist  = datetime.now(IST)
     snap = {
         "t":    now_ist.strftime("%H:%M"),
-        "ts":   int(time.time()),
+        "ts":   minute_ts,
         "spot": round(spot, 2),
         "mfi":  round(mfi, 2),
         "flows": {k: round(v, 2) for k, v in flows.items() if v > 0},
     }
     history = hft_scanner_history[index_name]
-    history.append(snap)
-    if len(history) > HFT_MAX_SNAPSHOTS:
-        hft_scanner_history[index_name] = history[-HFT_MAX_SNAPSHOTS:]
-    _append_hft_to_disk(index_name, snap)
+    # Merge in place if we already have a snap for this minute (avoids duplicate bars
+    # and "different color appearing" when a second poll lands in same minute)
+    if history and (history[-1]["ts"] // 60) == (minute_ts // 60):
+        last = history[-1]
+        last["spot"] = snap["spot"]
+        last["mfi"]  = snap["mfi"]
+        for k, v in snap["flows"].items():
+            last["flows"][k] = last["flows"].get(k, 0) + v
+        last["t"] = snap["t"]
+        _append_hft_to_disk(index_name, last)  # persist merged
+    else:
+        history.append(snap)
+        if len(history) > HFT_MAX_SNAPSHOTS:
+            hft_scanner_history[index_name] = history[-HFT_MAX_SNAPSHOTS:]
+        _append_hft_to_disk(index_name, snap)
 
     # ── Update prev-data for next cycle's change computation ─────────────────
     new_prev: dict = {}
@@ -1532,8 +1549,10 @@ async def options_poller_task():
             await asyncio.sleep(gap)
 
         # On rate limit, add 2 min cooldown to avoid hammering Dhan when market is busy
+        # Otherwise sleep so total cycle ≈ OPTIONS_POLL_SEC (one HFT bar per minute)
         extra = 120 if rate_limited else 0
-        await asyncio.sleep(OPTIONS_POLL_SEC + extra)
+        cycle_sleep = max(5, OPTIONS_POLL_SEC - len(UNDERLYING_IDS) * gap)
+        await asyncio.sleep(cycle_sleep + extra)
 
 
 def _is_auth_error(exc: Exception) -> bool:

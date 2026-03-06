@@ -954,7 +954,7 @@ export default function App() {
       } catch (_) {}
     };
     poll();
-    const id = setInterval(poll, 65_000);
+    const id = setInterval(poll, 30_000);
     return () => clearInterval(id);
   }, [features.showHFT, isIndexFuture, activeSymbol]);
 

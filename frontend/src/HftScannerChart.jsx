@@ -16,7 +16,7 @@
 import { useEffect, useRef, useCallback, useState, useMemo } from "react";
 import { createChart } from "lightweight-charts";
 
-const POLL_MS    = 65_000;  // slightly over 60s to avoid racing the backend write
+const POLL_MS    = 30_000;  // poll every 30s so HFT bars appear sooner after backend write
 const IST_OFFSET = 19800;   // UTC+5:30 in seconds
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
@@ -102,8 +102,8 @@ function aggregateCandlesForHft(candles, tfMin) {
 
 /**
  * Aggregate raw HFT snapshots into timeframe buckets.
- * Always runs (even for 1m) to deduplicate multiple snaps that may share the
- * same minute due to polling jitter — duplicate times would crash lightweight-charts.
+ * Keeps the LAST snapshot per bucket (not merge) so we avoid "different color bar
+ * appearing" when a second poll lands in the same minute — one bar per minute, stable.
  */
 function aggregateHFT(series, tfMin) {
   if (!series?.length) return series;
@@ -111,21 +111,13 @@ function aggregateHFT(series, tfMin) {
   const secPerBucket = Math.max(1, tfMin) * 60;
   for (const snap of series) {
     const bucketTs = Math.floor(snap.ts / secPerBucket) * secPerBucket;
-    if (!buckets[bucketTs]) {
-      buckets[bucketTs] = {
-        t:     snap.t,
-        ts:    bucketTs,
-        spot:  snap.spot,
-        mfi:   snap.mfi,
-        flows: { ...snap.flows },
-      };
-    } else {
-      const b = buckets[bucketTs];
-      b.spot = snap.spot; // last spot in bucket = close
-      for (const [k, v] of Object.entries(snap.flows || {})) {
-        b.flows[k] = (b.flows[k] || 0) + v;
-      }
-    }
+    buckets[bucketTs] = {
+      t:     snap.t,
+      ts:    bucketTs,
+      spot:  snap.spot,
+      mfi:   snap.mfi,
+      flows: { ...(snap.flows || {}) },
+    };
   }
   return Object.values(buckets).sort((a, b) => a.ts - b.ts);
 }
