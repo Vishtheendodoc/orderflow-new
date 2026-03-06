@@ -1,14 +1,15 @@
 /**
  * StrikeAnalysisChart — Current vs Previous period flow comparison.
  *
- * Compares options flow (5/10/15/30 min) for bullish/bearish indication.
+ * Compares options flow (5/10/15/20/25/30 min) for bullish/bearish indication.
+ * Phase 2: per-strike bullish/bearish based on flow comparison.
  * Uses HFT scanner data; polls GET /api/strike_analysis/{symbol}?window=N.
  */
 
-import { useRef, useEffect, useCallback, useState } from "react";
+import { useEffect, useCallback, useState } from "react";
 
 const POLL_MS = 30_000;
-const WINDOWS = [5, 10, 15, 30];
+const WINDOWS = [5, 10, 15, 20, 25, 30];
 
 const FLOW_COLORS = {
   "Aggressive Call Buy": "#059669",
@@ -162,6 +163,54 @@ export default function StrikeAnalysisChart({ symbol, apiBase, height = 420 }) {
           <div style={{ marginTop: 16 }}>
             <h4 style={{ margin: "0 0 8px 0", fontSize: 13, color: "#334155" }}>Delta (Current − Previous)</h4>
             <FlowBars flows={data.delta} isDelta />
+          </div>
+        )}
+        {/* Phase 2: Strike-level bullish/bearish */}
+        {data?.strikes && data.strikes.length > 0 && (
+          <div style={{ marginTop: 20 }}>
+            <h4 style={{ margin: "0 0 8px 0", fontSize: 13, color: "#334155" }}>Strike-level (ATM ±5)</h4>
+            <div style={{ overflowX: "auto", maxHeight: 240, overflowY: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr style={{ borderBottom: "1px solid #e2e8f0" }}>
+                    <th style={{ textAlign: "left", padding: "6px 8px", color: "#64748b", fontWeight: 600 }}>Strike</th>
+                    <th style={{ textAlign: "right", padding: "6px 8px", color: "#64748b", fontWeight: 600 }}>Score</th>
+                    <th style={{ textAlign: "center", padding: "6px 8px", color: "#64748b", fontWeight: 600 }}>Indication</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.strikes.map((s) => (
+                    <tr key={s.strike} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                      <td style={{ padding: "6px 8px", fontFamily: "monospace", color: "#334155" }}>
+                        {Number(s.strike).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
+                      </td>
+                      <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "monospace", color: "#475569" }}>
+                        {s.score > 0 ? "+" : ""}{s.score?.toFixed(2)}
+                      </td>
+                      <td style={{ padding: "6px 8px", textAlign: "center" }}>
+                        <span
+                          style={{
+                            padding: "2px 8px",
+                            borderRadius: 4,
+                            fontSize: 11,
+                            fontWeight: 600,
+                            background: s.indication === "bullish" ? "rgba(5,150,105,0.15)" : s.indication === "bearish" ? "rgba(239,68,68,0.15)" : "rgba(148,163,184,0.2)",
+                            color: s.indication === "bullish" ? "#059669" : s.indication === "bearish" ? "#dc2626" : "#64748b",
+                          }}
+                        >
+                          {s.indication}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+        {data && !data?.error && (!data?.strikes || data.strikes.length === 0) && (data?.current || data?.previous) && (
+          <div style={{ marginTop: 12, fontSize: 12, color: "#94a3b8" }}>
+            Strike-level data will appear after new HFT snapshots (DHAN_TOKEN_OPTIONS).
           </div>
         )}
       </div>

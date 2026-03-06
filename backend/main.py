@@ -1337,41 +1337,53 @@ def _compute_hft_snapshot(index_name: str, spot: float, oc: dict) -> None:
         "Call Short":           0.0,
         "Put Write":            0.0,
     }
+    strike_flows: dict = {}  # strike -> { flow_name: value } for Phase 2 strike-level OI
 
     for s in nearby:
+        strike = s["strike"]
         ce_act = s["CE_OI"] * s["CE_LTP"]
         pe_act = s["PE_OI"] * s["PE_LTP"]
 
         if ce_act > 0:
             if s["CE_OI_CHG"] > 5 and abs(s["CE_LTP_CHG"]) < 2 and s["CE_VOL"] > 100:
                 flows["Dark Pool CE"] += ce_act
+                strike_flows.setdefault(strike, {})["Dark Pool CE"] = strike_flows.get(strike, {}).get("Dark Pool CE", 0) + ce_act
             elif s["CE_LTP_CHG"] > 2 and mfi > 70 and s["CE_VOL"] > 50:
                 flows["Aggressive Call Buy"] += ce_act
+                strike_flows.setdefault(strike, {})["Aggressive Call Buy"] = strike_flows.get(strike, {}).get("Aggressive Call Buy", 0) + ce_act
             elif s["CE_OI_CHG"] > 5 and s["CE_LTP_CHG"] < -2 and mfi < 30:
                 flows["Heavy Call Short"] += ce_act
+                strike_flows.setdefault(strike, {})["Heavy Call Short"] = strike_flows.get(strike, {}).get("Heavy Call Short", 0) + ce_act
             elif s["CE_LTP_CHG"] < -1 and s["CE_OI_CHG"] > 3:
                 flows["Call Short"] += ce_act
+                strike_flows.setdefault(strike, {})["Call Short"] = strike_flows.get(strike, {}).get("Call Short", 0) + ce_act
 
         if pe_act > 0:
             if s["PE_OI_CHG"] > 5 and abs(s["PE_LTP_CHG"]) < 2 and s["PE_VOL"] > 100:
                 flows["Dark Pool PE"] += pe_act
+                strike_flows.setdefault(strike, {})["Dark Pool PE"] = strike_flows.get(strike, {}).get("Dark Pool PE", 0) + pe_act
             elif s["PE_LTP_CHG"] > 2 and mfi < 30 and s["PE_VOL"] > 50:
                 flows["Aggressive Put Buy"] += pe_act
+                strike_flows.setdefault(strike, {})["Aggressive Put Buy"] = strike_flows.get(strike, {}).get("Aggressive Put Buy", 0) + pe_act
             elif s["PE_OI_CHG"] > 5 and s["PE_LTP_CHG"] < -2 and mfi > 70:
                 flows["Heavy Put Write"] += pe_act
+                strike_flows.setdefault(strike, {})["Heavy Put Write"] = strike_flows.get(strike, {}).get("Heavy Put Write", 0) + pe_act
             elif s["PE_LTP_CHG"] < -1 and s["PE_OI_CHG"] > 3:
                 flows["Put Write"] += pe_act
+                strike_flows.setdefault(strike, {})["Put Write"] = strike_flows.get(strike, {}).get("Put Write", 0) + pe_act
 
     # ── Store snapshot ────────────────────────────────────────────────────────
     now_ts   = int(time.time())
     minute_ts = (now_ts // 60) * 60  # align to minute boundary for candle sync
     now_ist  = datetime.now(IST)
+    strike_flows_ser = {str(k): {fk: round(fv, 2) for fk, fv in v.items() if fv > 0} for k, v in strike_flows.items() if v}
     snap = {
         "t":    now_ist.strftime("%H:%M"),
         "ts":   minute_ts,
         "spot": round(spot, 2),
         "mfi":  round(mfi, 2),
         "flows": {k: round(v, 2) for k, v in flows.items() if v > 0},
+        "strike_flows": strike_flows_ser,
     }
     history = hft_scanner_history[index_name]
     # Merge in place if we already have a snap for this minute (avoids duplicate bars
@@ -1382,6 +1394,11 @@ def _compute_hft_snapshot(index_name: str, spot: float, oc: dict) -> None:
         last["mfi"]  = snap["mfi"]
         for k, v in snap["flows"].items():
             last["flows"][k] = last["flows"].get(k, 0) + v
+        for sk, sv in snap.get("strike_flows", {}).items():
+            if sk not in last.setdefault("strike_flows", {}):
+                last["strike_flows"][sk] = {}
+            for fk, fv in sv.items():
+                last["strike_flows"][sk][fk] = last["strike_flows"][sk].get(fk, 0) + fv
         last["t"] = snap["t"]
         _append_hft_to_disk(index_name, last)  # persist merged
     else:
@@ -2118,6 +2135,15 @@ def _aggregate_flows(snapshots: list) -> dict:
     return out
 
 
+def _aggregate_flow_dicts(dicts: list) -> dict:
+    """Sum flow values across list of flow dicts. For per-strike aggregation."""
+    out: dict = {}
+    for d in dicts:
+        for k, v in (d or {}).items():
+            out[k] = out.get(k, 0) + v
+    return out
+
+
 def _flow_score(flows: dict) -> float:
     """Bullish positive, bearish negative. Normalized by total magnitude."""
     bull = sum(flows.get(k, 0) for k in _STRIKE_BULLISH_FLOWS)
@@ -2128,14 +2154,17 @@ def _flow_score(flows: dict) -> float:
     return (bull - bear) / total  # -1 to +1
 
 
+_STRIKE_ANALYSIS_WINDOWS = (5, 10, 15, 20, 25, 30)
+
+
 @app.get("/api/strike_analysis/{symbol}")
 async def get_strike_analysis(symbol: str, window: int = 5):
     """Compare current vs previous N-minute options flow for bullish/bearish indication.
 
-    Query: ?window=5|10|15|30 (default 5)
-    Uses HFT scanner history. Returns aggregated flows and a score (-1 to +1).
+    Query: ?window=5|10|15|20|25|30 (default 5)
+    Uses HFT scanner history. Returns aggregated flows, score (-1 to +1), and per-strike data.
     """
-    if window not in (5, 10, 15, 30):
+    if window not in _STRIKE_ANALYSIS_WINDOWS:
         window = 5
     idx = _resolve_index(symbol)
     if not idx:
@@ -2155,7 +2184,7 @@ async def get_strike_analysis(symbol: str, window: int = 5):
 
     n = min(window, len(history))
     if n == 0:
-        return {"symbol": idx, "window_minutes": window, "current": {}, "previous": {}, "delta": {}, "score": 0, "indication": "neutral"}
+        return {"symbol": idx, "window_minutes": window, "current": {}, "previous": {}, "delta": {}, "score": 0, "indication": "neutral", "strikes": []}
 
     current_snaps = history[-n:]
     previous_snaps = history[-2 * n : -n] if len(history) >= 2 * n else []
@@ -2182,6 +2211,48 @@ async def get_strike_analysis(symbol: str, window: int = 5):
     else:
         indication = "neutral"
 
+    # ── Phase 2: per-strike bullish/bearish ────────────────────────────────────
+    strikes_out: list = []
+    all_strike_keys: set = set()
+    for snap in current_snaps + previous_snaps:
+        all_strike_keys.update((snap.get("strike_flows") or {}).keys())
+    def _strike_sort_key(x):
+        try:
+            return float(x)
+        except (ValueError, TypeError):
+            return 0.0
+
+    for sk in sorted(all_strike_keys, key=_strike_sort_key):
+        cur_dicts = [s.get("strike_flows", {}).get(sk, {}) for s in current_snaps]
+        prev_dicts = [s.get("strike_flows", {}).get(sk, {}) for s in previous_snaps]
+        cur_f = _aggregate_flow_dicts(cur_dicts)
+        prev_f = _aggregate_flow_dicts(prev_dicts)
+        if not cur_f and not prev_f:
+            continue
+        sc_cur = _flow_score(cur_f)
+        sc_prev = _flow_score(prev_f)
+        sc_d = sc_cur - sc_prev
+        sc = max(-1.0, min(1.0, sc_d))
+        if sc > 0.1:
+            ind = "bullish"
+        elif sc < -0.1:
+            ind = "bearish"
+        else:
+            ind = "neutral"
+        strike_delta = {}
+        for k in set(cur_f) | set(prev_f):
+            d = cur_f.get(k, 0) - prev_f.get(k, 0)
+            if d != 0:
+                strike_delta[k] = round(d, 2)
+        strikes_out.append({
+            "strike":   float(sk),
+            "current":  {k: round(v, 2) for k, v in cur_f.items()},
+            "previous": {k: round(v, 2) for k, v in prev_f.items()},
+            "delta":    strike_delta,
+            "score":   round(sc, 3),
+            "indication": ind,
+        })
+
     return {
         "symbol":          idx,
         "window_minutes":  window,
@@ -2193,6 +2264,7 @@ async def get_strike_analysis(symbol: str, window: int = 5):
         "score_previous":  round(score_previous, 3),
         "indication":      indication,
         "spot":            current_snaps[-1]["spot"] if current_snaps else 0,
+        "strikes":         strikes_out,
     }
 
 
