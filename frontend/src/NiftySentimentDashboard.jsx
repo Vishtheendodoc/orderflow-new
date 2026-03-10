@@ -216,24 +216,44 @@ export default function NiftySentimentDashboard({ symbol, apiBase, height = 480 
           >
             <SignalBadge signal={data.overall_signal} score={data.score} />
             {data.ml_confidence > 0 ? (
-              <div
-                style={{
-                  padding: "8px 16px",
-                  borderRadius: 6,
-                  background: "#f1f5f9",
-                  fontSize: 13,
-                  color: "#475569",
-                }}
-              >
-                ML:{" "}
-                <strong>
-                  {data.ml_direction === 1
-                    ? "Bullish"
-                    : data.ml_direction === -1
-                      ? "Bearish"
-                      : "Neutral"}
-                </strong>{" "}
-                ({(data.ml_confidence * 100).toFixed(0)}%)
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div
+                  style={{
+                    padding: "8px 16px",
+                    borderRadius: 6,
+                    background: "#f1f5f9",
+                    fontSize: 13,
+                    color: "#475569",
+                  }}
+                >
+                  ML:{" "}
+                  <strong>
+                    {data.ml_direction === 1
+                      ? "Bullish"
+                      : data.ml_direction === -1
+                        ? "Bearish"
+                        : "Neutral"}
+                  </strong>{" "}
+                  ({(data.ml_confidence * 100).toFixed(0)}%)
+                </div>
+                <button
+                  type="button"
+                  className="cd-btn"
+                  onClick={trainModel}
+                  disabled={training}
+                  style={{
+                    padding: "6px 12px",
+                    fontSize: 12,
+                    background: training ? "#cbd5e1" : "#64748b",
+                    color: "#fff",
+                    border: "none",
+                    borderRadius: 6,
+                    cursor: training ? "wait" : "pointer",
+                  }}
+                  title="Retrain model with latest data"
+                >
+                  {training ? "Training…" : "Retrain"}
+                </button>
               </div>
             ) : (
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>

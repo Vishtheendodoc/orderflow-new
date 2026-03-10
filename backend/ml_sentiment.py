@@ -144,52 +144,81 @@ async def _fetch_rolling_option_daily(
     return out
 
 
+# Strikes to fetch for Dhan backfill (ATM±2 gives better PCR, IV skew proxy)
+_DHAN_BACKFILL_STRIKES = [
+    ("ATM", "CALL"), ("ATM", "PUT"),
+    ("ATM+1", "CALL"), ("ATM+1", "PUT"),
+    ("ATM-1", "CALL"), ("ATM-1", "PUT"),
+    ("ATM+2", "CALL"), ("ATM+2", "PUT"),
+    ("ATM-2", "CALL"), ("ATM-2", "PUT"),
+]
+
+
 async def _build_training_data_from_dhan(
     from_date: date,
     to_date: date,
     index_name: str = "NIFTY",
 ) -> Tuple[List[List[float]], List[int]]:
-    """Build X, y from Dhan rolling option. Uses ATM CE + ATM PE for PCR, IV, spot."""
+    """Build X, y from Dhan rolling option. Uses ATM±2 strikes for PCR, IV skew, OI pressure."""
     from dhan_historical import chunk_date_range
 
     uid = {"NIFTY": 13, "BANKNIFTY": 25, "FINNIFTY": 27, "MIDCPNIFTY": 442}.get(
         index_name, 13
     )
     chunks = chunk_date_range(from_date, to_date, 30)
-    ce_by_date = {}
-    pe_by_date = {}
+    # by_date[d] = { "spot": float, "call_oi": sum, "put_oi": sum, "atm_iv": float, "skew": float }
+    by_date = defaultdict(lambda: {"spot": 0, "call_oi": 0, "put_oi": 0, "atm_ce_iv": 0, "atm_pe_iv": 0, "otm_put_iv": 0, "otm_call_iv": 0})
     for fd, td in chunks:
-        ce = await _fetch_rolling_option_daily(uid, fd, td, "ATM", "CALL")
-        if ce:
-            ce_by_date.update(ce)
-        await asyncio.sleep(4)
-        pe = await _fetch_rolling_option_daily(uid, fd, td, "ATM", "PUT")
-        if pe:
-            pe_by_date.update(pe)
-        await asyncio.sleep(4)
-    dates = sorted(set(ce_by_date.keys()) & set(pe_by_date.keys()))
+        for strike, drv_type in _DHAN_BACKFILL_STRIKES:
+            data = await _fetch_rolling_option_daily(uid, fd, td, strike, drv_type)
+            if not data:
+                continue
+            for d, v in data.items():
+                s = by_date[d]
+                if v.get("spot", 0) > 0:
+                    s["spot"] = v["spot"]
+                oi = v.get("oi", 0) or 0
+                iv = v.get("iv", 0) or 0
+                if drv_type == "CALL":
+                    s["call_oi"] += oi
+                    if strike == "ATM":
+                        s["atm_ce_iv"] = iv
+                    elif strike == "ATM+2":
+                        s["otm_call_iv"] = iv
+                else:
+                    s["put_oi"] += oi
+                    if strike == "ATM":
+                        s["atm_pe_iv"] = iv
+                    elif strike == "ATM-2":
+                        s["otm_put_iv"] = iv
+            await asyncio.sleep(4)
+    dates = sorted([d for d, s in by_date.items() if s["spot"] > 0 and (s["call_oi"] > 0 or s["put_oi"] > 0)])
     if len(dates) < MIN_TRAINING_DAYS:
         return [], []
     X, y = [], []
+    prev_call_oi = prev_put_oi = 0.0
     for i in range(len(dates) - 1):
         d = dates[i]
         next_d = dates[i + 1]
-        ce = ce_by_date[d]
-        pe = pe_by_date[d]
-        nce = ce_by_date.get(next_d, {})
-        npe = pe_by_date.get(next_d, {})
-        spot = ce.get("spot") or pe.get("spot") or 0
-        next_spot = nce.get("spot") or npe.get("spot") or 0
+        s = by_date[d]
+        s_next = by_date.get(next_d, {})
+        spot = s.get("spot", 0)
+        next_spot = s_next.get("spot", 0)
         if spot <= 0 or next_spot <= 0:
             continue
-        pcr = pe.get("oi", 1) / (ce.get("oi", 1) or 1)
-        atm_iv = (ce.get("iv", 0) + pe.get("iv", 0)) / 2
+        call_oi = s.get("call_oi", 1) or 1
+        put_oi = s.get("put_oi", 1) or 1
+        pcr = put_oi / call_oi
+        oi_pressure = (put_oi - prev_put_oi) - (call_oi - prev_call_oi)
+        prev_call_oi, prev_put_oi = call_oi, put_oi
+        atm_iv = (s.get("atm_ce_iv", 0) + s.get("atm_pe_iv", 0)) / 2
+        skew = (s.get("otm_put_iv", 0) or 0) - (s.get("otm_call_iv", 0) or 0)
         feat = [
             pcr,
+            oi_pressure,
             0.0,
             0.0,
-            0.0,
-            0.0,
+            skew,
             atm_iv,
             0.0,
             0.0,
@@ -325,7 +354,7 @@ async def train_and_save(index_name: str = "NIFTY") -> bool:
         logger.info(f"EOD training data: {len(X)} samples from {len(snapshots)} snapshots")
     if len(X) < MIN_TRAINING_DAYS:
         to_date = date.today()
-        from_date = to_date - timedelta(days=400)
+        from_date = to_date - timedelta(days=600)
         X, y = await _build_training_data_from_dhan(from_date, to_date, index_name)
         logger.info(f"Dhan rolling option training data: {len(X)} samples")
     if len(X) < MIN_TRAINING_DAYS:
