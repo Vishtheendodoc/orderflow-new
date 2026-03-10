@@ -5,6 +5,7 @@ import LiquidityHeatmap from "./LiquidityHeatmap";
 import GexChart from "./GexChart";
 import HftScannerChart from "./HftScannerChart";
 import StrikeAnalysisChart from "./StrikeAnalysisChart";
+import NiftySentimentDashboard from "./NiftySentimentDashboard";
 
 class ErrorBoundary extends Component {
   state = { hasError: false };
@@ -882,7 +883,7 @@ export default function App() {
   const maxDelta = Math.max(...candles.map((c) => Math.abs(c.delta)), 1);
   const closedCandles = candles.filter((c) => c.closed);
   const liveCandle = candles.find((c) => !c.closed);
-  const [viewMode, setViewMode] = useState("chart"); // "chart" | "footprint" | "heatmap" | "gex" | "hft" | "strike"
+  const [viewMode, setViewMode] = useState("chart"); // "chart" | "footprint" | "heatmap" | "gex" | "hft" | "strike" | "sentiment"
 
   // Footprint live update: poll /api/state/{symbol} every 2s when footprint tab is active.
   // Live batches strip price levels (for size), so we re-fetch full state with levels here.
@@ -1150,6 +1151,15 @@ export default function App() {
                     Strike
                   </button>
                 )}
+                {isIndexFuture && (
+                  <button
+                    className={`vt-btn ${viewMode === "sentiment" ? "active" : ""}`}
+                    onClick={() => setViewMode("sentiment")}
+                    title="Options Sentiment — PCR, GEX, Max Pain, scorecard (DHAN_TOKEN_OPTIONS required)"
+                  >
+                    Sentiment
+                  </button>
+                )}
               </div>
               {/* Timeframe selector + Feature toggles */}
               <div className="candle-duration-bar">
@@ -1208,6 +1218,13 @@ export default function App() {
               ) : viewMode === "strike" ? (
                 <div className="chart-view-wrap">
                   <StrikeAnalysisChart
+                    symbol={activeSymbol}
+                    apiBase={API_URL || window.location.origin}
+                  />
+                </div>
+              ) : viewMode === "sentiment" ? (
+                <div className="heatmap-view-wrap">
+                  <NiftySentimentDashboard
                     symbol={activeSymbol}
                     apiBase={API_URL || window.location.origin}
                   />

@@ -16,7 +16,7 @@ import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta, date
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 import logging
 try:
     import orjson as _json_lib
@@ -36,6 +36,9 @@ from fastapi.staticfiles import StaticFiles
 import httpx
 import websockets
 import struct
+
+from sentiment_features import compute_sentiment, extract_ml_features
+from ml_sentiment import load_model as load_ml_model, predict as ml_predict
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -92,11 +95,21 @@ HEATMAP_SNAPSHOTS_IN_RAM = int(os.getenv("HEATMAP_SNAPSHOTS_IN_RAM", "50"))
 MAX_DEPTH_FILE_LINES = int(os.getenv("MAX_DEPTH_FILE_LINES", "500"))
 DEPTH_DIR = os.path.join(SNAPSHOT_DIR, "depth")
 HFT_DIR   = os.path.join(SNAPSHOT_DIR, "hft")
+SENTIMENT_DIR = os.path.join(SNAPSHOT_DIR, "sentiment")
 
 # ── Options GEX ──────────────────────────────────────────────────────────────
 DHAN_TOKEN_OPTIONS  = os.getenv("DHAN_TOKEN_OPTIONS", "")
 OPTIONS_POLL_SEC    = float(os.getenv("OPTIONS_POLL_SEC", "60"))          # poll every 60s → 1-min HFT candles
 OPTIONS_POLL_GAP    = float(os.getenv("OPTIONS_POLL_GAP", "8"))          # seconds between each index (Dhan: 1 req/3s; 8s safer when market active)
+# HFT flow formula thresholds (calibrate via /api/strike_calibration)
+HFT_OI_CHG_PCT      = float(os.getenv("HFT_OI_CHG_PCT", "5"))             # significant OI change %
+HFT_LTP_STABLE_PCT  = float(os.getenv("HFT_LTP_STABLE_PCT", "2"))        # LTP "stable" for Dark Pool
+HFT_LTP_MOVE_PCT    = float(os.getenv("HFT_LTP_MOVE_PCT", "2"))          # meaningful LTP move
+HFT_OI_CHG_MIN      = float(os.getenv("HFT_OI_CHG_MIN", "3"))             # min OI chg for short/write
+HFT_CE_VOL_MIN      = int(os.getenv("HFT_CE_VOL_MIN", "100000"))          # min CE volume; NIFTY ~1L, FINNIFTY ~1K
+HFT_PE_VOL_MIN      = int(os.getenv("HFT_PE_VOL_MIN", "100000"))          # min PE volume; index-specific
+HFT_MFI_OVERBOUGHT  = float(os.getenv("HFT_MFI_OVERBOUGHT", "70"))        # MFI overbought
+HFT_MFI_OVERSOLD    = float(os.getenv("HFT_MFI_OVERSOLD", "30"))         # MFI oversold
 # Underlying security IDs (NSE index) used for options chain
 UNDERLYING_IDS = {
     "NIFTY":      "13",
@@ -468,6 +481,12 @@ depth_snapshots: Dict[str, deque] = {}
 # index_name → {computed_at, spot, expiry, strikes:[...], flip_point, ...}
 # gex_cache keyed by "{INDEX_NAME}:{YYYY-MM-DD}" so multiple expiries are cached independently
 gex_cache: Dict[str, dict] = {}
+# sentiment_cache keyed by index name; sentiment_history for time-series of scores
+sentiment_cache: Dict[str, dict] = {}
+sentiment_history: Dict[str, list] = defaultdict(list)
+sentiment_prev: Dict[str, dict] = {}  # prev skew, prev atm_iv for change computation
+_sentiment_eod_saved: Set[str] = set()  # "{index_name}:{YYYY-MM-DD}" already saved
+SENTIMENT_MAX_HISTORY = 200
 # expiry_list_cache keyed by index_name -> list of expiry date strings
 expiry_list_cache: Dict[str, list] = {}
 
@@ -516,6 +535,7 @@ def _do_daily_reset():
     _depth_append_count.clear()
     hft_scanner_history.clear()
     hft_prev_data.clear()
+    _sentiment_eod_saved.clear()
 
     # Only wipe disk when crossing midnight — NOT on cold start (restart/redeploy)
     # On cold start we keep disk so load_all_snapshots can restore
@@ -1353,30 +1373,30 @@ def _compute_hft_snapshot(index_name: str, spot: float, oc: dict) -> None:
         pe_act = s["PE_OI"] * s["PE_LTP"]
 
         if ce_act > 0:
-            if s["CE_OI_CHG"] > 5 and abs(s["CE_LTP_CHG"]) < 2 and s["CE_VOL"] > 100:
+            if s["CE_OI_CHG"] > HFT_OI_CHG_PCT and abs(s["CE_LTP_CHG"]) < HFT_LTP_STABLE_PCT and s["CE_VOL"] > HFT_CE_VOL_MIN:
                 flows["Dark Pool CE"] += ce_act
                 strike_flows.setdefault(strike, {})["Dark Pool CE"] = strike_flows.get(strike, {}).get("Dark Pool CE", 0) + ce_act
-            elif s["CE_LTP_CHG"] > 2 and mfi > 70 and s["CE_VOL"] > 50:
+            elif s["CE_LTP_CHG"] > HFT_LTP_MOVE_PCT and mfi > HFT_MFI_OVERBOUGHT and s["CE_VOL"] > HFT_CE_VOL_MIN:
                 flows["Aggressive Call Buy"] += ce_act
                 strike_flows.setdefault(strike, {})["Aggressive Call Buy"] = strike_flows.get(strike, {}).get("Aggressive Call Buy", 0) + ce_act
-            elif s["CE_OI_CHG"] > 5 and s["CE_LTP_CHG"] < -2 and mfi < 30:
+            elif s["CE_OI_CHG"] > HFT_OI_CHG_PCT and s["CE_LTP_CHG"] < -HFT_LTP_MOVE_PCT and mfi < HFT_MFI_OVERSOLD:
                 flows["Heavy Call Short"] += ce_act
                 strike_flows.setdefault(strike, {})["Heavy Call Short"] = strike_flows.get(strike, {}).get("Heavy Call Short", 0) + ce_act
-            elif s["CE_LTP_CHG"] < -1 and s["CE_OI_CHG"] > 3:
+            elif s["CE_LTP_CHG"] < -1 and s["CE_OI_CHG"] > HFT_OI_CHG_MIN:
                 flows["Call Short"] += ce_act
                 strike_flows.setdefault(strike, {})["Call Short"] = strike_flows.get(strike, {}).get("Call Short", 0) + ce_act
 
         if pe_act > 0:
-            if s["PE_OI_CHG"] > 5 and abs(s["PE_LTP_CHG"]) < 2 and s["PE_VOL"] > 100:
+            if s["PE_OI_CHG"] > HFT_OI_CHG_PCT and abs(s["PE_LTP_CHG"]) < HFT_LTP_STABLE_PCT and s["PE_VOL"] > HFT_PE_VOL_MIN:
                 flows["Dark Pool PE"] += pe_act
                 strike_flows.setdefault(strike, {})["Dark Pool PE"] = strike_flows.get(strike, {}).get("Dark Pool PE", 0) + pe_act
-            elif s["PE_LTP_CHG"] > 2 and mfi < 30 and s["PE_VOL"] > 50:
+            elif s["PE_LTP_CHG"] > HFT_LTP_MOVE_PCT and mfi < HFT_MFI_OVERSOLD and s["PE_VOL"] > HFT_PE_VOL_MIN:
                 flows["Aggressive Put Buy"] += pe_act
                 strike_flows.setdefault(strike, {})["Aggressive Put Buy"] = strike_flows.get(strike, {}).get("Aggressive Put Buy", 0) + pe_act
-            elif s["PE_OI_CHG"] > 5 and s["PE_LTP_CHG"] < -2 and mfi > 70:
+            elif s["PE_OI_CHG"] > HFT_OI_CHG_PCT and s["PE_LTP_CHG"] < -HFT_LTP_MOVE_PCT and mfi > HFT_MFI_OVERBOUGHT:
                 flows["Heavy Put Write"] += pe_act
                 strike_flows.setdefault(strike, {})["Heavy Put Write"] = strike_flows.get(strike, {}).get("Heavy Put Write", 0) + pe_act
-            elif s["PE_LTP_CHG"] < -1 and s["PE_OI_CHG"] > 3:
+            elif s["PE_LTP_CHG"] < -1 and s["PE_OI_CHG"] > HFT_OI_CHG_MIN:
                 flows["Put Write"] += pe_act
                 strike_flows.setdefault(strike, {})["Put Write"] = strike_flows.get(strike, {}).get("Put Write", 0) + pe_act
 
@@ -1514,9 +1534,15 @@ async def _fetch_gex_once(index_name: str, underlying_scrip: str, expiry: str) -
 
             call_oi    = float(ce.get("oi", 0) or 0)
             put_oi     = float(pe.get("oi", 0) or 0)
+            prev_call_oi = float(ce.get("previous_oi", 0) or 0)
+            prev_put_oi  = float(pe.get("previous_oi", 0) or 0)
             # Dhan provides greeks directly — use them instead of Black-Scholes
-            call_gamma = float((ce.get("greeks") or {}).get("gamma", 0) or 0)
-            put_gamma  = float((pe.get("greeks") or {}).get("gamma", 0) or 0)
+            ce_greeks = ce.get("greeks") or {}
+            pe_greeks = pe.get("greeks") or {}
+            call_gamma = float(ce_greeks.get("gamma", 0) or 0)
+            put_gamma  = float(pe_greeks.get("gamma", 0) or 0)
+            call_theta = float(ce_greeks.get("theta", 0) or 0)
+            put_theta  = float(pe_greeks.get("theta", 0) or 0)
 
             # Dealer GEX: long calls (+γ), short puts (−γ)
             # GEX = gamma × OI × lot_size × spot² / 100
@@ -1528,8 +1554,16 @@ async def _fetch_gex_once(index_name: str, underlying_scrip: str, expiry: str) -
                 "strike":   strike,
                 "call_oi":  call_oi,
                 "put_oi":   put_oi,
+                "previous_call_oi": prev_call_oi,
+                "previous_put_oi":  prev_put_oi,
+                "call_oi_change":  call_oi - prev_call_oi,
+                "put_oi_change":   put_oi - prev_put_oi,
+                "call_volume":     float(ce.get("volume", 0) or 0),
+                "put_volume":      float(pe.get("volume", 0) or 0),
                 "call_iv":  float(ce.get("implied_volatility", 0) or 0),
                 "put_iv":   float(pe.get("implied_volatility", 0) or 0),
+                "call_theta": call_theta,
+                "put_theta":  put_theta,
                 "call_gex": round(call_gex, 2),
                 "put_gex":  round(put_gex, 2),
                 "net_gex":  round(net_gex, 2),
@@ -1561,6 +1595,70 @@ async def _fetch_gex_once(index_name: str, underlying_scrip: str, expiry: str) -
         return False
 
 
+def _compute_and_store_sentiment(index_name: str, cache_key: str) -> None:
+    """Compute sentiment from gex_cache and store in sentiment_cache + sentiment_history."""
+    data = gex_cache.get(cache_key)
+    if not data or not data.get("strikes"):
+        return
+    prev = sentiment_prev.get(index_name, {})
+    try:
+        today = date.today()
+        exp_date = None
+        if data.get("expiry"):
+            try:
+                exp_date = datetime.strptime(data["expiry"], "%Y-%m-%d").date()
+            except ValueError:
+                pass
+        days_left = (exp_date - today).days if exp_date else None
+
+        out = compute_sentiment(
+            data,
+            index_name=index_name,
+            expiry=data.get("expiry", ""),
+            days_to_expiry=days_left,
+            prev_skew=prev.get("skew"),
+            prev_atm_iv=prev.get("atm_iv"),
+        )
+        out["computed_at"] = int(time.time() * 1000)
+        sentiment_cache[index_name] = out
+
+        # Append to history for time-series
+        hist = sentiment_history[index_name]
+        hist.append({"ts": out["computed_at"], "score": out["score"], "signal": out["overall_signal"]})
+        if len(hist) > SENTIMENT_MAX_HISTORY:
+            sentiment_history[index_name] = hist[-SENTIMENT_MAX_HISTORY:]
+
+        # Store prev for next cycle
+        sentiment_prev[index_name] = {
+            "skew": out["features"].get("iv_skew"),
+            "atm_iv": out["features"].get("atm_iv"),
+        }
+        ml_dir, ml_conf = ml_predict(extract_ml_features(out))
+        out["ml_direction"] = ml_dir
+        out["ml_confidence"] = round(ml_conf, 3)
+    except Exception as e:
+        logger.warning(f"Sentiment compute error [{index_name}]: {e}")
+
+
+def _save_sentiment_eod(index_name: str, cache_key: str) -> None:
+    """Save EOD snapshot to disk for ML training."""
+    if not SNAPSHOT_DIR:
+        return
+    data = gex_cache.get(cache_key)
+    if not data:
+        return
+    try:
+        os.makedirs(SENTIMENT_DIR, exist_ok=True)
+        eod_dir = os.path.join(SENTIMENT_DIR, "eod")
+        os.makedirs(eod_dir, exist_ok=True)
+        today = date.today().strftime("%Y-%m-%d")
+        path = os.path.join(eod_dir, f"{index_name}_{today}.json")
+        with open(path, "w") as fh:
+            fh.write(_dumps(data))
+    except Exception as e:
+        logger.warning(f"Sentiment EOD save error [{index_name}]: {e}")
+
+
 async def options_poller_task():
     """Background: poll Dhan options chain and recompute GEX.
 
@@ -1579,6 +1677,9 @@ async def options_poller_task():
         await asyncio.sleep(gap)
     while True:
         rate_limited = False
+        now_ist = datetime.now(IST)
+        today_str = now_ist.strftime("%Y-%m-%d")
+        is_eod = now_ist.hour >= 15 and now_ist.minute >= 25  # NSE closes 15:30
         for idx_name, uid in UNDERLYING_IDS.items():
             expiry = await _default_expiry_from_api(idx_name)
             if not expiry:
@@ -1588,6 +1689,13 @@ async def options_poller_task():
                 rate_limited = True
                 logger.warning(f"Options poll failed [{idx_name}] — backing off (possible 429 rate limit when market active)")
                 break
+            cache_key = f"{idx_name}:{expiry}"
+            _compute_and_store_sentiment(idx_name, cache_key)
+            if is_eod:
+                eod_key = f"{idx_name}:{today_str}"
+                if eod_key not in _sentiment_eod_saved:
+                    _save_sentiment_eod(idx_name, cache_key)
+                    _sentiment_eod_saved.add(eod_key)
             await asyncio.sleep(gap)
 
         # On rate limit, add 2 min cooldown to avoid hammering Dhan when market is busy
@@ -2113,6 +2221,61 @@ def list_gex():
     return {k: v for k, v in gex_cache.items()}
 
 
+@app.get("/api/sentiment/{symbol}")
+async def get_sentiment(symbol: str):
+    """Return Nifty options sentiment: scorecard, strike map, overall signal.
+
+    Requires DHAN_TOKEN_OPTIONS. Data comes from options chain poll.
+    """
+    idx = _resolve_index(symbol)
+    if not idx:
+        return JSONResponse({"error": f"Unknown index: {symbol}"}, 400)
+    data = sentiment_cache.get(idx)
+    if data:
+        return data
+    # Try to compute on-demand from gex_cache
+    expiry = await _default_expiry_from_api(idx)
+    if expiry:
+        cache_key = f"{idx}:{expiry}"
+        gex_data = gex_cache.get(cache_key)
+        if gex_data:
+            _compute_and_store_sentiment(idx, cache_key)
+            return sentiment_cache.get(idx, {})
+    token_hint = "" if DHAN_TOKEN_OPTIONS else " — set DHAN_TOKEN_OPTIONS to enable"
+    return JSONResponse(
+        {"error": f"No sentiment data yet{token_hint}"},
+        status_code=202,
+    )
+
+
+@app.get("/api/sentiment/{symbol}/history")
+def get_sentiment_history(symbol: str):
+    """Return time-series of sentiment scores for charting."""
+    idx = _resolve_index(symbol)
+    if not idx:
+        return JSONResponse({"error": f"Unknown index: {symbol}"}, 400)
+    return {"symbol": idx, "series": sentiment_history.get(idx, [])}
+
+
+@app.get("/api/sentiment/status")
+def get_sentiment_status():
+    """Return poller status and last update time per index."""
+    status = {}
+    for idx in UNDERLYING_IDS:
+        data = sentiment_cache.get(idx)
+        if data:
+            status[idx] = {"last_update": data.get("computed_at"), "score": data.get("score")}
+    return {"indices": status}
+
+
+@app.post("/api/sentiment/train")
+async def train_sentiment_ml(index: str = "NIFTY"):
+    """Trigger ML model training. Uses EOD snapshots or Dhan rolling option. Runs async."""
+    from ml_sentiment import train_and_save
+    ok = await train_and_save(index)
+    return {"ok": ok, "index": index}
+
+
 @app.get("/api/hft_scanner/{symbol}")
 async def get_hft_scanner(symbol: str):
     """Return HFT scanner time-series for a NIFTY / BANKNIFTY index.
@@ -2362,11 +2525,13 @@ async def get_strike_calibration(symbol: str, window: int = 120):
                 pe_ltp_chg.append((pe_ltp - pe_ltp_prev) / pe_ltp_prev * 100)
             prev_raw[sk] = r
 
-    def _stats(arr: list, name: str) -> dict:
+    def _stats(arr: list, exclude_zero: bool = False, p10: bool = False) -> dict:
         arr = [x for x in arr if x is not None and not (isinstance(x, float) and math.isnan(x))]
+        if exclude_zero:
+            arr = [x for x in arr if abs(x) > 0.01]
         if not arr:
-            return {"n": 0, "min": 0, "p25": 0, "p50": 0, "p75": 0, "p90": 0, "max": 0}
-        return {
+            return {"n": 0, "min": 0, "p10": 0, "p25": 0, "p50": 0, "p75": 0, "p90": 0, "max": 0}
+        out = {
             "n": len(arr),
             "min": round(min(arr), 2),
             "p25": round(_percentile(arr, 25), 2),
@@ -2375,13 +2540,36 @@ async def get_strike_calibration(symbol: str, window: int = 120):
             "p90": round(_percentile(arr, 90), 2),
             "max": round(max(arr), 2),
         }
+        if p10:
+            out["p10"] = round(_percentile(arr, 10), 0) if arr else 0
+        return out
 
-    ce_oi_st = _stats(ce_oi_chg, "CE_OI_CHG")
-    pe_oi_st = _stats(pe_oi_chg, "PE_OI_CHG")
-    ce_ltp_st = _stats(ce_ltp_chg, "CE_LTP_CHG")
-    pe_ltp_st = _stats(pe_ltp_chg, "PE_LTP_CHG")
-    ce_vol_st = _stats(ce_vol, "CE_VOL")
-    pe_vol_st = _stats(pe_vol, "PE_VOL")
+    ce_oi_st = _stats(ce_oi_chg, exclude_zero=True)
+    pe_oi_st = _stats(pe_oi_chg, exclude_zero=True)
+    ce_ltp_st = _stats(ce_ltp_chg)
+    pe_ltp_st = _stats(pe_ltp_chg)
+    ce_vol_st = _stats(ce_vol, p10=True)
+    pe_vol_st = _stats(pe_vol, p10=True)
+
+    # OI_CHG: use p75 of non-zero values; never return 0 (min 3.0)
+    oi_chg_p75 = (ce_oi_st["p75"] + pe_oi_st["p75"]) / 2 if (ce_oi_st["n"] or pe_oi_st["n"]) else 0
+    hft_oi_chg = round(max(oi_chg_p75, 3.0), 1)
+
+    # LTP_STABLE: use p25 of abs(LTP_CHG); fallback 1.5
+    ltp_p25 = max(abs(ce_ltp_st.get("p25", 0)), abs(pe_ltp_st.get("p25", 0)))
+    hft_ltp_stable = round(max(ltp_p25, 1.0), 1) if (ce_ltp_st["n"] or pe_ltp_st["n"]) else 1.5
+
+    # VOL: index-specific. Dhan = cumulative daily; p25 can be millions for NIFTY. Use p10 when < 500K.
+    _vol_defaults = {"NIFTY": (100_000, 100_000), "BANKNIFTY": (20_000, 20_000), "FINNIFTY": (1_000, 5_000), "MIDCPNIFTY": (10_000, 50_000)}
+    def_ce, def_pe = _vol_defaults.get(idx, (50_000, 50_000))
+    ce_arr = [x for x in ce_vol if x is not None]
+    pe_arr = [x for x in pe_vol if x is not None]
+    ce_p10 = _percentile(ce_arr, 10) if ce_arr else 0
+    pe_p10 = _percentile(pe_arr, 10) if pe_arr else 0
+    hft_ce_vol = int(min(ce_p10, 500_000)) if ce_p10 and ce_p10 < 500_000 else def_ce
+    hft_pe_vol = int(min(pe_p10, 500_000)) if pe_p10 and pe_p10 < 500_000 else def_pe
+    hft_ce_vol = max(hft_ce_vol, 500)
+    hft_pe_vol = max(hft_pe_vol, 500)
 
     return {
         "symbol": idx,
@@ -2395,17 +2583,18 @@ async def get_strike_calibration(symbol: str, window: int = 120):
             "pe_vol": pe_vol_st,
         },
         "suggested_cutoffs": {
-            "HFT_OI_CHG_PCT": round((ce_oi_st["p75"] + pe_oi_st["p75"]) / 2, 1),
-            "HFT_LTP_STABLE_PCT": round(max(abs(ce_ltp_st.get("p25", 0)), abs(pe_ltp_st.get("p25", 0)), 1.0), 1),
-            "HFT_CE_VOL_MIN": int(ce_vol_st["p25"]) if ce_vol_st["n"] else 100,
-            "HFT_PE_VOL_MIN": int(pe_vol_st["p25"]) if pe_vol_st["n"] else 50,
+            "HFT_OI_CHG_PCT": hft_oi_chg,
+            "HFT_LTP_STABLE_PCT": hft_ltp_stable,
+            "HFT_CE_VOL_MIN": hft_ce_vol,
+            "HFT_PE_VOL_MIN": hft_pe_vol,
         },
         "copy_paste": (
-            f"# Suggested from {idx} calibration (n={ce_oi_st['n']} samples)\n"
-            f"HFT_OI_CHG_PCT={round((ce_oi_st['p75'] + pe_oi_st['p75']) / 2, 1)}\n"
-            f"HFT_LTP_STABLE_PCT={round(max(abs(ce_ltp_st.get('p25', 0)), abs(pe_ltp_st.get('p25', 0)), 1.0), 1)}\n"
-            f"HFT_CE_VOL_MIN={int(ce_vol_st['p25']) if ce_vol_st['n'] else 100}\n"
-            f"HFT_PE_VOL_MIN={int(pe_vol_st['p25']) if pe_vol_st['n'] else 50}\n"
+            f"# Suggested from {idx} calibration (n={ce_oi_st['n']}+{pe_oi_st['n']} OI samples)\n"
+            f"# VOL: NIFTY ~lakhs/min; Dhan returns cumulative daily — 1L = 100000\n"
+            f"HFT_OI_CHG_PCT={hft_oi_chg}\n"
+            f"HFT_LTP_STABLE_PCT={hft_ltp_stable}\n"
+            f"HFT_CE_VOL_MIN={hft_ce_vol}\n"
+            f"HFT_PE_VOL_MIN={hft_pe_vol}\n"
         ),
     }
 
@@ -2802,6 +2991,7 @@ async def startup():
     _do_daily_reset()       # sets _last_reset_date = today; clears stale state
     load_all_snapshots()    # restore today's candles from disk (no-op if no disk mounted)
     load_hft_from_disk()    # restore today's HFT scanner history from disk
+    load_ml_model()        # load sentiment ML model if trained
     asyncio.create_task(dhan_feed_task())
     asyncio.create_task(_daily_reset_task())
     asyncio.create_task(_post_mcx_cleanup_task())
