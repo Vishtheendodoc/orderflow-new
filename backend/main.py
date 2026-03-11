@@ -511,17 +511,6 @@ def _ist_date_str() -> str:
     return datetime.now(IST).strftime("%Y-%m-%d")
 
 
-def _is_market_open_ist() -> bool:
-    """NSE F&O market hours: open 9:00 AM–11:55 PM IST. Closed 11:55 PM–9:00 AM."""
-    now = datetime.now(IST)
-    h, m = now.hour, now.minute
-    if h < 9:
-        return False
-    if h == 23 and m >= 55:
-        return False
-    return True
-
-
 def _do_daily_reset():
     """Reset all engines for new trading day. Clears candles, CVD, preserves subscriptions.
     On cold start (restart/redeploy): only clear RAM; do NOT delete disk — load_all_snapshots
@@ -1687,9 +1676,6 @@ async def options_poller_task():
         await _fetch_expiry_list(idx_name)
         await asyncio.sleep(gap)
     while True:
-        if not _is_market_open_ist():
-            await asyncio.sleep(300)  # 5 min when closed (11:55 PM–9:00 AM)
-            continue
         rate_limited = False
         now_ist = datetime.now(IST)
         today_str = now_ist.strftime("%Y-%m-%d")
