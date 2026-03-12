@@ -110,6 +110,13 @@ HFT_CE_VOL_MIN      = int(os.getenv("HFT_CE_VOL_MIN", "100000"))          # min 
 HFT_PE_VOL_MIN      = int(os.getenv("HFT_PE_VOL_MIN", "100000"))          # min PE volume; index-specific
 HFT_MFI_OVERBOUGHT  = float(os.getenv("HFT_MFI_OVERBOUGHT", "70"))        # MFI overbought
 HFT_MFI_OVERSOLD    = float(os.getenv("HFT_MFI_OVERSOLD", "30"))         # MFI oversold
+# Per-index HFT defaults (from calibration). Env overrides: HFT_OI_CHG_PCT_NIFTY, etc.
+_HFT_DEFAULTS = {
+    "NIFTY":      {"oi_chg_pct": 3.0, "ltp_stable": 1.6, "ce_vol": 100_000, "pe_vol": 100_000},
+    "BANKNIFTY":  {"oi_chg_pct": 3.0, "ltp_stable": 1.0, "ce_vol": 62_742,  "pe_vol": 114_525},
+    "FINNIFTY":   {"oi_chg_pct": 3.0, "ltp_stable": 1.0, "ce_vol": 1_000,   "pe_vol": 5_000},
+    "MIDCPNIFTY": {"oi_chg_pct": 3.0, "ltp_stable": 1.0, "ce_vol": 10_800,  "pe_vol": 14_040},
+}
 # Underlying security IDs (NSE index) used for options chain
 UNDERLYING_IDS = {
     "NIFTY":      "13",
@@ -1276,6 +1283,19 @@ def _find_gex_flip(strikes: list, spot: float) -> Optional[float]:
     return flip
 
 
+def _get_hft_thresholds(index_name: str) -> dict:
+    """Return HFT thresholds for the given index. Per-index env overrides, else defaults."""
+    d = _HFT_DEFAULTS.get(index_name, {"oi_chg_pct": 3.0, "ltp_stable": 1.0, "ce_vol": 50_000, "pe_vol": 50_000})
+    return {
+        "oi_chg_pct":   float(os.getenv(f"HFT_OI_CHG_PCT_{index_name}", os.getenv("HFT_OI_CHG_PCT", str(d["oi_chg_pct"])))),
+        "ltp_stable":   float(os.getenv(f"HFT_LTP_STABLE_PCT_{index_name}", os.getenv("HFT_LTP_STABLE_PCT", str(d["ltp_stable"])))),
+        "ltp_move":     float(os.getenv("HFT_LTP_MOVE_PCT", "2")),
+        "oi_chg_min":   float(os.getenv("HFT_OI_CHG_MIN", "3")),
+        "ce_vol_min":   int(os.getenv(f"HFT_CE_VOL_MIN_{index_name}", os.getenv("HFT_CE_VOL_MIN", str(d["ce_vol"])))),
+        "pe_vol_min":   int(os.getenv(f"HFT_PE_VOL_MIN_{index_name}", os.getenv("HFT_PE_VOL_MIN", str(d["pe_vol"])))),
+    }
+
+
 def _compute_hft_snapshot(index_name: str, spot: float, oc: dict) -> None:
     """Derive one time-series entry for the HFT scanner chart from a raw option-chain snapshot.
 
@@ -1354,6 +1374,14 @@ def _compute_hft_snapshot(index_name: str, spot: float, oc: dict) -> None:
         interval = min(diffs) or 50.0
     nearby = [s for s in strikes_data if abs(s["strike"] - spot) <= 5 * interval]
 
+    th = _get_hft_thresholds(index_name)
+    oi_chg_pct = th["oi_chg_pct"]
+    ltp_stable = th["ltp_stable"]
+    ltp_move = th["ltp_move"]
+    oi_chg_min = th["oi_chg_min"]
+    ce_vol_min = th["ce_vol_min"]
+    pe_vol_min = th["pe_vol_min"]
+
     # ── Flow classification ───────────────────────────────────────────────────
     flows: dict = {
         "Aggressive Call Buy":  0.0,
@@ -1373,30 +1401,30 @@ def _compute_hft_snapshot(index_name: str, spot: float, oc: dict) -> None:
         pe_act = s["PE_OI"] * s["PE_LTP"]
 
         if ce_act > 0:
-            if s["CE_OI_CHG"] > HFT_OI_CHG_PCT and abs(s["CE_LTP_CHG"]) < HFT_LTP_STABLE_PCT and s["CE_VOL"] > HFT_CE_VOL_MIN:
+            if s["CE_OI_CHG"] > oi_chg_pct and abs(s["CE_LTP_CHG"]) < ltp_stable and s["CE_VOL"] > ce_vol_min:
                 flows["Dark Pool CE"] += ce_act
                 strike_flows.setdefault(strike, {})["Dark Pool CE"] = strike_flows.get(strike, {}).get("Dark Pool CE", 0) + ce_act
-            elif s["CE_LTP_CHG"] > HFT_LTP_MOVE_PCT and mfi > HFT_MFI_OVERBOUGHT and s["CE_VOL"] > HFT_CE_VOL_MIN:
+            elif s["CE_LTP_CHG"] > ltp_move and mfi > HFT_MFI_OVERBOUGHT and s["CE_VOL"] > ce_vol_min:
                 flows["Aggressive Call Buy"] += ce_act
                 strike_flows.setdefault(strike, {})["Aggressive Call Buy"] = strike_flows.get(strike, {}).get("Aggressive Call Buy", 0) + ce_act
-            elif s["CE_OI_CHG"] > HFT_OI_CHG_PCT and s["CE_LTP_CHG"] < -HFT_LTP_MOVE_PCT and mfi < HFT_MFI_OVERSOLD:
+            elif s["CE_OI_CHG"] > oi_chg_pct and s["CE_LTP_CHG"] < -ltp_move and mfi < HFT_MFI_OVERSOLD:
                 flows["Heavy Call Short"] += ce_act
                 strike_flows.setdefault(strike, {})["Heavy Call Short"] = strike_flows.get(strike, {}).get("Heavy Call Short", 0) + ce_act
-            elif s["CE_LTP_CHG"] < -1 and s["CE_OI_CHG"] > HFT_OI_CHG_MIN:
+            elif s["CE_LTP_CHG"] < -1 and s["CE_OI_CHG"] > oi_chg_min:
                 flows["Call Short"] += ce_act
                 strike_flows.setdefault(strike, {})["Call Short"] = strike_flows.get(strike, {}).get("Call Short", 0) + ce_act
 
         if pe_act > 0:
-            if s["PE_OI_CHG"] > HFT_OI_CHG_PCT and abs(s["PE_LTP_CHG"]) < HFT_LTP_STABLE_PCT and s["PE_VOL"] > HFT_PE_VOL_MIN:
+            if s["PE_OI_CHG"] > oi_chg_pct and abs(s["PE_LTP_CHG"]) < ltp_stable and s["PE_VOL"] > pe_vol_min:
                 flows["Dark Pool PE"] += pe_act
                 strike_flows.setdefault(strike, {})["Dark Pool PE"] = strike_flows.get(strike, {}).get("Dark Pool PE", 0) + pe_act
-            elif s["PE_LTP_CHG"] > HFT_LTP_MOVE_PCT and mfi < HFT_MFI_OVERSOLD and s["PE_VOL"] > HFT_PE_VOL_MIN:
+            elif s["PE_LTP_CHG"] > ltp_move and mfi < HFT_MFI_OVERSOLD and s["PE_VOL"] > pe_vol_min:
                 flows["Aggressive Put Buy"] += pe_act
                 strike_flows.setdefault(strike, {})["Aggressive Put Buy"] = strike_flows.get(strike, {}).get("Aggressive Put Buy", 0) + pe_act
-            elif s["PE_OI_CHG"] > HFT_OI_CHG_PCT and s["PE_LTP_CHG"] < -HFT_LTP_MOVE_PCT and mfi > HFT_MFI_OVERBOUGHT:
+            elif s["PE_OI_CHG"] > oi_chg_pct and s["PE_LTP_CHG"] < -ltp_move and mfi > HFT_MFI_OVERBOUGHT:
                 flows["Heavy Put Write"] += pe_act
                 strike_flows.setdefault(strike, {})["Heavy Put Write"] = strike_flows.get(strike, {}).get("Heavy Put Write", 0) + pe_act
-            elif s["PE_LTP_CHG"] < -1 and s["PE_OI_CHG"] > HFT_OI_CHG_MIN:
+            elif s["PE_LTP_CHG"] < -1 and s["PE_OI_CHG"] > oi_chg_min:
                 flows["Put Write"] += pe_act
                 strike_flows.setdefault(strike, {})["Put Write"] = strike_flows.get(strike, {}).get("Put Write", 0) + pe_act
 
@@ -1416,6 +1444,7 @@ def _compute_hft_snapshot(index_name: str, spot: float, oc: dict) -> None:
             "ce_theta": round(s["CE_THETA"], 2), "pe_theta": round(s["PE_THETA"], 2),
             "ce_vega": round(s["CE_VEGA"], 2), "pe_vega": round(s["PE_VEGA"], 2),
             "ce_oi_chg": round(s["CE_OI_CHG"], 2), "pe_oi_chg": round(s["PE_OI_CHG"], 2),
+            "ce_ltp_chg": round(s["CE_LTP_CHG"], 2), "pe_ltp_chg": round(s["PE_LTP_CHG"], 2),
         }
         for s in nearby
     }
@@ -2276,29 +2305,147 @@ async def train_sentiment_ml(index: str = "NIFTY"):
     return {"ok": ok, "index": index}
 
 
+def _recompute_flows_from_strikes_raw(series: list, index_name: str, conviction: str) -> list:
+    """Re-compute flows from strikes_raw using percentile-derived thresholds.
+    conviction: 'high' | 'medium'. Returns series with updated flows per snap.
+    """
+    snaps_with_raw = [s for s in series if (s.get("strikes_raw") or {}) and any(
+        (r.get("ce_ltp_chg") is not None or r.get("pe_ltp_chg") is not None)
+        for r in (s.get("strikes_raw") or {}).values()
+    )]
+    if len(snaps_with_raw) < 10:
+        return series
+
+    ce_oi_chg, pe_oi_chg = [], []
+    ce_ltp_chg, pe_ltp_chg = [], []
+    abs_ltp_chg = []
+    ce_vol, pe_vol = [], []
+    for snap in snaps_with_raw:
+        for r in (snap.get("strikes_raw") or {}).values():
+            co = r.get("ce_oi_chg")
+            po = r.get("pe_oi_chg")
+            if co is not None:
+                ce_oi_chg.append(co)
+            if po is not None:
+                pe_oi_chg.append(po)
+            cl = r.get("ce_ltp_chg")
+            pl = r.get("pe_ltp_chg")
+            if cl is not None:
+                ce_ltp_chg.append(cl)
+                abs_ltp_chg.append(abs(cl))
+            if pl is not None:
+                pe_ltp_chg.append(pl)
+                abs_ltp_chg.append(abs(pl))
+            cv = r.get("ce_vol")
+            pv = r.get("pe_vol")
+            if cv is not None:
+                ce_vol.append(cv)
+            if pv is not None:
+                pe_vol.append(pv)
+
+    def _p(arr: list, p: float) -> float:
+        arr = [x for x in arr if x is not None and not (isinstance(x, float) and math.isnan(x))]
+        return _percentile(arr, p) if arr else 0.0
+
+    is_high = conviction == "high"
+    oi_p = 98 if (is_high and index_name == "MIDCPNIFTY") else (90 if is_high else 75)
+    oi_chg_pct = max(_p(ce_oi_chg, oi_p), _p(pe_oi_chg, oi_p), 2.0)
+    oi_chg_min = _p(ce_oi_chg + pe_oi_chg, 75 if is_high else 50) or 2.0
+    ltp_stable_p75 = _p(abs_ltp_chg, 75) if abs_ltp_chg else 1.0
+    ltp_stable_p90 = _p(abs_ltp_chg, 90) if abs_ltp_chg else 1.5
+    ltp_stable = max(ltp_stable_p75 if is_high else ltp_stable_p90, 1.0)
+    ltp_move = max(_p(abs_ltp_chg, 75 if is_high else 50), 1.0)
+    ce_vol_p75 = _p(ce_vol, 75)
+    pe_vol_p75 = _p(pe_vol, 75)
+    ce_vol_p50 = _p(ce_vol, 50)
+    pe_vol_p50 = _p(pe_vol, 50)
+    ce_vol_p10 = _p(ce_vol, 10)
+    pe_vol_p10 = _p(pe_vol, 10)
+    ce_vol_min = ce_vol_p75 if is_high else ce_vol_p50
+    pe_vol_min = pe_vol_p75 if is_high else pe_vol_p50
+    if ce_vol_p75 > 500_000:
+        ce_vol_min = min(ce_vol_min, 100_000) if ce_vol_min else min(ce_vol_p10, 100_000)
+    if pe_vol_p75 > 500_000:
+        pe_vol_min = min(pe_vol_min, 100_000) if pe_vol_min else min(pe_vol_p10, 100_000)
+    ce_vol_min = max(ce_vol_min or 0, 100)
+    pe_vol_min = max(pe_vol_min or 0, 100)
+
+    out = []
+    for snap in series:
+        raw = snap.get("strikes_raw") or {}
+        if not raw:
+            out.append(snap)
+            continue
+        mfi = snap.get("mfi") or 0
+        flows = {
+            "Aggressive Call Buy": 0.0, "Heavy Call Short": 0.0, "Aggressive Put Buy": 0.0,
+            "Heavy Put Write": 0.0, "Dark Pool CE": 0.0, "Dark Pool PE": 0.0,
+            "Call Short": 0.0, "Put Write": 0.0,
+        }
+        for _sk, r in raw.items():
+            ce_oi = float(r.get("ce_oi") or 0)
+            pe_oi = float(r.get("pe_oi") or 0)
+            ce_ltp = float(r.get("ce_ltp") or 0)
+            pe_ltp = float(r.get("pe_ltp") or 0)
+            ce_act = ce_oi * ce_ltp
+            pe_act = pe_oi * pe_ltp
+            co_chg = float(r.get("ce_oi_chg") or 0)
+            po_chg = float(r.get("pe_oi_chg") or 0)
+            cl_chg = float(r.get("ce_ltp_chg") or 0)
+            pl_chg = float(r.get("pe_ltp_chg") or 0)
+            cv = float(r.get("ce_vol") or 0)
+            pv = float(r.get("pe_vol") or 0)
+
+            if ce_act > 0:
+                if co_chg > oi_chg_pct and abs(cl_chg) < ltp_stable and cv > ce_vol_min:
+                    flows["Dark Pool CE"] += ce_act
+                elif cl_chg > ltp_move and mfi > HFT_MFI_OVERBOUGHT and cv > ce_vol_min:
+                    flows["Aggressive Call Buy"] += ce_act
+                elif co_chg > oi_chg_pct and cl_chg < -ltp_move and mfi < HFT_MFI_OVERSOLD:
+                    flows["Heavy Call Short"] += ce_act
+                elif cl_chg < -1 and co_chg > oi_chg_min:
+                    flows["Call Short"] += ce_act
+
+            if pe_act > 0:
+                if po_chg > oi_chg_pct and abs(pl_chg) < ltp_stable and pv > pe_vol_min:
+                    flows["Dark Pool PE"] += pe_act
+                elif pl_chg > ltp_move and mfi < HFT_MFI_OVERSOLD and pv > pe_vol_min:
+                    flows["Aggressive Put Buy"] += pe_act
+                elif po_chg > oi_chg_pct and pl_chg < -ltp_move and mfi > HFT_MFI_OVERBOUGHT:
+                    flows["Heavy Put Write"] += pe_act
+                elif pl_chg < -1 and po_chg > oi_chg_min:
+                    flows["Put Write"] += pe_act
+
+        new_snap = {**snap, "flows": {k: round(v, 2) for k, v in flows.items() if v > 0}}
+        out.append(new_snap)
+    return out
+
+
 @app.get("/api/hft_scanner/{symbol}")
-async def get_hft_scanner(symbol: str):
+async def get_hft_scanner(symbol: str, conviction: str = ""):
     """Return HFT scanner time-series for a NIFTY / BANKNIFTY index.
 
+    Query: ?conviction=medium|high — re-compute flows from percentiles. Omit for stored flows.
     Response: { symbol, spot, updated_at, series: [{t, ts, spot, mfi, flows}] }
-    Each entry is one option-chain poll cycle (default every OPTIONS_POLL_SEC seconds).
     """
     idx = _resolve_index(symbol)
     if not idx:
         return JSONResponse({"error": f"Unknown index: {symbol}"}, status_code=400)
 
     history = list(hft_scanner_history.get(idx, []))
-    # Fall back to disk if RAM is empty (cold start before first poll cycle)
     if not history:
         history = _load_hft_from_disk(idx)
         if history:
-            hft_scanner_history[idx] = history  # warm up RAM cache
+            hft_scanner_history[idx] = history
     if not history:
         token_hint = "" if DHAN_TOKEN_OPTIONS else " — set DHAN_TOKEN_OPTIONS to enable"
         return JSONResponse(
             {"symbol": idx, "series": [], "error": f"No HFT scanner data yet{token_hint}"},
             status_code=202,
         )
+
+    if conviction and conviction in ("medium", "high"):
+        history = _recompute_flows_from_strikes_raw(history, idx, conviction)
 
     last = history[-1]
     return {

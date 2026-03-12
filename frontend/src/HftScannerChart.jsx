@@ -202,11 +202,25 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
   const [dominantFlow,  setDominantFlow]  = useState(null);
   const [statusMsg,     setStatusMsg]     = useState("waiting…");
   const [tfMin,         setTfMin]         = useState(1);
+  const [conviction,    setConviction]   = useState(() => {
+    try {
+      const s = localStorage.getItem("hft_conviction");
+      return s === "medium" || s === "high" ? s : "high";
+    } catch {
+      return "high";
+    }
+  });
   const [visibleFlows,  setVisibleFlows]  = useState(() => new Set(STACK_ORDER));
   const [pricePaneH,    setPricePaneH]    = useState(PRICE_PANE_DEF); // % height
 
   const visibleFlowsRef = useRef(visibleFlows);
   useEffect(() => { visibleFlowsRef.current = visibleFlows; }, [visibleFlows]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("hft_conviction", conviction);
+    } catch (_) {}
+  }, [conviction]);
 
   /* ── Effect 1: create single chart with candlestick + flow histogram ──── */
   /* Same chart = shared time axis; candles and HFT bars align by design. */
@@ -375,8 +389,9 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
   const fetchData = useCallback(async () => {
     if (!symbol || !apiBase) return;
     const idx = resolveIdx(symbol);
+    const qs = conviction ? `?conviction=${encodeURIComponent(conviction)}` : "";
     try {
-      const res  = await fetch(`${apiBase}/api/hft_scanner/${encodeURIComponent(idx)}`);
+      const res  = await fetch(`${apiBase}/api/hft_scanner/${encodeURIComponent(idx)}${qs}`);
       const json = await res.json();
       if (json.error && !json.series?.length) {
         setStatusMsg(json.error);
@@ -388,7 +403,7 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
     } catch {
       setStatusMsg("fetch error");
     }
-  }, [symbol, apiBase, updateChart]);
+  }, [symbol, apiBase, conviction, updateChart]);
 
   /* ── Polling ────────────────────────────────────────────────────────────── */
   useEffect(() => {
@@ -464,6 +479,24 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
         <span className="chart-title">{resolveIdx(symbol)} — Institutional Flow</span>
 
         <div className="chart-actions">
+          {/* Conviction toggle */}
+          <span style={{ marginRight: 6, fontSize: 10, color: "#64748b" }}>Conviction:</span>
+          {["medium", "high"].map((c) => (
+            <button
+              key={c}
+              type="button"
+              className="chart-fit-btn"
+              onClick={() => setConviction(c)}
+              style={{
+                fontWeight:  conviction === c ? 700 : 400,
+                color:      conviction === c ? "#0ea5e9" : undefined,
+                borderColor: conviction === c ? "#0ea5e9" : undefined,
+              }}
+            >
+              {c === "medium" ? "Medium" : "High"}
+            </button>
+          ))}
+          <span style={{ width: 12, display: "inline-block" }} />
           {/* Timeframe buttons */}
           {TIMEFRAMES.map(({ label, minutes }) => (
             <button
