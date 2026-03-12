@@ -259,29 +259,29 @@ export default function OrderflowChart({ candles, symbol, features = {}, isIndex
       const oi       = c.oi ?? 0;
       const oiChange = c.oi_change ?? 0;
 
-      /* Row 0: Tick Delta — strongest signal, highest contrast */
-      ctx.fillStyle = delta >= 0 ? "rgba(0,210,110,0.28)" : "rgba(255,60,60,0.28)";
+      /* Row 0: Tick Delta — strong contrast for visibility */
+      ctx.fillStyle = delta >= 0 ? "rgba(5,150,105,0.45)" : "rgba(220,38,38,0.45)";
       ctx.fillRect(bx, 2, bw, ROW_H - 4);
-      ctx.fillStyle = delta >= 0 ? "#00f088" : "#ff5050";
+      ctx.fillStyle = delta >= 0 ? "#059669" : "#dc2626";
       ctx.fillText(fmtVol(delta), cx, ROW_H * 0.5);
 
-      /* Row 1: CVD — cumulative; slightly softer than delta */
-      ctx.fillStyle = cvd >= 0 ? "rgba(0,210,110,0.20)" : "rgba(255,60,60,0.20)";
+      /* Row 1: CVD — cumulative; clear green/red */
+      ctx.fillStyle = cvd >= 0 ? "rgba(5,150,105,0.38)" : "rgba(220,38,38,0.38)";
       ctx.fillRect(bx, ROW_H + 2, bw, ROW_H - 4);
-      ctx.fillStyle = cvd >= 0 ? "#00d26e" : "#ff6464";
+      ctx.fillStyle = cvd >= 0 ? "#047857" : "#b91c1c";
       ctx.fillText(fmtVol(cvd), cx, ROW_H * 1.5);
 
-      /* Row 2: Volume — neutral grey, brighter text for legibility */
-      ctx.fillStyle = "rgba(120,140,165,0.28)";
+      /* Row 2: Volume — distinct slate background, high-contrast text */
+      ctx.fillStyle = "rgba(71,85,105,0.4)";
       ctx.fillRect(bx, ROW_H * 2 + 2, bw, ROW_H - 4);
-      ctx.fillStyle = "#cdd5e0";
+      ctx.fillStyle = "#e2e8f0";
       ctx.fillText(fmtVol(vol), cx, ROW_H * 2.5);
 
-      /* Row 3: OI — symmetric opacity pos/neg */
+      /* Row 3: OI — clear pos/neg colors */
       if (showOI) {
-        ctx.fillStyle = oiChange >= 0 ? "rgba(0,210,110,0.18)" : "rgba(255,60,60,0.22)";
+        ctx.fillStyle = oiChange >= 0 ? "rgba(5,150,105,0.35)" : "rgba(220,38,38,0.35)";
         ctx.fillRect(bx, ROW_H * 3 + 2, bw, ROW_H - 4);
-        ctx.fillStyle = oiChange >= 0 ? "#00cc88" : "#ff6060";
+        ctx.fillStyle = oiChange >= 0 ? "#059669" : "#dc2626";
         ctx.fillText(oi > 0 ? fmtVol(oi) : "—", cx, ROW_H * 3.5);
       }
     }

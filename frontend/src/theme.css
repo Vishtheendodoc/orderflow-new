@@ -78,19 +78,19 @@ html, body, #root {
 .empty-state { color: var(--text-muted) !important; }
 .empty-sub { color: var(--text-dim) !important; }
 
-/* Delta/CVD boxes - high contrast for light theme */
+/* Delta/CVD boxes - high contrast for visibility */
 .delta-cvd-box.pos {
-  background: rgba(5, 150, 105, 0.2) !important;
+  background: rgba(5, 150, 105, 0.4) !important;
   color: #047857 !important;
-  border: 1px solid rgba(5, 150, 105, 0.4) !important;
+  border: 1px solid rgba(5, 150, 105, 0.55) !important;
 }
 .delta-cvd-box.neg {
-  background: rgba(220, 38, 38, 0.2) !important;
+  background: rgba(220, 38, 38, 0.4) !important;
   color: #b91c1c !important;
-  border: 1px solid rgba(220, 38, 38, 0.4) !important;
+  border: 1px solid rgba(220, 38, 38, 0.55) !important;
 }
 .delta-cvd-box.vol {
-  background: rgba(100, 116, 139, 0.15) !important;
-  color: var(--text) !important;
-  border: 1px solid rgba(100, 116, 139, 0.3) !important;
+  background: rgba(71, 85, 105, 0.4) !important;
+  color: #e2e8f0 !important;
+  border: 1px solid rgba(71, 85, 105, 0.5) !important;
 }

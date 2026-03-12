@@ -574,9 +574,9 @@ html, body, #root {
   font-weight: 600;
   border-radius: 3px;
 }
-.delta-cvd-box.pos { background: rgba(0,210,110,0.2); color: var(--buy); }
-.delta-cvd-box.neg { background: rgba(255,70,70,0.2); color: var(--sell); }
-.delta-cvd-box.vol { background: rgba(100,116,139,0.15); color: var(--text); }
+.delta-cvd-box.pos { background: rgba(5,150,105,0.35); color: #047857; border: 1px solid rgba(5,150,105,0.5); }
+.delta-cvd-box.neg { background: rgba(220,38,38,0.35); color: #b91c1c; border: 1px solid rgba(220,38,38,0.5); }
+.delta-cvd-box.vol { background: rgba(71,85,105,0.35); color: #e2e8f0; border: 1px solid rgba(71,85,105,0.5); }
 
 .fp-candle-wrap { display: flex; flex-direction: column; min-width: 110px; max-width: 130px; flex-shrink: 0; }
 
