@@ -1018,6 +1018,41 @@ export default function App() {
 
   const CANDLE_MINUTES = [1, 5, 10, 15, 30, 45, 60, 120];
 
+  // HFT chart: index candles + livePrice (useMemo ensures all deps are defined before use)
+  const hftChartData = useMemo(() => {
+    const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find((n) =>
+      String(activeSymbol || "").toUpperCase().includes(n)
+    ) || null;
+    const indexFlow = idx ? flows[idx] : null;
+    const indexCandles = idx ? (indexCandlesCache[idx] || []) : [];
+    const liveCandles = indexFlow?.candles || [];
+    const indexLtp = idx ? indexLtpCache[idx] : null;
+    const flowLtp = flow?.ltp;
+    const livePrice = (indexFlow?.ltp != null && Number.isFinite(indexFlow.ltp))
+      ? indexFlow.ltp
+      : (indexLtp != null && Number.isFinite(indexLtp)) ? indexLtp : flowLtp;
+    let candlesOut = [];
+    if (liveCandles.length) {
+      candlesOut = liveCandles;
+    } else if (indexCandles.length) {
+      if (livePrice != null && Number.isFinite(livePrice)) {
+        const bucketMs = 60 * 1000;
+        const IST_OFFSET_MS = 19800 * 1000;
+        const currentMinuteOpen = Math.floor(Date.now() / 60000) * 60000 + IST_OFFSET_MS;
+        const last = indexCandles[indexCandles.length - 1];
+        const lastBucket = Math.floor((last?.open_time ?? 0) / bucketMs) * bucketMs;
+        const currentBucket = Math.floor(currentMinuteOpen / bucketMs) * bucketMs;
+        if (lastBucket === currentBucket) {
+          candlesOut = [...indexCandles.slice(0, -1), { ...last, close: livePrice, high: Math.max(last.high ?? livePrice, livePrice), low: Math.min(last.low ?? livePrice, livePrice), closed: false }];
+        } else {
+          candlesOut = [...indexCandles, { open_time: currentMinuteOpen, open: last?.close ?? livePrice, high: livePrice, low: livePrice, close: livePrice, closed: false }];
+        }
+      } else {
+        candlesOut = indexCandles;
+      }
+    }
+    return { candles: candlesOut, livePrice: livePrice ?? flowLtp };
+  }, [activeSymbol, flows, indexCandlesCache, indexLtpCache, flow]);
 
   // Derive the correct market-open offset for the active symbol's exchange
   const activeExchange     = activeSymbol ? (symbolExchangeMap[activeSymbol] ?? "NSE") : "NSE";
@@ -1265,41 +1300,8 @@ export default function App() {
                   <HftScannerChart
                     symbol={activeSymbol}
                     apiBase={API_URL || window.location.origin}
-                    candles={(() => {
-                      const idx = resolveIndex(activeSymbol);
-                      const indexFlow = idx ? flows[idx] : null;
-                      const indexCandles = idx ? (indexCandlesCache[idx] || []) : [];
-                      const liveCandles = indexFlow?.candles || [];
-                      const indexLtp = idx ? indexLtpCache[idx] : null;
-                      const flowLtp = flow?.ltp;
-                      const livePrice = (indexFlow?.ltp != null && Number.isFinite(indexFlow.ltp))
-                        ? indexFlow.ltp
-                        : (indexLtp != null && Number.isFinite(indexLtp)) ? indexLtp : flowLtp;
-                      if (!liveCandles.length && !indexCandles.length) return [];
-                      if (liveCandles.length) {
-                        return liveCandles;
-                      }
-                      if (!indexCandles.length) return [];
-                      if (livePrice == null || !Number.isFinite(livePrice)) return indexCandles;
-                      const bucketMs = 60 * 1000;
-                      const IST_OFFSET_MS = 19800 * 1000;
-                      const currentMinuteOpen = Math.floor(Date.now() / 60000) * 60000 + IST_OFFSET_MS;
-                      const last = indexCandles[indexCandles.length - 1];
-                      const lastBucket = Math.floor((last?.open_time ?? 0) / bucketMs) * bucketMs;
-                      const currentBucket = Math.floor(currentMinuteOpen / bucketMs) * bucketMs;
-                      if (lastBucket === currentBucket) {
-                        return [...indexCandles.slice(0, -1), { ...last, close: livePrice, high: Math.max(last.high ?? livePrice, livePrice), low: Math.min(last.low ?? livePrice, livePrice), closed: false }];
-                      }
-                      return [...indexCandles, { open_time: currentMinuteOpen, open: last?.close ?? livePrice, high: livePrice, low: livePrice, close: livePrice, closed: false }];
-                    })()}
-                    livePrice={(() => {
-                      const idx = resolveIndex(activeSymbol);
-                      const indexFlow = idx ? flows[idx] : null;
-                      const indexLtp = idx ? indexLtpCache[idx] : null;
-                      return (indexFlow?.ltp != null && Number.isFinite(indexFlow.ltp))
-                        ? indexFlow.ltp
-                        : (indexLtp != null && Number.isFinite(indexLtp)) ? indexLtp : flow?.ltp;
-                    })()}
+                    candles={hftChartData.candles}
+                    livePrice={hftChartData.livePrice}
                   />
                 </div>
               ) : viewMode === "strike" ? (
