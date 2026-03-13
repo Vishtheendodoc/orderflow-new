@@ -638,6 +638,9 @@ export default function App() {
       return w >= 160 && w <= 480 ? w : 220;
     } catch { return 220; }
   });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem("sidebar_collapsed") === "1"; } catch { return false; }
+  });
   const sidebarResizeRef = useRef({ startX: 0, startW: 0 });
   // HFT overlay data cache: idx → [{ts, flows, spot, mfi}]
   const [hftSeriesCache, setHftSeriesCache] = useState({});
@@ -648,6 +651,9 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem("sidebar_width", String(sidebarWidth)); } catch (_) {}
   }, [sidebarWidth]);
+  useEffect(() => {
+    try { localStorage.setItem("sidebar_collapsed", sidebarCollapsed ? "1" : "0"); } catch (_) {}
+  }, [sidebarCollapsed]);
 
   const handleSidebarResizeStart = useCallback((e) => {
     e.preventDefault();
@@ -1116,11 +1122,29 @@ export default function App() {
           <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />
         )}
 
-        {/* Sidebar (draggable width on desktop) */}
+        {/* Sidebar (collapsible + draggable on desktop) */}
+        {sidebarCollapsed && (
+          <button
+            className="sidebar-expand-tab"
+            onClick={() => setSidebarCollapsed(false)}
+            title="Expand instruments panel"
+          >
+            <span>INSTRUMENTS</span>
+          </button>
+        )}
         <aside
-          className={`sidebar${sidebarOpen ? " sidebar-open" : ""}`}
-          style={{ width: sidebarWidth, minWidth: sidebarWidth }}
+          className={`sidebar${sidebarOpen ? " sidebar-open" : ""}${sidebarCollapsed ? " sidebar-collapsed" : ""}`}
+          style={{ width: sidebarCollapsed ? 0 : sidebarWidth, minWidth: sidebarCollapsed ? 0 : sidebarWidth }}
         >
+          <div className="sidebar-header">
+            <button
+              className="sidebar-collapse-btn"
+              onClick={() => setSidebarCollapsed(true)}
+              title="Collapse sidebar"
+            >
+              ◀
+            </button>
+          </div>
           <SubscribePanel
             onSubscribe={(sym, exchange) => {
               setActiveSymbols((prev) => prev.includes(sym) ? prev : [...prev, sym]);
@@ -1134,11 +1158,13 @@ export default function App() {
             <CVDLine candles={candles} />
           )}
         </aside>
-        <div
-          className="sidebar-resize-handle"
-          onMouseDown={handleSidebarResizeStart}
-          title="Drag to resize sidebar"
-        />
+        {!sidebarCollapsed && (
+          <div
+            className="sidebar-resize-handle"
+            onMouseDown={handleSidebarResizeStart}
+            title="Drag to resize sidebar"
+          />
+        )}
 
         {/* Main canvas */}
         <main className="canvas">
