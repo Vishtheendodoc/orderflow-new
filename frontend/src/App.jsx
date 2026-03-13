@@ -632,11 +632,42 @@ export default function App() {
   const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true, showHFT: false });
   const [splitView, setSplitView] = useState(false);
   const [activeSymbol2, setActiveSymbol2] = useState(null);
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    try {
+      const w = parseInt(localStorage.getItem("sidebar_width"), 10);
+      return w >= 160 && w <= 480 ? w : 220;
+    } catch { return 220; }
+  });
+  const sidebarResizeRef = useRef({ startX: 0, startW: 0 });
   // HFT overlay data cache: idx → [{ts, flows, spot, mfi}]
   const [hftSeriesCache, setHftSeriesCache] = useState({});
   const [featMenuOpen, setFeatMenuOpen] = useState(false);
   const featMenuRef = useRef(null);
   useEffect(() => { activeSymbolRef.current = activeSymbol; }, [activeSymbol]);
+
+  useEffect(() => {
+    try { localStorage.setItem("sidebar_width", String(sidebarWidth)); } catch (_) {}
+  }, [sidebarWidth]);
+
+  const handleSidebarResizeStart = useCallback((e) => {
+    e.preventDefault();
+    sidebarResizeRef.current = { startX: e.clientX, startW: sidebarWidth };
+    const onMove = (ev) => {
+      const dx = ev.clientX - sidebarResizeRef.current.startX;
+      const newW = Math.max(160, Math.min(480, sidebarResizeRef.current.startW + dx));
+      setSidebarWidth(newW);
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [sidebarWidth]);
 
   /* close dropdown on outside click */
   useEffect(() => {
@@ -1085,8 +1116,11 @@ export default function App() {
           <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />
         )}
 
-        {/* Sidebar */}
-        <aside className={`sidebar${sidebarOpen ? " sidebar-open" : ""}`}>
+        {/* Sidebar (draggable width on desktop) */}
+        <aside
+          className={`sidebar${sidebarOpen ? " sidebar-open" : ""}`}
+          style={{ width: sidebarWidth, minWidth: sidebarWidth }}
+        >
           <SubscribePanel
             onSubscribe={(sym, exchange) => {
               setActiveSymbols((prev) => prev.includes(sym) ? prev : [...prev, sym]);
@@ -1100,6 +1134,11 @@ export default function App() {
             <CVDLine candles={candles} />
           )}
         </aside>
+        <div
+          className="sidebar-resize-handle"
+          onMouseDown={handleSidebarResizeStart}
+          title="Drag to resize sidebar"
+        />
 
         {/* Main canvas */}
         <main className="canvas">

@@ -120,6 +120,27 @@ html, body, #root {
   scrollbar-width: thin;
   scrollbar-color: var(--border2) transparent;
 }
+.sidebar-resize-handle {
+  width: 6px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.15s;
+}
+.sidebar-resize-handle:hover {
+  background: rgba(14,165,233,0.2);
+}
+.sidebar-resize-handle::after {
+  content: "";
+  display: block;
+  width: 2px;
+  height: 100%;
+  margin: 0 auto;
+  background: var(--border);
+}
+.sidebar-resize-handle:hover::after {
+  background: var(--accent);
+}
 
 .subscribe-panel { padding: 12px; }
 .panel-title {
@@ -1498,6 +1519,8 @@ html, body, #root {
 
   /* ── Sidebar: slide-in drawer ── */
   .main-layout { height: calc(100vh - 44px); }
+
+  .sidebar-resize-handle { display: none; }
 
   .sidebar {
     position: fixed;
