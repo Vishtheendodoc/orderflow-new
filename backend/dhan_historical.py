@@ -141,6 +141,65 @@ async def fetch_rolling_option(
         return None
 
 
+async def fetch_intraday_ohlcv(
+    security_id: str,
+    exchange_segment: str = "NSE_FNO",
+    instrument: str = "FUTIDX",
+    interval: str = "1",
+    from_date: str = "",
+    to_date: str = "",
+    include_oi: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Fetch intraday OHLCV from Dhan /charts/intraday.
+
+    Args:
+        security_id: Dhan security ID (e.g. 13 for NIFTY index, 51714 for NIFTY MAR FUT)
+        exchange_segment: NSE_FNO, IDX_I, etc.
+        instrument: FUTIDX, INDEX, etc.
+        interval: 1, 5, 15, 25, 60 (minutes)
+        from_date: YYYY-MM-DD HH:MM:SS (e.g. "2024-09-11 09:15:00")
+        to_date: YYYY-MM-DD HH:MM:SS (e.g. "2024-09-11 15:30:00")
+        include_oi: Include open interest for F&O
+
+    Returns:
+        {"open": [...], "high": [...], "low": [...], "close": [...], "volume": [...], "timestamp": [...]}
+        or None on error
+    """
+    if not DHAN_TOKEN_OPTIONS or not DHAN_CLIENT_ID:
+        return None
+    if not from_date or not to_date:
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{DHAN_API_BASE}/charts/intraday",
+                headers={
+                    "access-token": DHAN_TOKEN_OPTIONS,
+                    "client-id": DHAN_CLIENT_ID,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                json={
+                    "securityId": security_id,
+                    "exchangeSegment": exchange_segment,
+                    "instrument": instrument,
+                    "interval": interval,
+                    "oi": include_oi,
+                    "fromDate": from_date,
+                    "toDate": to_date,
+                },
+            )
+            if not resp.is_success:
+                return None
+            data = resp.json()
+            if "open" not in data or "close" not in data:
+                return None
+            return data
+    except Exception:
+        return None
+
+
 def chunk_date_range(from_date: date, to_date: date, chunk_days: int = 30) -> List[tuple]:
     """Split date range into chunks of chunk_days for rolling option API (30 days max per call)."""
     chunks = []

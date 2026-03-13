@@ -39,6 +39,7 @@ import struct
 
 from sentiment_features import compute_sentiment, extract_ml_features
 from ml_sentiment import load_model as load_ml_model, predict as ml_predict
+from dhan_historical import fetch_intraday_ohlcv
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -680,7 +681,10 @@ def load_history_from_disk(symbol: str, limit: int = 9999) -> list:
     return []
 
 
-def build_full_state(symbol: str, engine) -> dict:
+DHAN_INTRADAY_FALLBACK_MIN = int(os.getenv("DHAN_INTRADAY_FALLBACK_MIN", "60"))
+
+
+async def build_full_state(symbol: str, engine) -> dict:
     """Assemble the full-day state for a symbol.
 
     Priority (later sources override earlier for the same open_time):
@@ -689,6 +693,7 @@ def build_full_state(symbol: str, engine) -> dict:
       2. disk JSONL          — full candle with levels; overrides lite where available.
       3. engine.candles      — last MAX_CANDLES_IN_MEMORY with levels; overrides disk for recency.
       4. engine.current_candle — live (open) candle appended last.
+      5. Dhan intraday      — when candles < DHAN_INTRADAY_FALLBACK_MIN, fetch from Dhan and merge.
 
     Deduplicates by open_time so history+live merge never produces double candles.
     """
@@ -712,6 +717,54 @@ def build_full_state(symbol: str, engine) -> dict:
         ot = ct.get("open_time", 0)
         if ot >= today_start:
             by_time[ot] = ct
+
+    # 4. Dhan intraday fallback when we have insufficient candles (e.g. after refresh, market open)
+    if len(by_time) < DHAN_INTRADAY_FALLBACK_MIN:
+        info = subscribed_symbols.get(symbol, {})
+        security_id = info.get("security_id") or getattr(engine, "security_id", None)
+        exchange_segment = info.get("exchange_segment", "NSE_FNO")
+        if security_id:
+            today = _ist_date_str()
+            from_date = f"{today} 09:15:00"
+            to_date = f"{today} 15:30:00"
+            # NSE FNO: index futures = FUTIDX, stock futures = FUTSTK; MCX = FUTCOM
+            sym_upper = symbol.upper()
+            instrument = "FUTIDX" if any(k in sym_upper for k in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")) else "FUTSTK"
+            if "MCX" in exchange_segment or exchange_segment == "MCX_COMM":
+                instrument = "FUTCOM"
+                from_date = f"{today} 09:00:00"
+                to_date = f"{today} 23:55:00"
+            data = await fetch_intraday_ohlcv(
+                security_id=str(security_id),
+                exchange_segment=exchange_segment,
+                instrument=instrument,
+                interval="1",
+                from_date=from_date,
+                to_date=to_date,
+            )
+            if data:
+                opens = data.get("open", [])
+                highs = data.get("high", [])
+                lows = data.get("low", [])
+                closes = data.get("close", [])
+                volumes = data.get("volume", [])
+                timestamps = data.get("timestamp", [])
+                for i in range(min(len(opens), len(closes), len(timestamps))):
+                    ts = timestamps[i]
+                    open_time = int(ts * 1000) if ts < 1e12 else int(ts)
+                    if open_time >= today_start and open_time not in by_time:
+                        by_time[open_time] = {
+                            "open_time": open_time,
+                            "open": float(opens[i]) if i < len(opens) else 0,
+                            "high": float(highs[i]) if i < len(highs) else 0,
+                            "low": float(lows[i]) if i < len(lows) else 0,
+                            "close": float(closes[i]) if i < len(closes) else 0,
+                            "volume": int(volumes[i]) if i < len(volumes) else 0,
+                            "closed": True,
+                            "delta": 0,
+                            "buy_vol": 0,
+                            "sell_vol": 0,
+                        }
 
     candle_dicts = sorted(by_time.values(), key=lambda x: x["open_time"])
 
@@ -2306,8 +2359,9 @@ async def train_sentiment_ml(index: str = "NIFTY"):
 
 
 def _recompute_flows_from_strikes_raw(series: list, index_name: str, conviction: str) -> list:
-    """Re-compute flows from strikes_raw using percentile-derived thresholds.
-    conviction: 'high' | 'medium'. Returns series with updated flows per snap.
+    """Re-compute flows from strikes_raw using fixed thresholds (per-index defaults).
+    conviction: 'high' | 'medium'. Uses _get_hft_thresholds for stability — no percentile derivation.
+    Same data → same flows. For medium: relaxed (0.66x OI, 0.5x vol).
     """
     snaps_with_raw = [s for s in series if (s.get("strikes_raw") or {}) and any(
         (r.get("ce_ltp_chg") is not None or r.get("pe_ltp_chg") is not None)
@@ -2316,59 +2370,15 @@ def _recompute_flows_from_strikes_raw(series: list, index_name: str, conviction:
     if len(snaps_with_raw) < 10:
         return series
 
-    ce_oi_chg, pe_oi_chg = [], []
-    ce_ltp_chg, pe_ltp_chg = [], []
-    abs_ltp_chg = []
-    ce_vol, pe_vol = [], []
-    for snap in snaps_with_raw:
-        for r in (snap.get("strikes_raw") or {}).values():
-            co = r.get("ce_oi_chg")
-            po = r.get("pe_oi_chg")
-            if co is not None:
-                ce_oi_chg.append(co)
-            if po is not None:
-                pe_oi_chg.append(po)
-            cl = r.get("ce_ltp_chg")
-            pl = r.get("pe_ltp_chg")
-            if cl is not None:
-                ce_ltp_chg.append(cl)
-                abs_ltp_chg.append(abs(cl))
-            if pl is not None:
-                pe_ltp_chg.append(pl)
-                abs_ltp_chg.append(abs(pl))
-            cv = r.get("ce_vol")
-            pv = r.get("pe_vol")
-            if cv is not None:
-                ce_vol.append(cv)
-            if pv is not None:
-                pe_vol.append(pv)
-
-    def _p(arr: list, p: float) -> float:
-        arr = [x for x in arr if x is not None and not (isinstance(x, float) and math.isnan(x))]
-        return _percentile(arr, p) if arr else 0.0
-
+    th = _get_hft_thresholds(index_name)
     is_high = conviction == "high"
-    oi_p = 98 if (is_high and index_name == "MIDCPNIFTY") else (90 if is_high else 75)
-    oi_chg_pct = max(_p(ce_oi_chg, oi_p), _p(pe_oi_chg, oi_p), 2.0)
-    oi_chg_min = _p(ce_oi_chg + pe_oi_chg, 75 if is_high else 50) or 2.0
-    ltp_stable_p75 = _p(abs_ltp_chg, 75) if abs_ltp_chg else 1.0
-    ltp_stable_p90 = _p(abs_ltp_chg, 90) if abs_ltp_chg else 1.5
-    ltp_stable = max(ltp_stable_p75 if is_high else ltp_stable_p90, 1.0)
-    ltp_move = max(_p(abs_ltp_chg, 75 if is_high else 50), 1.0)
-    ce_vol_p75 = _p(ce_vol, 75)
-    pe_vol_p75 = _p(pe_vol, 75)
-    ce_vol_p50 = _p(ce_vol, 50)
-    pe_vol_p50 = _p(pe_vol, 50)
-    ce_vol_p10 = _p(ce_vol, 10)
-    pe_vol_p10 = _p(pe_vol, 10)
-    ce_vol_min = ce_vol_p75 if is_high else ce_vol_p50
-    pe_vol_min = pe_vol_p75 if is_high else pe_vol_p50
-    if ce_vol_p75 > 500_000:
-        ce_vol_min = min(ce_vol_min, 100_000) if ce_vol_min else min(ce_vol_p10, 100_000)
-    if pe_vol_p75 > 500_000:
-        pe_vol_min = min(pe_vol_min, 100_000) if pe_vol_min else min(pe_vol_p10, 100_000)
-    ce_vol_min = max(ce_vol_min or 0, 100)
-    pe_vol_min = max(pe_vol_min or 0, 100)
+    # Fixed thresholds: high = per-index defaults; medium = relaxed (0.66x OI, 0.5x vol)
+    oi_chg_pct = th["oi_chg_pct"] if is_high else max(th["oi_chg_pct"] * 0.66, 2.0)
+    oi_chg_min = th["oi_chg_min"] if is_high else max(th["oi_chg_min"] * 0.66, 2.0)
+    ltp_stable = th["ltp_stable"]
+    ltp_move = th["ltp_move"]
+    ce_vol_min = int(th["ce_vol_min"]) if is_high else max(int(th["ce_vol_min"] * 0.5), 100)
+    pe_vol_min = int(th["pe_vol_min"]) if is_high else max(int(th["pe_vol_min"] * 0.5), 100)
 
     out = []
     for snap in series:
@@ -2454,6 +2464,64 @@ async def get_hft_scanner(symbol: str, conviction: str = ""):
         "updated_at": last["ts"],
         "series":     history,
     }
+
+
+@app.get("/api/index_candles/{index}")
+async def get_index_candles(index: str):
+    """Return today's 1m index candles (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY) from Dhan intraday.
+    Used by HFT chart for price display — index spot, not futures.
+    Response: { candles: [{open_time, open, high, low, close, ...}] }
+    """
+    idx = _resolve_index(index)
+    if not idx:
+        return JSONResponse({"error": f"Unknown index: {index}"}, status_code=400)
+
+    security_id = UNDERLYING_IDS.get(idx)
+    if not security_id:
+        return JSONResponse({"error": f"No security ID for {idx}"}, status_code=400)
+
+    today = _ist_date_str()
+    from_date = f"{today} 09:15:00"
+    to_date = f"{today} 15:30:00"
+
+    data = await fetch_intraday_ohlcv(
+        security_id=security_id,
+        exchange_segment="IDX_I",
+        instrument="INDEX",
+        interval="1",
+        from_date=from_date,
+        to_date=to_date,
+    )
+    if not data:
+        return JSONResponse(
+            {"error": "Could not fetch index candles — check DHAN_TOKEN_OPTIONS"},
+            status_code=202,
+        )
+
+    # Convert Dhan format (arrays) to our candle format (list of dicts)
+    opens = data.get("open", [])
+    highs = data.get("high", [])
+    lows = data.get("low", [])
+    closes = data.get("close", [])
+    volumes = data.get("volume", [])
+    timestamps = data.get("timestamp", [])
+
+    candles = []
+    for i in range(min(len(opens), len(closes), len(timestamps))):
+        ts = timestamps[i]
+        # Dhan returns Unix seconds; our open_time is ms (IST-epoch or Unix ms)
+        open_time = int(ts * 1000) if ts < 1e12 else int(ts)
+        candles.append({
+            "open_time": open_time,
+            "open": float(opens[i]) if i < len(opens) else 0,
+            "high": float(highs[i]) if i < len(highs) else 0,
+            "low": float(lows[i]) if i < len(lows) else 0,
+            "close": float(closes[i]) if i < len(closes) else 0,
+            "volume": int(volumes[i]) if i < len(volumes) else 0,
+            "closed": True,
+        })
+    candles.sort(key=lambda c: c["open_time"])
+    return {"candles": candles}
 
 
 # Flow types: bullish (positive score) vs bearish (negative score)
@@ -2995,12 +3063,13 @@ def get_symbols(q: str = "", exchange: str = ""):
 
 
 @app.get("/api/state/{symbol}")
-def get_state(symbol: str):
-    """Return full-day state from disk + live candle so early-hours data is preserved."""
+async def get_state(symbol: str):
+    """Return full-day state from disk + live candle so early-hours data is preserved.
+    Fetches from Dhan intraday when candles < threshold (e.g. after refresh)."""
     symbol = symbol.upper()
     if symbol not in engines:
         raise HTTPException(404, "Symbol not subscribed")
-    return build_full_state(symbol, engines[symbol])
+    return await build_full_state(symbol, engines[symbol])
 
 
 # ─────────────────────────────────────────────
@@ -3046,7 +3115,7 @@ async def websocket_endpoint(ws: WebSocket):
                 symbol = str(data.get("symbol", "")).upper()
                 if symbol in engines:
                     try:
-                        state = build_full_state(symbol, engines[symbol])
+                        state = await build_full_state(symbol, engines[symbol])
                         await ws.send_text(_dumps({"type": "history", "data": state}))
                     except Exception as e:
                         logger.warning(f"History request failed [{symbol}]: {e}")

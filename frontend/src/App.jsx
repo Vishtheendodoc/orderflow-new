@@ -632,6 +632,8 @@ export default function App() {
   const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true, showHFT: false });
   // HFT overlay data cache: idx → [{ts, flows, spot, mfi}]
   const [hftSeriesCache, setHftSeriesCache] = useState({});
+  // Index candles for HFT chart (NIFTY spot, security_id 13) — fetched when viewMode === "hft"
+  const [indexCandlesCache, setIndexCandlesCache] = useState({});
   const [featMenuOpen, setFeatMenuOpen] = useState(false);
   const featMenuRef = useRef(null);
   useEffect(() => { activeSymbolRef.current = activeSymbol; }, [activeSymbol]);
@@ -960,6 +962,29 @@ export default function App() {
     return () => clearInterval(id);
   }, [features.showHFT, isIndexFuture, activeSymbol]);
 
+  // Index candles for HFT chart: when viewMode === "hft", fetch index (spot) candles from API
+  const resolveIndex = useCallback((symbol) => {
+    const s = String(symbol || "").toUpperCase();
+    return ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n)) || null;
+  }, []);
+  useEffect(() => {
+    if (viewMode !== "hft" || !activeSymbol || !isIndexFuture) return;
+    const idx = resolveIndex(activeSymbol);
+    if (!idx) return;
+    const base = API_URL || window.location.origin;
+    const fetchIndexCandles = async () => {
+      try {
+        const res = await fetch(`${base}/api/index_candles/${encodeURIComponent(idx)}`);
+        if (!res.ok) return;
+        const d = await res.json();
+        if (d.candles?.length) setIndexCandlesCache((prev) => ({ ...prev, [idx]: d.candles }));
+      } catch (_) {}
+    };
+    fetchIndexCandles();
+    const id = setInterval(fetchIndexCandles, 60_000); // refresh every 1 min
+    return () => clearInterval(id);
+  }, [viewMode, activeSymbol, isIndexFuture, resolveIndex]);
+
   const [timeFrameMinutes, setTimeFrameMinutes] = useState(1); // TradingView-style: 1,5,10,15,30,45,60,120
   const [sidebarOpen, setSidebarOpen] = useState(false); // mobile drawer
 
@@ -1212,7 +1237,10 @@ export default function App() {
                   <HftScannerChart
                     symbol={activeSymbol}
                     apiBase={API_URL || window.location.origin}
-                    candles={flow?.candles || []}
+                    candles={(() => {
+                      const idx = resolveIndex(activeSymbol);
+                      return idx ? (indexCandlesCache[idx] || []) : (flow?.candles || []);
+                    })()}
                   />
                 </div>
               ) : viewMode === "strike" ? (
