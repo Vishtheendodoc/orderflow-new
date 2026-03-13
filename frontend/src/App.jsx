@@ -632,8 +632,6 @@ export default function App() {
   const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true, showHFT: false });
   // HFT overlay data cache: idx → [{ts, flows, spot, mfi}]
   const [hftSeriesCache, setHftSeriesCache] = useState({});
-  // Index candles for HFT chart (NIFTY spot, security_id 13) — fetched when viewMode === "hft"
-  const [indexCandlesCache, setIndexCandlesCache] = useState({});
   const [featMenuOpen, setFeatMenuOpen] = useState(false);
   const featMenuRef = useRef(null);
   useEffect(() => { activeSymbolRef.current = activeSymbol; }, [activeSymbol]);
@@ -943,16 +941,6 @@ export default function App() {
     return ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"].some(n => s.includes(n));
   }, [activeSymbol]);
 
-  // HFT chart: request index history so flows[idx] gets full-day candles (live feed preferred when available)
-  useEffect(() => {
-    if (viewMode !== "hft" || !activeSymbol || !isIndexFuture) return;
-    const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find((n) =>
-      String(activeSymbol || "").toUpperCase().includes(n)
-    ) || null;
-    if (!idx || historyLoadedRef.current.has(idx)) return;
-    requestHistory(idx);
-  }, [viewMode, activeSymbol, isIndexFuture, requestHistory]);
-
   // HFT overlay: poll scanner data when showHFT is enabled on an index future (chart view only)
   useEffect(() => {
     if (!features.showHFT || !isIndexFuture || !activeSymbol) return;
@@ -972,87 +960,33 @@ export default function App() {
     return () => clearInterval(id);
   }, [features.showHFT, isIndexFuture, activeSymbol]);
 
-  // Index candles + live index LTP for HFT chart (index data only, not futures)
-  const resolveIndex = useCallback((symbol) => {
-    const s = String(symbol || "").toUpperCase();
-    return ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n)) || null;
-  }, []);
-  const [indexLtpCache, setIndexLtpCache] = useState({}); // idx -> ltp
+  // HFT chart: request index history (disk-backed, same as futures — no Dhan API)
   useEffect(() => {
     if (viewMode !== "hft" || !activeSymbol || !isIndexFuture) return;
-    const idx = resolveIndex(activeSymbol);
-    if (!idx) return;
-    const base = API_URL || window.location.origin;
-    const fetchIndexCandles = async () => {
-      try {
-        const res = await fetch(`${base}/api/index_candles/${encodeURIComponent(idx)}`);
-        if (!res.ok) return;
-        const d = await res.json();
-        if (d.candles?.length) setIndexCandlesCache((prev) => ({ ...prev, [idx]: d.candles }));
-      } catch (_) {}
-    };
-    fetchIndexCandles();
-    const id = setInterval(fetchIndexCandles, 30_000); // 30s when HFT active
-    return () => clearInterval(id);
-  }, [viewMode, activeSymbol, isIndexFuture, resolveIndex]);
-  useEffect(() => {
-    if (viewMode !== "hft" || !activeSymbol || !isIndexFuture) return;
-    const idx = resolveIndex(activeSymbol);
-    if (!idx) return;
-    const base = API_URL || window.location.origin;
-    const fetchIndexLtp = async () => {
-      try {
-        const res = await fetch(`${base}/api/index_ltp/${encodeURIComponent(idx)}`);
-        if (!res.ok) return;
-        const d = await res.json();
-        if (d.ltp != null) setIndexLtpCache((prev) => ({ ...prev, [idx]: d.ltp }));
-      } catch (_) {}
-    };
-    fetchIndexLtp();
-    const id = setInterval(fetchIndexLtp, 1500); // 1.5s (Dhan rate limit 1/sec; slight buffer)
-    return () => clearInterval(id);
-  }, [viewMode, activeSymbol, isIndexFuture, resolveIndex]);
+    const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find((n) =>
+      String(activeSymbol || "").toUpperCase().includes(n)
+    ) || null;
+    if (!idx || historyLoadedRef.current.has(idx)) return;
+    requestHistory(idx);
+  }, [viewMode, activeSymbol, isIndexFuture, requestHistory]);
 
   const [timeFrameMinutes, setTimeFrameMinutes] = useState(1); // TradingView-style: 1,5,10,15,30,45,60,120
   const [sidebarOpen, setSidebarOpen] = useState(false); // mobile drawer
 
   const CANDLE_MINUTES = [1, 5, 10, 15, 30, 45, 60, 120];
 
-  // HFT chart: index candles + livePrice (useMemo ensures all deps are defined before use)
+  // HFT chart: index live market feed only (like futures — no Dhan history)
   const hftChartData = useMemo(() => {
     const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find((n) =>
       String(activeSymbol || "").toUpperCase().includes(n)
     ) || null;
     const indexFlow = idx ? flows[idx] : null;
-    const indexCandles = idx ? (indexCandlesCache[idx] || []) : [];
-    const liveCandles = indexFlow?.candles || [];
-    const indexLtp = idx ? indexLtpCache[idx] : null;
-    const flowLtp = flow?.ltp;
+    const candlesOut = indexFlow?.candles || [];
     const livePrice = (indexFlow?.ltp != null && Number.isFinite(indexFlow.ltp))
       ? indexFlow.ltp
-      : (indexLtp != null && Number.isFinite(indexLtp)) ? indexLtp : flowLtp;
-    let candlesOut = [];
-    if (liveCandles.length) {
-      candlesOut = liveCandles;
-    } else if (indexCandles.length) {
-      if (livePrice != null && Number.isFinite(livePrice)) {
-        const bucketMs = 60 * 1000;
-        const IST_OFFSET_MS = 19800 * 1000;
-        const currentMinuteOpen = Math.floor(Date.now() / 60000) * 60000 + IST_OFFSET_MS;
-        const last = indexCandles[indexCandles.length - 1];
-        const lastBucket = Math.floor((last?.open_time ?? 0) / bucketMs) * bucketMs;
-        const currentBucket = Math.floor(currentMinuteOpen / bucketMs) * bucketMs;
-        if (lastBucket === currentBucket) {
-          candlesOut = [...indexCandles.slice(0, -1), { ...last, close: livePrice, high: Math.max(last.high ?? livePrice, livePrice), low: Math.min(last.low ?? livePrice, livePrice), closed: false }];
-        } else {
-          candlesOut = [...indexCandles, { open_time: currentMinuteOpen, open: last?.close ?? livePrice, high: livePrice, low: livePrice, close: livePrice, closed: false }];
-        }
-      } else {
-        candlesOut = indexCandles;
-      }
-    }
-    return { candles: candlesOut, livePrice: livePrice ?? flowLtp };
-  }, [activeSymbol, flows, indexCandlesCache, indexLtpCache, flow]);
+      : flow?.ltp;
+    return { candles: candlesOut, livePrice };
+  }, [activeSymbol, flows, flow]);
 
   // Derive the correct market-open offset for the active symbol's exchange
   const activeExchange     = activeSymbol ? (symbolExchangeMap[activeSymbol] ?? "NSE") : "NSE";

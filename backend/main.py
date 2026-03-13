@@ -729,56 +729,58 @@ async def build_full_state(symbol: str, engine) -> dict:
             by_time[ot] = ct
 
     # 4. Dhan intraday fallback when we have insufficient candles (e.g. after refresh, market open)
+    # Skip for index (IDX_I) — index uses live feed + disk only, no Dhan history API
     if len(by_time) < DHAN_INTRADAY_FALLBACK_MIN:
         info = subscribed_symbols.get(symbol, {})
-        security_id = info.get("security_id") or getattr(engine, "security_id", None)
         exchange_segment = info.get("exchange_segment", "NSE_FNO")
-        if security_id:
-            today = _ist_date_str()
-            from_date = f"{today} 09:15:00"
-            to_date = f"{today} 15:30:00"
-            sym_upper = symbol.upper()
-            if exchange_segment == "IDX_I":
-                instrument = "INDEX"
-            elif "MCX" in exchange_segment or exchange_segment == "MCX_COMM":
-                instrument = "FUTCOM"
-                from_date = f"{today} 09:00:00"
-                to_date = f"{today} 23:55:00"
-            else:
-                instrument = "FUTIDX" if any(k in sym_upper for k in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")) else "FUTSTK"
-            data = await fetch_intraday_ohlcv(
-                security_id=str(security_id),
-                exchange_segment=exchange_segment,
-                instrument=instrument,
-                interval="1",
-                from_date=from_date,
-                to_date=to_date,
-            )
-            if data:
-                IST_OFFSET_SEC = 19800  # UTC+5:30 — chart expects IST-epoch
-                opens = data.get("open", [])
-                highs = data.get("high", [])
-                lows = data.get("low", [])
-                closes = data.get("close", [])
-                volumes = data.get("volume", [])
-                timestamps = data.get("timestamp", [])
-                for i in range(min(len(opens), len(closes), len(timestamps))):
-                    ts = timestamps[i]
-                    unix_sec = ts / 1000 if ts >= 1e12 else ts
-                    open_time = int((unix_sec + IST_OFFSET_SEC) * 1000)
-                    if open_time >= today_start and open_time not in by_time:
-                        by_time[open_time] = {
-                            "open_time": open_time,
-                            "open": float(opens[i]) if i < len(opens) else 0,
-                            "high": float(highs[i]) if i < len(highs) else 0,
-                            "low": float(lows[i]) if i < len(lows) else 0,
-                            "close": float(closes[i]) if i < len(closes) else 0,
-                            "volume": int(volumes[i]) if i < len(volumes) else 0,
-                            "closed": True,
-                            "delta": 0,
-                            "buy_vol": 0,
-                            "sell_vol": 0,
-                        }
+        if exchange_segment == "IDX_I":
+            pass  # index: live feed + disk only
+        else:
+            security_id = info.get("security_id") or getattr(engine, "security_id", None)
+            if security_id:
+                today = _ist_date_str()
+                from_date = f"{today} 09:15:00"
+                to_date = f"{today} 15:30:00"
+                sym_upper = symbol.upper()
+                if "MCX" in exchange_segment or exchange_segment == "MCX_COMM":
+                    instrument = "FUTCOM"
+                    from_date = f"{today} 09:00:00"
+                    to_date = f"{today} 23:55:00"
+                else:
+                    instrument = "FUTIDX" if any(k in sym_upper for k in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")) else "FUTSTK"
+                data = await fetch_intraday_ohlcv(
+                    security_id=str(security_id),
+                    exchange_segment=exchange_segment,
+                    instrument=instrument,
+                    interval="1",
+                    from_date=from_date,
+                    to_date=to_date,
+                )
+                if data:
+                    IST_OFFSET_SEC = 19800  # UTC+5:30 — chart expects IST-epoch
+                    opens = data.get("open", [])
+                    highs = data.get("high", [])
+                    lows = data.get("low", [])
+                    closes = data.get("close", [])
+                    volumes = data.get("volume", [])
+                    timestamps = data.get("timestamp", [])
+                    for i in range(min(len(opens), len(closes), len(timestamps))):
+                        ts = timestamps[i]
+                        unix_sec = ts / 1000 if ts >= 1e12 else ts
+                        open_time = int((unix_sec + IST_OFFSET_SEC) * 1000)
+                        if open_time >= today_start and open_time not in by_time:
+                            by_time[open_time] = {
+                                "open_time": open_time,
+                                "open": float(opens[i]) if i < len(opens) else 0,
+                                "high": float(highs[i]) if i < len(highs) else 0,
+                                "low": float(lows[i]) if i < len(lows) else 0,
+                                "close": float(closes[i]) if i < len(closes) else 0,
+                                "volume": int(volumes[i]) if i < len(volumes) else 0,
+                                "closed": True,
+                                "delta": 0,
+                                "buy_vol": 0,
+                                "sell_vol": 0,
+                            }
 
     candle_dicts = sorted(by_time.values(), key=lambda x: x["open_time"])
 
