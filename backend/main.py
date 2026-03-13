@@ -39,7 +39,7 @@ import struct
 
 from sentiment_features import compute_sentiment, extract_ml_features
 from ml_sentiment import load_model as load_ml_model, predict as ml_predict
-from dhan_historical import fetch_intraday_ohlcv
+from dhan_historical import fetch_intraday_ohlcv, fetch_index_ltp
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -743,6 +743,7 @@ async def build_full_state(symbol: str, engine) -> dict:
                 to_date=to_date,
             )
             if data:
+                IST_OFFSET_SEC = 19800  # UTC+5:30 — chart expects IST-epoch
                 opens = data.get("open", [])
                 highs = data.get("high", [])
                 lows = data.get("low", [])
@@ -751,7 +752,8 @@ async def build_full_state(symbol: str, engine) -> dict:
                 timestamps = data.get("timestamp", [])
                 for i in range(min(len(opens), len(closes), len(timestamps))):
                     ts = timestamps[i]
-                    open_time = int(ts * 1000) if ts < 1e12 else int(ts)
+                    unix_sec = ts / 1000 if ts >= 1e12 else ts
+                    open_time = int((unix_sec + IST_OFFSET_SEC) * 1000)
                     if open_time >= today_start and open_time not in by_time:
                         by_time[open_time] = {
                             "open_time": open_time,
@@ -2499,6 +2501,8 @@ async def get_index_candles(index: str):
         )
 
     # Convert Dhan format (arrays) to our candle format (list of dicts)
+    # Dhan returns Unix seconds; chart expects IST-epoch (Unix + 19800) for correct IST display
+    IST_OFFSET_SEC = 19800  # UTC+5:30
     opens = data.get("open", [])
     highs = data.get("high", [])
     lows = data.get("low", [])
@@ -2509,8 +2513,8 @@ async def get_index_candles(index: str):
     candles = []
     for i in range(min(len(opens), len(closes), len(timestamps))):
         ts = timestamps[i]
-        # Dhan returns Unix seconds; our open_time is ms (IST-epoch or Unix ms)
-        open_time = int(ts * 1000) if ts < 1e12 else int(ts)
+        unix_sec = ts / 1000 if ts >= 1e12 else ts
+        open_time = int((unix_sec + IST_OFFSET_SEC) * 1000)  # IST-epoch ms for chart
         candles.append({
             "open_time": open_time,
             "open": float(opens[i]) if i < len(opens) else 0,
@@ -2522,6 +2526,22 @@ async def get_index_candles(index: str):
         })
     candles.sort(key=lambda c: c["open_time"])
     return {"candles": candles}
+
+
+@app.get("/api/index_ltp/{index}")
+async def get_index_ltp(index: str):
+    """Return live index LTP (NIFTY, BANKNIFTY, etc.) from Dhan marketfeed.
+    Rate limit: 1 req/sec. Used for HFT chart live candle updates."""
+    idx = _resolve_index(index)
+    if not idx:
+        return JSONResponse({"error": f"Unknown index: {index}"}, status_code=400)
+    ltp = await fetch_index_ltp(idx)
+    if ltp is None:
+        return JSONResponse(
+            {"error": "Could not fetch index LTP — check DHAN_TOKEN_OPTIONS"},
+            status_code=202,
+        )
+    return {"index": idx, "ltp": ltp}
 
 
 # Flow types: bullish (positive score) vs bearish (negative score)

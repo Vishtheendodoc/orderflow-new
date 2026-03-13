@@ -962,11 +962,12 @@ export default function App() {
     return () => clearInterval(id);
   }, [features.showHFT, isIndexFuture, activeSymbol]);
 
-  // Index candles for HFT chart: when viewMode === "hft", fetch index (spot) candles from API
+  // Index candles + live index LTP for HFT chart (index data only, not futures)
   const resolveIndex = useCallback((symbol) => {
     const s = String(symbol || "").toUpperCase();
     return ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n)) || null;
   }, []);
+  const [indexLtpCache, setIndexLtpCache] = useState({}); // idx -> ltp
   useEffect(() => {
     if (viewMode !== "hft" || !activeSymbol || !isIndexFuture) return;
     const idx = resolveIndex(activeSymbol);
@@ -981,7 +982,24 @@ export default function App() {
       } catch (_) {}
     };
     fetchIndexCandles();
-    const id = setInterval(fetchIndexCandles, 60_000); // refresh every 1 min
+    const id = setInterval(fetchIndexCandles, 60_000);
+    return () => clearInterval(id);
+  }, [viewMode, activeSymbol, isIndexFuture, resolveIndex]);
+  useEffect(() => {
+    if (viewMode !== "hft" || !activeSymbol || !isIndexFuture) return;
+    const idx = resolveIndex(activeSymbol);
+    if (!idx) return;
+    const base = API_URL || window.location.origin;
+    const fetchIndexLtp = async () => {
+      try {
+        const res = await fetch(`${base}/api/index_ltp/${encodeURIComponent(idx)}`);
+        if (!res.ok) return;
+        const d = await res.json();
+        if (d.ltp != null) setIndexLtpCache((prev) => ({ ...prev, [idx]: d.ltp }));
+      } catch (_) {}
+    };
+    fetchIndexLtp();
+    const id = setInterval(fetchIndexLtp, 2000); // 2s (Dhan rate limit 1/sec)
     return () => clearInterval(id);
   }, [viewMode, activeSymbol, isIndexFuture, resolveIndex]);
 
@@ -1239,7 +1257,28 @@ export default function App() {
                     apiBase={API_URL || window.location.origin}
                     candles={(() => {
                       const idx = resolveIndex(activeSymbol);
-                      return idx ? (indexCandlesCache[idx] || []) : (flow?.candles || []);
+                      const indexCandles = idx ? (indexCandlesCache[idx] || []) : [];
+                      const indexLtp = idx ? indexLtpCache[idx] : null;
+                      if (!indexCandles.length) return [];
+                      // Index data only. Append live candle for current minute when we have index LTP
+                      if (indexLtp == null || !Number.isFinite(indexLtp)) return indexCandles;
+                      const IST_OFFSET_MS = 19800 * 1000;
+                      const nowMs = Date.now();
+                      const currentMinuteOpen = Math.floor(nowMs / 60000) * 60000 + IST_OFFSET_MS;
+                      const last = indexCandles[indexCandles.length - 1];
+                      const lastOpen = last?.open_time ?? 0;
+                      const bucketMs = 60 * 1000;
+                      const lastBucket = Math.floor(lastOpen / bucketMs) * bucketMs;
+                      const currentBucket = Math.floor(currentMinuteOpen / bucketMs) * bucketMs;
+                      if (lastBucket === currentBucket) {
+                        return [...indexCandles.slice(0, -1), { ...last, close: indexLtp, high: Math.max(last.high ?? indexLtp, indexLtp), low: Math.min(last.low ?? indexLtp, indexLtp), closed: false }];
+                      }
+                      const liveCandle = { open_time: currentMinuteOpen, open: last?.close ?? indexLtp, high: indexLtp, low: indexLtp, close: indexLtp, closed: false };
+                      return [...indexCandles, liveCandle];
+                    })()}
+                    livePrice={(() => {
+                      const idx = resolveIndex(activeSymbol);
+                      return idx ? indexLtpCache[idx] : null;
                     })()}
                   />
                 </div>

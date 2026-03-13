@@ -184,7 +184,7 @@ const PRICE_PANE_DEF = 50;   // 50% candles / 50% HFT — reduces HFT bar height
 /* ═══════════════════════════════════════════════════════════════════════════
    COMPONENT
 ═══════════════════════════════════════════════════════════════════════════ */
-export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
+export default function HftScannerChart({ symbol, apiBase, candles = [], livePrice }) {
   const chartContainerRef = useRef(null);
   const chartRef          = useRef(null);
   const candleSeriesRef   = useRef(null);
@@ -290,6 +290,7 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
   }, [pricePaneH]);
 
   /* ── Effect 2: push candles into price chart (aggregated by tfMin) ──────── */
+  const lastCandleDataRef = useRef(null);
   useEffect(() => {
     const series = candleSeriesRef.current;
     if (!series || !candles?.length) return;
@@ -307,6 +308,7 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
       };
     }).filter((c) => c.high > 0 && c.low > 0 && c.low < 1e8).sort((a, b) => a.time - b.time);
     if (data.length) {
+      lastCandleDataRef.current = data[data.length - 1];
       try { series.setData(data); } catch (_) {}
       if (!hasInitialFit.current) {
         hasInitialFit.current = true;
@@ -314,6 +316,23 @@ export default function HftScannerChart({ symbol, apiBase, candles = [] }) {
       }
     }
   }, [candles, tfMin]);
+
+  /* ── Effect 2b: live tick update — update last bar with livePrice when it changes ──────── */
+  useEffect(() => {
+    const series = candleSeriesRef.current;
+    if (!series || livePrice == null || !Number.isFinite(livePrice) || !lastCandleDataRef.current) return;
+    const last = lastCandleDataRef.current;
+    const lp = Number(livePrice);
+    const updated = {
+      time:  last.time,
+      open:  last.open,
+      high:  Math.max(last.high ?? lp, lp),
+      low:   Math.min(last.low ?? lp, lp),
+      close: lp,
+    };
+    lastCandleDataRef.current = updated;
+    try { series.update(updated); } catch (_) {}
+  }, [livePrice]);
 
   /* ── Effect 3: clear stale HFT flow data on symbol change ──────────────── */
   useEffect(() => {

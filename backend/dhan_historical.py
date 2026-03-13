@@ -200,6 +200,37 @@ async def fetch_intraday_ohlcv(
         return None
 
 
+async def fetch_index_ltp(index_name: str) -> Optional[float]:
+    """Fetch live index LTP from Dhan marketfeed/ltp.
+    Uses IDX_I segment. Rate limit: 1 req/sec. Returns last_price or None."""
+    if not DHAN_TOKEN_OPTIONS or not DHAN_CLIENT_ID:
+        return None
+    security_id = UNDERLYING_IDS.get(index_name)
+    if not security_id:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{DHAN_API_BASE}/marketfeed/ltp",
+                headers={
+                    "access-token": DHAN_TOKEN_OPTIONS,
+                    "client-id": DHAN_CLIENT_ID,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                json={"IDX_I": [int(security_id)]},
+            )
+            if not resp.is_success:
+                return None
+            data = resp.json()
+            seg = data.get("data", {}).get("IDX_I", {})
+            item = seg.get(security_id, seg.get(str(security_id), {}))
+            lp = item.get("last_price")
+            return float(lp) if lp is not None else None
+    except Exception:
+        return None
+
+
 def chunk_date_range(from_date: date, to_date: date, chunk_days: int = 30) -> List[tuple]:
     """Split date range into chunks of chunk_days for rolling option API (30 days max per call)."""
     chunks = []
