@@ -858,6 +858,16 @@ export default function App() {
     requestHistory(activeSymbol);
   }, [activeSymbol, requestHistory]);
 
+  // HFT chart: request index history so flows[idx] gets full-day candles (live feed preferred when available)
+  useEffect(() => {
+    if (viewMode !== "hft" || !activeSymbol || !isIndexFuture) return;
+    const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find((n) =>
+      String(activeSymbol || "").toUpperCase().includes(n)
+    ) || null;
+    if (!idx || historyLoadedRef.current.has(idx)) return;
+    requestHistory(idx);
+  }, [viewMode, activeSymbol, isIndexFuture, requestHistory]);
+
   // Fallback: if WS history failed, fetch full state from API after 5s (Chart/Footprint need early-hours data)
   useEffect(() => {
     if (!activeSymbol) return;
@@ -982,7 +992,7 @@ export default function App() {
       } catch (_) {}
     };
     fetchIndexCandles();
-    const id = setInterval(fetchIndexCandles, 60_000);
+    const id = setInterval(fetchIndexCandles, 30_000); // 30s when HFT active
     return () => clearInterval(id);
   }, [viewMode, activeSymbol, isIndexFuture, resolveIndex]);
   useEffect(() => {
@@ -999,7 +1009,7 @@ export default function App() {
       } catch (_) {}
     };
     fetchIndexLtp();
-    const id = setInterval(fetchIndexLtp, 2000); // 2s (Dhan rate limit 1/sec)
+    const id = setInterval(fetchIndexLtp, 1500); // 1.5s (Dhan rate limit 1/sec; slight buffer)
     return () => clearInterval(id);
   }, [viewMode, activeSymbol, isIndexFuture, resolveIndex]);
 
@@ -1257,28 +1267,38 @@ export default function App() {
                     apiBase={API_URL || window.location.origin}
                     candles={(() => {
                       const idx = resolveIndex(activeSymbol);
+                      const indexFlow = idx ? flows[idx] : null;
                       const indexCandles = idx ? (indexCandlesCache[idx] || []) : [];
+                      const liveCandles = indexFlow?.candles || [];
                       const indexLtp = idx ? indexLtpCache[idx] : null;
+                      const flowLtp = flow?.ltp;
+                      const livePrice = (indexFlow?.ltp != null && Number.isFinite(indexFlow.ltp))
+                        ? indexFlow.ltp
+                        : (indexLtp != null && Number.isFinite(indexLtp)) ? indexLtp : flowLtp;
+                      if (!liveCandles.length && !indexCandles.length) return [];
+                      if (liveCandles.length) {
+                        return liveCandles;
+                      }
                       if (!indexCandles.length) return [];
-                      // Index data only. Append live candle for current minute when we have index LTP
-                      if (indexLtp == null || !Number.isFinite(indexLtp)) return indexCandles;
-                      const IST_OFFSET_MS = 19800 * 1000;
-                      const nowMs = Date.now();
-                      const currentMinuteOpen = Math.floor(nowMs / 60000) * 60000 + IST_OFFSET_MS;
-                      const last = indexCandles[indexCandles.length - 1];
-                      const lastOpen = last?.open_time ?? 0;
+                      if (livePrice == null || !Number.isFinite(livePrice)) return indexCandles;
                       const bucketMs = 60 * 1000;
-                      const lastBucket = Math.floor(lastOpen / bucketMs) * bucketMs;
+                      const IST_OFFSET_MS = 19800 * 1000;
+                      const currentMinuteOpen = Math.floor(Date.now() / 60000) * 60000 + IST_OFFSET_MS;
+                      const last = indexCandles[indexCandles.length - 1];
+                      const lastBucket = Math.floor((last?.open_time ?? 0) / bucketMs) * bucketMs;
                       const currentBucket = Math.floor(currentMinuteOpen / bucketMs) * bucketMs;
                       if (lastBucket === currentBucket) {
-                        return [...indexCandles.slice(0, -1), { ...last, close: indexLtp, high: Math.max(last.high ?? indexLtp, indexLtp), low: Math.min(last.low ?? indexLtp, indexLtp), closed: false }];
+                        return [...indexCandles.slice(0, -1), { ...last, close: livePrice, high: Math.max(last.high ?? livePrice, livePrice), low: Math.min(last.low ?? livePrice, livePrice), closed: false }];
                       }
-                      const liveCandle = { open_time: currentMinuteOpen, open: last?.close ?? indexLtp, high: indexLtp, low: indexLtp, close: indexLtp, closed: false };
-                      return [...indexCandles, liveCandle];
+                      return [...indexCandles, { open_time: currentMinuteOpen, open: last?.close ?? livePrice, high: livePrice, low: livePrice, close: livePrice, closed: false }];
                     })()}
                     livePrice={(() => {
                       const idx = resolveIndex(activeSymbol);
-                      return idx ? indexLtpCache[idx] : null;
+                      const indexFlow = idx ? flows[idx] : null;
+                      const indexLtp = idx ? indexLtpCache[idx] : null;
+                      return (indexFlow?.ltp != null && Number.isFinite(indexFlow.ltp))
+                        ? indexFlow.ltp
+                        : (indexLtp != null && Number.isFinite(indexLtp)) ? indexLtp : flow?.ltp;
                     })()}
                   />
                 </div>

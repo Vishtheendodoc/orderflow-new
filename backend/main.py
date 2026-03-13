@@ -498,6 +498,16 @@ SENTIMENT_MAX_HISTORY = 200
 # expiry_list_cache keyed by index_name -> list of expiry date strings
 expiry_list_cache: Dict[str, list] = {}
 
+# ── Index live feed (IDX_I) for HFT chart ──────────────────────────────────────
+# Index symbols (NIFTY, BANKNIFTY, etc.) subscribed to Dhan WebSocket for tick-by-tick.
+# Per https://dhanhq.co/docs/v2/live-market-feed/
+INDEX_LIVE_SYMBOLS = [
+    ("NIFTY", "13"),
+    ("BANKNIFTY", "25"),
+    ("FINNIFTY", "27"),
+    ("MIDCPNIFTY", "442"),
+]
+
 # ── HFT Scanner ───────────────────────────────────────────────────────────────
 # Accumulated per-minute option chain snapshots → time-series for the triple-pane chart.
 # index_name → list[{t, ts, spot, mfi, flows}]
@@ -727,13 +737,15 @@ async def build_full_state(symbol: str, engine) -> dict:
             today = _ist_date_str()
             from_date = f"{today} 09:15:00"
             to_date = f"{today} 15:30:00"
-            # NSE FNO: index futures = FUTIDX, stock futures = FUTSTK; MCX = FUTCOM
             sym_upper = symbol.upper()
-            instrument = "FUTIDX" if any(k in sym_upper for k in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")) else "FUTSTK"
-            if "MCX" in exchange_segment or exchange_segment == "MCX_COMM":
+            if exchange_segment == "IDX_I":
+                instrument = "INDEX"
+            elif "MCX" in exchange_segment or exchange_segment == "MCX_COMM":
                 instrument = "FUTCOM"
                 from_date = f"{today} 09:00:00"
                 to_date = f"{today} 23:55:00"
+            else:
+                instrument = "FUTIDX" if any(k in sym_upper for k in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")) else "FUTSTK"
             data = await fetch_intraday_ohlcv(
                 security_id=str(security_id),
                 exchange_segment=exchange_segment,
@@ -3266,6 +3278,18 @@ async def startup():
         except Exception as e:
             logger.error(f"Auto-subscribe failed: {e}")
 
+    def _init_index_subscriptions():
+        """Subscribe to index live feed (IDX_I) for HFT chart tick-by-tick data."""
+        for symbol, security_id in INDEX_LIVE_SYMBOLS:
+            subscribed_symbols[symbol] = {
+                "security_id": security_id,
+                "exchange_segment": "IDX_I",
+            }
+            if symbol not in engines:
+                engines[symbol] = OrderFlowEngine(symbol, security_id)
+        logger.info(f"Index live feed: subscribed {[s for s, _ in INDEX_LIVE_SYMBOLS]} (IDX_I)")
+
+    _init_index_subscriptions()
     auto_subscribe_from_csv()
     _do_daily_reset()       # sets _last_reset_date = today; clears stale state
     load_all_snapshots()    # restore today's candles from disk (no-op if no disk mounted)
