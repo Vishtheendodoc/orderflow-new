@@ -427,6 +427,39 @@ html, body, #root {
   font-size: 11px;
 }
 
+/* ── Split view (two instruments side by side) ── */
+.split-view-container {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  gap: 1px;
+  background: var(--border);
+}
+.split-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+.split-pane-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.chart-toolbar-sep {
+  color: var(--border2);
+  font-size: 10px;
+  margin: 0 2px;
+}
+
 /* ── Chart view (candlestick + delta/cvd/vol boxes) ── */
 .chart-view-wrap {
   display: flex;

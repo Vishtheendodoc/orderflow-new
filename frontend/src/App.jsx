@@ -514,7 +514,7 @@ function SubscribePanel({ onSubscribe, activeSymbols }) {
   );
 }
 
-function InstrumentSelector({ symbols, value, onChange }) {
+function InstrumentSelector({ symbols, value, onChange, placeholder = "Select instrument" }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const inputRef = useRef(null);
@@ -541,7 +541,7 @@ function InstrumentSelector({ symbols, value, onChange }) {
         onClick={() => setOpen((o) => !o)}
         title="Select instrument"
       >
-        <span className="inst-select-value">{value || "Select instrument"}</span>
+        <span className="inst-select-value">{value || placeholder}</span>
         <span className="inst-select-arrow">{open ? "▲" : "▼"}</span>
       </button>
       {open && (
@@ -630,6 +630,8 @@ export default function App() {
   const activeSymbolRef = useRef(activeSymbol);
   /* ── Feature toggles ── */
   const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true, showHFT: false });
+  const [splitView, setSplitView] = useState(false);
+  const [activeSymbol2, setActiveSymbol2] = useState(null);
   // HFT overlay data cache: idx → [{ts, flows, spot, mfi}]
   const [hftSeriesCache, setHftSeriesCache] = useState({});
   const [featMenuOpen, setFeatMenuOpen] = useState(false);
@@ -855,6 +857,11 @@ export default function App() {
     if (historyLoadedRef.current.has(activeSymbol)) return;
     requestHistory(activeSymbol);
   }, [activeSymbol, requestHistory]);
+  useEffect(() => {
+    if (!activeSymbol2) return;
+    if (historyLoadedRef.current.has(activeSymbol2)) return;
+    requestHistory(activeSymbol2);
+  }, [activeSymbol2, requestHistory]);
 
   // Fallback: if WS history failed, fetch full state from API after 5s (Chart/Footprint need early-hours data)
   useEffect(() => {
@@ -998,6 +1005,31 @@ export default function App() {
     [candles, timeFrameMinutes, activeMarketOpenMs]
   );
 
+  // Second pane (split view)
+  const flow2 = activeSymbol2 ? flows[activeSymbol2] : null;
+  const candles2 = flow2?.candles || [];
+  const activeExchange2 = activeSymbol2 ? (symbolExchangeMap[activeSymbol2] ?? "NSE") : "NSE";
+  const activeMarketOpenMs2 = marketOpenMs(activeExchange2);
+  const displayCandles2 = useMemo(
+    () => aggregateCandles(candles2, timeFrameMinutes, activeMarketOpenMs2),
+    [candles2, timeFrameMinutes, activeMarketOpenMs2]
+  );
+  const isIndexFuture2 = useMemo(() => {
+    const s = (activeSymbol2 || "").toUpperCase();
+    return ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"].some(n => s.includes(n));
+  }, [activeSymbol2]);
+  const hftChartData2 = useMemo(() => {
+    const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find((n) =>
+      String(activeSymbol2 || "").toUpperCase().includes(n)
+    ) || null;
+    const indexFlow = idx ? flows[idx] : null;
+    const candlesOut = indexFlow?.candles || [];
+    const livePrice = (indexFlow?.ltp != null && Number.isFinite(indexFlow.ltp))
+      ? indexFlow.ltp
+      : flow2?.ltp;
+    return { candles: candlesOut, livePrice };
+  }, [activeSymbol2, flows, flow2]);
+
   /* ── dedicated full-screen footprint tab (opened via ⧉) ── */
   if (isFpTab) {
     return (
@@ -1079,6 +1111,25 @@ export default function App() {
                   value={activeSymbol}
                   onChange={setActiveSymbol}
                 />
+                {splitView && (
+                  <>
+                    <span className="chart-toolbar-sep">|</span>
+                    <InstrumentSelector
+                      symbols={[...new Set([...allSymbols, ...Object.keys(flows)])].sort()}
+                      value={activeSymbol2}
+                      onChange={setActiveSymbol2}
+                      placeholder="Second instrument…"
+                    />
+                  </>
+                )}
+                <span className="chart-toolbar-sep">|</span>
+                <button
+                  className={`cd-btn feat-btn${splitView ? " active" : ""}`}
+                  onClick={() => setSplitView((v) => !v)}
+                  title={splitView ? "Single view" : "Compare two instruments side by side"}
+                >
+                  {splitView ? "⊞ Split" : "⊟ Split"}
+                </button>
                 {/* Features dropdown — next to instrument selector, above chart */}
                 <div className="feat-menu-wrap" ref={featMenuRef}>
                   <button
@@ -1196,63 +1247,144 @@ export default function App() {
                   </button>
                 ))}
               </div>
-              {viewMode === "chart" ? (
-                <div className="chart-view-wrap">
-                  <OrderflowChart
-                    candles={displayCandles}
-                    symbol={flow.symbol}
-                    features={features}
-                    isIndexFuture={isIndexFuture}
-                    timeFrameMinutes={timeFrameMinutes}
-                    hftSeries={(() => {
-                      const s = (activeSymbol || "").toUpperCase();
-                      const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n));
-                      return idx ? (hftSeriesCache[idx] || []) : [];
-                    })()}
-                  />
+              {splitView ? (
+                <div className="split-view-container">
+                  <div className="split-pane">
+                    {flow && (
+                      viewMode === "chart" ? (
+                        <div className="chart-view-wrap">
+                          <OrderflowChart
+                            candles={displayCandles}
+                            symbol={flow.symbol}
+                            features={features}
+                            isIndexFuture={isIndexFuture}
+                            timeFrameMinutes={timeFrameMinutes}
+                            hftSeries={(() => {
+                              const s = (activeSymbol || "").toUpperCase();
+                              const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n));
+                              return idx ? (hftSeriesCache[idx] || []) : [];
+                            })()}
+                          />
+                        </div>
+                      ) : viewMode === "footprint" ? (
+                        <ErrorBoundary>
+                          <FootprintChart candles={displayCandles} symbol={flow.symbol} timeFrameMinutes={timeFrameMinutes} features={features} />
+                        </ErrorBoundary>
+                      ) : viewMode === "heatmap" ? (
+                        <div className="heatmap-view-wrap">
+                          <LiquidityHeatmap symbol={activeSymbol} apiBase={API_URL || window.location.origin} />
+                        </div>
+                      ) : viewMode === "gex" ? (
+                        <div className="heatmap-view-wrap">
+                          <GexChart symbol={activeSymbol} apiBase={API_URL || window.location.origin} />
+                        </div>
+                      ) : viewMode === "hft" ? (
+                        <div className="chart-view-wrap">
+                          <HftScannerChart symbol={activeSymbol} apiBase={API_URL || window.location.origin} candles={hftChartData.candles} livePrice={hftChartData.livePrice} />
+                        </div>
+                      ) : viewMode === "strike" ? (
+                        <div className="chart-view-wrap">
+                          <StrikeAnalysisChart symbol={activeSymbol} apiBase={API_URL || window.location.origin} />
+                        </div>
+                      ) : viewMode === "sentiment" ? (
+                        <div className="heatmap-view-wrap">
+                          <NiftySentimentDashboard symbol={activeSymbol} apiBase={API_URL || window.location.origin} />
+                        </div>
+                      ) : null
+                    )}
+                  </div>
+                  <div className="split-pane">
+                    {flow2 ? (
+                      viewMode === "chart" ? (
+                        <div className="chart-view-wrap">
+                          <OrderflowChart
+                            candles={displayCandles2}
+                            symbol={flow2.symbol}
+                            features={features}
+                            isIndexFuture={isIndexFuture2}
+                            timeFrameMinutes={timeFrameMinutes}
+                            hftSeries={(() => {
+                              const s = (activeSymbol2 || "").toUpperCase();
+                              const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n));
+                              return idx ? (hftSeriesCache[idx] || []) : [];
+                            })()}
+                          />
+                        </div>
+                      ) : viewMode === "footprint" ? (
+                        <ErrorBoundary>
+                          <FootprintChart candles={displayCandles2} symbol={flow2.symbol} timeFrameMinutes={timeFrameMinutes} features={features} />
+                        </ErrorBoundary>
+                      ) : viewMode === "heatmap" ? (
+                        <div className="heatmap-view-wrap">
+                          <LiquidityHeatmap symbol={activeSymbol2} apiBase={API_URL || window.location.origin} />
+                        </div>
+                      ) : viewMode === "gex" ? (
+                        <div className="heatmap-view-wrap">
+                          <GexChart symbol={activeSymbol2} apiBase={API_URL || window.location.origin} />
+                        </div>
+                      ) : viewMode === "hft" ? (
+                        <div className="chart-view-wrap">
+                          <HftScannerChart symbol={activeSymbol2} apiBase={API_URL || window.location.origin} candles={hftChartData2.candles} livePrice={hftChartData2.livePrice} />
+                        </div>
+                      ) : viewMode === "strike" ? (
+                        <div className="chart-view-wrap">
+                          <StrikeAnalysisChart symbol={activeSymbol2} apiBase={API_URL || window.location.origin} />
+                        </div>
+                      ) : viewMode === "sentiment" ? (
+                        <div className="heatmap-view-wrap">
+                          <NiftySentimentDashboard symbol={activeSymbol2} apiBase={API_URL || window.location.origin} />
+                        </div>
+                      ) : null
+                    ) : (
+                      <div className="split-pane-empty">
+                        <span className="empty-icon">⬡</span>
+                        <span>Select second instrument above</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
-              ) : viewMode === "footprint" ? (
-                <ErrorBoundary>
-                  <FootprintChart candles={displayCandles} symbol={flow.symbol} timeFrameMinutes={timeFrameMinutes} features={features} />
-                </ErrorBoundary>
-              ) : viewMode === "heatmap" ? (
-                <div className="heatmap-view-wrap">
-                  <LiquidityHeatmap
-                    symbol={activeSymbol}
-                    apiBase={API_URL || window.location.origin}
-                  />
-                </div>
-              ) : viewMode === "gex" ? (
-                <div className="heatmap-view-wrap">
-                  <GexChart
-                    symbol={activeSymbol}
-                    apiBase={API_URL || window.location.origin}
-                  />
-                </div>
-              ) : viewMode === "hft" ? (
-                <div className="chart-view-wrap">
-                  <HftScannerChart
-                    symbol={activeSymbol}
-                    apiBase={API_URL || window.location.origin}
-                    candles={hftChartData.candles}
-                    livePrice={hftChartData.livePrice}
-                  />
-                </div>
-              ) : viewMode === "strike" ? (
-                <div className="chart-view-wrap">
-                  <StrikeAnalysisChart
-                    symbol={activeSymbol}
-                    apiBase={API_URL || window.location.origin}
-                  />
-                </div>
-              ) : viewMode === "sentiment" ? (
-                <div className="heatmap-view-wrap">
-                  <NiftySentimentDashboard
-                    symbol={activeSymbol}
-                    apiBase={API_URL || window.location.origin}
-                  />
-                </div>
-              ) : null}
+              ) : (
+                viewMode === "chart" ? (
+                  <div className="chart-view-wrap">
+                    <OrderflowChart
+                      candles={displayCandles}
+                      symbol={flow.symbol}
+                      features={features}
+                      isIndexFuture={isIndexFuture}
+                      timeFrameMinutes={timeFrameMinutes}
+                      hftSeries={(() => {
+                        const s = (activeSymbol || "").toUpperCase();
+                        const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n));
+                        return idx ? (hftSeriesCache[idx] || []) : [];
+                      })()}
+                    />
+                  </div>
+                ) : viewMode === "footprint" ? (
+                  <ErrorBoundary>
+                    <FootprintChart candles={displayCandles} symbol={flow.symbol} timeFrameMinutes={timeFrameMinutes} features={features} />
+                  </ErrorBoundary>
+                ) : viewMode === "heatmap" ? (
+                  <div className="heatmap-view-wrap">
+                    <LiquidityHeatmap symbol={activeSymbol} apiBase={API_URL || window.location.origin} />
+                  </div>
+                ) : viewMode === "gex" ? (
+                  <div className="heatmap-view-wrap">
+                    <GexChart symbol={activeSymbol} apiBase={API_URL || window.location.origin} />
+                  </div>
+                ) : viewMode === "hft" ? (
+                  <div className="chart-view-wrap">
+                    <HftScannerChart symbol={activeSymbol} apiBase={API_URL || window.location.origin} candles={hftChartData.candles} livePrice={hftChartData.livePrice} />
+                  </div>
+                ) : viewMode === "strike" ? (
+                  <div className="chart-view-wrap">
+                    <StrikeAnalysisChart symbol={activeSymbol} apiBase={API_URL || window.location.origin} />
+                  </div>
+                ) : viewMode === "sentiment" ? (
+                  <div className="heatmap-view-wrap">
+                    <NiftySentimentDashboard symbol={activeSymbol} apiBase={API_URL || window.location.origin} />
+                  </div>
+                ) : null
+              )}
             </>
           ) : (activeSymbol || allSymbols.length > 0) && !flows[activeSymbol] ? (
             <>
