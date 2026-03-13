@@ -858,16 +858,6 @@ export default function App() {
     requestHistory(activeSymbol);
   }, [activeSymbol, requestHistory]);
 
-  // HFT chart: request index history so flows[idx] gets full-day candles (live feed preferred when available)
-  useEffect(() => {
-    if (viewMode !== "hft" || !activeSymbol || !isIndexFuture) return;
-    const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find((n) =>
-      String(activeSymbol || "").toUpperCase().includes(n)
-    ) || null;
-    if (!idx || historyLoadedRef.current.has(idx)) return;
-    requestHistory(idx);
-  }, [viewMode, activeSymbol, isIndexFuture, requestHistory]);
-
   // Fallback: if WS history failed, fetch full state from API after 5s (Chart/Footprint need early-hours data)
   useEffect(() => {
     if (!activeSymbol) return;
@@ -952,6 +942,16 @@ export default function App() {
     const s = (activeSymbol || "").toUpperCase();
     return ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"].some(n => s.includes(n));
   }, [activeSymbol]);
+
+  // HFT chart: request index history so flows[idx] gets full-day candles (live feed preferred when available)
+  useEffect(() => {
+    if (viewMode !== "hft" || !activeSymbol || !isIndexFuture) return;
+    const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find((n) =>
+      String(activeSymbol || "").toUpperCase().includes(n)
+    ) || null;
+    if (!idx || historyLoadedRef.current.has(idx)) return;
+    requestHistory(idx);
+  }, [viewMode, activeSymbol, isIndexFuture, requestHistory]);
 
   // HFT overlay: poll scanner data when showHFT is enabled on an index future (chart view only)
   useEffect(() => {
