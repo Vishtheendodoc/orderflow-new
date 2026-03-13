@@ -2361,9 +2361,8 @@ async def train_sentiment_ml(index: str = "NIFTY"):
 
 
 def _recompute_flows_from_strikes_raw(series: list, index_name: str, conviction: str) -> list:
-    """Re-compute flows from strikes_raw using fixed thresholds (per-index defaults).
-    conviction: 'high' | 'medium'. Uses _get_hft_thresholds for stability — no percentile derivation.
-    Same data → same flows. For medium: relaxed (0.66x OI, 0.5x vol).
+    """Re-compute flows from strikes_raw using percentile-derived thresholds.
+    conviction: 'high' | 'medium'. Returns series with updated flows per snap.
     """
     snaps_with_raw = [s for s in series if (s.get("strikes_raw") or {}) and any(
         (r.get("ce_ltp_chg") is not None or r.get("pe_ltp_chg") is not None)
@@ -2372,15 +2371,59 @@ def _recompute_flows_from_strikes_raw(series: list, index_name: str, conviction:
     if len(snaps_with_raw) < 10:
         return series
 
-    th = _get_hft_thresholds(index_name)
+    ce_oi_chg, pe_oi_chg = [], []
+    ce_ltp_chg, pe_ltp_chg = [], []
+    abs_ltp_chg = []
+    ce_vol, pe_vol = [], []
+    for snap in snaps_with_raw:
+        for r in (snap.get("strikes_raw") or {}).values():
+            co = r.get("ce_oi_chg")
+            po = r.get("pe_oi_chg")
+            if co is not None:
+                ce_oi_chg.append(co)
+            if po is not None:
+                pe_oi_chg.append(po)
+            cl = r.get("ce_ltp_chg")
+            pl = r.get("pe_ltp_chg")
+            if cl is not None:
+                ce_ltp_chg.append(cl)
+                abs_ltp_chg.append(abs(cl))
+            if pl is not None:
+                pe_ltp_chg.append(pl)
+                abs_ltp_chg.append(abs(pl))
+            cv = r.get("ce_vol")
+            pv = r.get("pe_vol")
+            if cv is not None:
+                ce_vol.append(cv)
+            if pv is not None:
+                pe_vol.append(pv)
+
+    def _p(arr: list, p: float) -> float:
+        arr = [x for x in arr if x is not None and not (isinstance(x, float) and math.isnan(x))]
+        return _percentile(arr, p) if arr else 0.0
+
     is_high = conviction == "high"
-    # Fixed thresholds: high = per-index defaults; medium = relaxed (0.66x OI, 0.5x vol)
-    oi_chg_pct = th["oi_chg_pct"] if is_high else max(th["oi_chg_pct"] * 0.66, 2.0)
-    oi_chg_min = th["oi_chg_min"] if is_high else max(th["oi_chg_min"] * 0.66, 2.0)
-    ltp_stable = th["ltp_stable"]
-    ltp_move = th["ltp_move"]
-    ce_vol_min = int(th["ce_vol_min"]) if is_high else max(int(th["ce_vol_min"] * 0.5), 100)
-    pe_vol_min = int(th["pe_vol_min"]) if is_high else max(int(th["pe_vol_min"] * 0.5), 100)
+    oi_p = 98 if (is_high and index_name == "MIDCPNIFTY") else (90 if is_high else 75)
+    oi_chg_pct = max(_p(ce_oi_chg, oi_p), _p(pe_oi_chg, oi_p), 2.0)
+    oi_chg_min = _p(ce_oi_chg + pe_oi_chg, 75 if is_high else 50) or 2.0
+    ltp_stable_p75 = _p(abs_ltp_chg, 75) if abs_ltp_chg else 1.0
+    ltp_stable_p90 = _p(abs_ltp_chg, 90) if abs_ltp_chg else 1.5
+    ltp_stable = max(ltp_stable_p75 if is_high else ltp_stable_p90, 1.0)
+    ltp_move = max(_p(abs_ltp_chg, 75 if is_high else 50), 1.0)
+    ce_vol_p75 = _p(ce_vol, 75)
+    pe_vol_p75 = _p(pe_vol, 75)
+    ce_vol_p50 = _p(ce_vol, 50)
+    pe_vol_p50 = _p(pe_vol, 50)
+    ce_vol_p10 = _p(ce_vol, 10)
+    pe_vol_p10 = _p(pe_vol, 10)
+    ce_vol_min = ce_vol_p75 if is_high else ce_vol_p50
+    pe_vol_min = pe_vol_p75 if is_high else pe_vol_p50
+    if ce_vol_p75 > 500_000:
+        ce_vol_min = min(ce_vol_min, 100_000) if ce_vol_min else min(ce_vol_p10, 100_000)
+    if pe_vol_p75 > 500_000:
+        pe_vol_min = min(pe_vol_min, 100_000) if pe_vol_min else min(pe_vol_p10, 100_000)
+    ce_vol_min = max(ce_vol_min or 0, 100)
+    pe_vol_min = max(pe_vol_min or 0, 100)
 
     out = []
     for snap in series:
