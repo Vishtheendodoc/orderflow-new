@@ -287,6 +287,61 @@ function computeLTP(candles, hftSeries, symbol) {
   });
 }
 
+/* ─── computeMII: Momentum Ignition Index from candles ───
+ * DA = delta_t - delta_{t-1}
+ * VE = Volume_t / AvgVolume_10
+ * PE = |PriceChange| / Volume
+ * MII = 0.40*DA_norm + 0.35*VE_norm + 0.25*PE_norm
+ */
+function computeMII(candles) {
+  if (!candles?.length) return [];
+  const W = 10;
+
+  const raw = [];
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const buyVol = c.buy_vol ?? 0;
+    const sellVol = c.sell_vol ?? 0;
+    const vol = buyVol + sellVol;
+    const delta = c.delta ?? (buyVol - sellVol);
+    const open = c.open ?? c.close ?? 0;
+    const close = c.close ?? c.open ?? 0;
+    const priceChange = close - open;
+
+    const da = i > 0 ? delta - (candles[i - 1].delta ?? (candles[i - 1].buy_vol ?? 0) - (candles[i - 1].sell_vol ?? 0)) : 0;
+
+    let avgVol10 = 0;
+    const start = Math.max(0, i - W + 1);
+    for (let j = start; j <= i; j++) {
+      const v = (candles[j].buy_vol ?? 0) + (candles[j].sell_vol ?? 0);
+      avgVol10 += v;
+    }
+    avgVol10 = avgVol10 / Math.max(1, i - start + 1);
+    const ve = avgVol10 > 0 ? vol / avgVol10 : 1;
+
+    const pe = vol > 0 ? Math.abs(priceChange) / vol : 0;
+
+    raw.push({ open_time: c.open_time, da, ve, pe, delta, priceChange });
+  }
+
+  const daVals = raw.map(v => v.da);
+  const daMax = Math.max(...daVals.map(Math.abs), 1);
+  const peVals = raw.map(v => v.pe);
+  const peMin = Math.min(...peVals);
+  const peMax = Math.max(...peVals);
+  const peRange = peMax - peMin || 1;
+
+  return raw.map((v) => {
+    const daNorm = Math.max(-1, Math.min(1, v.da / daMax));
+    const veClamped = Math.max(0, Math.min(1, (v.ve - 1) / 2));
+    const veNorm = veClamped * (v.delta >= 0 ? 1 : -1);
+    const peNorm01 = peRange > 0 ? (v.pe - peMin) / peRange : 0;
+    const peNorm = peNorm01 * (v.priceChange >= 0 ? 1 : -1);
+    const mii = 0.40 * daNorm + 0.35 * veNorm + 0.25 * peNorm;
+    return { ...v, mii };
+  });
+}
+
 /* ════════════════════════════════════════════
    COMPONENT
 ════════════════════════════════════════════ */
@@ -295,14 +350,16 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   const showVWAP = features.showVWAP ?? true;
   const showVP   = features.showVP   ?? true;
   const showLTP  = features.showLTP ?? false;
+  const showMII  = features.showMII ?? false;
   /* compact layout for narrow/mobile screens */
   const isMobile   = typeof window !== "undefined" && window.innerWidth <= 768;
   const HDR_H_EFF  = isMobile ? 36 : HDR_H;
   const TIME_H_EFF = isMobile ? 18 : TIME_H;
-  const numBotRows = (showOI ? 4 : 3) + (showLTP ? 1 : 0);
+  const numBotRows = (showOI ? 4 : 3) + (showLTP ? 1 : 0) + (showMII ? 1 : 0);
+  const extraRows = (showLTP ? 1 : 0) + (showMII ? 1 : 0);
   const BOT_H_EFF  = showOI
-    ? (showLTP ? (isMobile ? 88 : 112) : (isMobile ? 68 : 90))
-    : (showLTP ? (isMobile ? 72 : 90) : (isMobile ? 52 : BOT_H));
+    ? (extraRows > 0 ? (isMobile ? 68 + extraRows * 18 : 90 + extraRows * 22) : (isMobile ? 68 : 90))
+    : (extraRows > 0 ? (isMobile ? 52 + extraRows * 18 : BOT_H + extraRows * 22) : (isMobile ? 52 : BOT_H));
   // eslint-disable-next-line no-shadow
   const NZW  = isMobile ? 40 : 80;  // numbers-zone width per candle slot (20px/40px per side)
   // eslint-disable-next-line no-shadow
@@ -367,8 +424,14 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     [showLTP, candles, hftSeries, symbol]
   );
 
+  const miiSeries = useMemo(
+    () => (showMII ? computeMII(candles) : []),
+    [showMII, candles]
+  );
+
   const barsRef     = useRef(bars);
   const ltpSeriesRef = useRef(ltpSeries);
+  const miiSeriesRef = useRef(miiSeries);
   const pMinRef     = useRef(priceMin);
   const pMaxRef     = useRef(priceMax);
   const pRanRef     = useRef(priceRange);
@@ -390,7 +453,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     pRanRef.current = priceRange;
     tickRef.current = tickSize;
     ltpSeriesRef.current = ltpSeries;
-  }, [bars, priceMin, priceMax, priceRange, tickSize, ltpSeries]);
+    miiSeriesRef.current = miiSeries;
+  }, [bars, priceMin, priceMax, priceRange, tickSize, ltpSeries, miiSeries]);
 
   useEffect(() => {
     if (!bars.length) return;
@@ -831,12 +895,49 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       }
     }
 
+    /* ── PASS 7: MII signal arrows (MII > 0.3 or < -0.3) ── */
+    if (showMII && miiSeriesRef.current.length) {
+      const miiArr = miiSeriesRef.current;
+      const arrowSize = 8;
+      for (let i = 0; i < bs.length; i++) {
+        const mii = miiArr[i]?.mii;
+        if (mii == null || (mii <= 0.3 && mii >= -0.3)) continue;
+
+        const b = bs[i];
+        const x  = i * slotW - pan;
+        const cx = x + nzHalf;
+        if (cx + cw < 0 || cx > W) continue;
+
+        const high = b.high ?? Math.max(b.open ?? 0, b.close ?? 0);
+        const low  = b.low  ?? Math.min(b.open ?? 0, b.close ?? 0);
+        const midX = Math.round(cx + cw / 2);
+        const highY = p2y(high, H);
+        const lowY  = p2y(low, H);
+
+        ctx.fillStyle = mii > 0.3 ? C.buy : C.sell;
+        ctx.beginPath();
+        if (mii > 0.3) {
+          const ay = highY - arrowSize - 2;
+          ctx.moveTo(midX, ay - arrowSize);
+          ctx.lineTo(midX - arrowSize / 2, ay);
+          ctx.lineTo(midX + arrowSize / 2, ay);
+        } else {
+          const ay = lowY + arrowSize + 2;
+          ctx.moveTo(midX, ay + arrowSize);
+          ctx.lineTo(midX - arrowSize / 2, ay);
+          ctx.lineTo(midX + arrowSize / 2, ay);
+        }
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+
     /* price scale + time (pass hoverPrice so Y-axis shows price at crosshair level) */
     _drawPS(H, ts, hoverPrice);
     _drawTime();
     _drawBot();
   }, [dpr, getCanvasH, getVisRange, getVisPMin, p2y, getMaxPan, hoverBar, hoverPrice,
-      showVWAP, showVP, isMobile]);
+      showVWAP, showVP, showMII, isMobile]);
 
   /* ── price scale: TradingView-style levels + hover price at crosshair ── */
   const PS_LABEL_MIN_PX = 40;
@@ -954,6 +1055,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
     const rowYs = Array.from({ length: numRows }, (_, r) => ROW_H * (r + 0.5));
     const ltpArr = ltpSeriesRef.current;
+    const miiArr = miiSeriesRef.current;
     ctx.font = `600 9.5px ${MONO}`;
     ctx.textBaseline = "middle";
 
@@ -996,10 +1098,15 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       if (showLTP && ltpArr[i] != null) {
         const ltp = ltpArr[i].ltp;
         ctx.fillStyle = ltp >= 0 ? C.buy : C.sell;
-        ctx.fillText(ltp.toFixed(2), midX, rowYs[numRows - 1]);
+        ctx.fillText(ltp.toFixed(2), midX, rowYs[showMII ? numRows - 2 : numRows - 1]);
+      }
+      if (showMII && miiArr[i] != null) {
+        const mii = miiArr[i].mii;
+        ctx.fillStyle = mii >= 0 ? C.buy : C.sell;
+        ctx.fillText(mii.toFixed(2), midX, rowYs[numRows - 1]);
       }
     }
-  }, [dpr, hoverBar, showOI, showLTP, numBotRows]);
+  }, [dpr, hoverBar, showOI, showLTP, showMII, numBotRows]);
 
   const scheduleDraw = useCallback(() => {
     if (rafId.current) cancelAnimationFrame(rafId.current);
@@ -1470,6 +1577,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
               { label: "VOL",    color: C.textDim },
               ...(showOI ? [{ label: "OI", color: C.textDim }] : []),
               ...(showLTP ? [{ label: "LTP", color: C.textDim }] : []),
+              ...(showMII ? [{ label: "MII", color: C.textDim }] : []),
             ].map(({ label, color }) => (
               <span key={label} style={{
                 fontSize: 8, color, fontWeight: 700,
