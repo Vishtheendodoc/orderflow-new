@@ -629,7 +629,7 @@ export default function App() {
   // Ref copy of activeSymbol so WS callbacks can read it without stale closures
   const activeSymbolRef = useRef(activeSymbol);
   /* ── Feature toggles ── */
-  const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true, showHFT: false });
+  const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true, showHFT: false, showLTP: false });
   const [splitView, setSplitView] = useState(false);
   const [activeSymbol2, setActiveSymbol2] = useState(null);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -985,24 +985,30 @@ export default function App() {
     return ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"].some(n => s.includes(n));
   }, [activeSymbol]);
 
-  // HFT overlay: poll scanner data when showHFT is enabled on an index future (chart view only)
+  // HFT overlay: poll scanner data when showHFT or showLTP is enabled on an index future (chart view only)
   useEffect(() => {
-    if (!features.showHFT || !isIndexFuture || !activeSymbol) return;
+    if (!(features.showHFT || features.showLTP)) return;
     const base = API_URL || window.location.origin;
-    const s = activeSymbol.toUpperCase();
-    const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n)) || s;
+    const indices = new Set();
+    const idx1 = activeSymbol ? ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => String(activeSymbol).toUpperCase().includes(n)) : null;
+    if (idx1) indices.add(idx1);
+    const idx2 = splitView && activeSymbol2 ? ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => String(activeSymbol2).toUpperCase().includes(n)) : null;
+    if (idx2) indices.add(idx2);
+    if (!indices.size) return;
     const poll = async () => {
-      try {
-        const res = await fetch(`${base}/api/hft_scanner/${encodeURIComponent(idx)}`);
-        if (!res.ok) return;
-        const d = await res.json();
-        if (d.series?.length) setHftSeriesCache((prev) => ({ ...prev, [idx]: d.series }));
-      } catch (_) {}
+      for (const idx of indices) {
+        try {
+          const res = await fetch(`${base}/api/hft_scanner/${encodeURIComponent(idx)}`);
+          if (!res.ok) continue;
+          const d = await res.json();
+          if (d.series?.length) setHftSeriesCache((prev) => ({ ...prev, [idx]: d.series }));
+        } catch (_) {}
+      }
     };
     poll();
     const id = setInterval(poll, 30_000);
     return () => clearInterval(id);
-  }, [features.showHFT, isIndexFuture, activeSymbol]);
+  }, [features.showHFT, features.showLTP, activeSymbol, splitView, activeSymbol2]);
 
   // HFT chart: request index history (disk-backed, same as futures — no Dhan API)
   useEffect(() => {
@@ -1072,7 +1078,11 @@ export default function App() {
     return (
       <div style={{ width: "100vw", height: "100vh", display: "flex", flexDirection: "column", overflow: "hidden", background: "#f0f2f8" }}>
         <ErrorBoundary>
-          <FootprintChart candles={displayCandles} symbol={urlSymbol} timeFrameMinutes={timeFrameMinutes} />
+          <FootprintChart candles={displayCandles} symbol={urlSymbol} timeFrameMinutes={timeFrameMinutes} features={features} hftSeries={(() => {
+            const s = (urlSymbol || "").toUpperCase();
+            const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n));
+            return idx ? (hftSeriesCache[idx] || []) : [];
+          })()} />
         </ErrorBoundary>
       </div>
     );
@@ -1211,11 +1221,12 @@ export default function App() {
                         { key: "showOI",   label: "Open Interest (OI)" },
                         { key: "showVWAP", label: "VWAP (session)" },
                         { key: "showVP",   label: "Volume Profile (VPOC / VAH / VAL)" },
-                      ].map(({ key, label }) => (
+                        { key: "showLTP",   label: "Liquidity Trap Pressure (LTP)", defaultVal: false },
+                      ].map(({ key, label, defaultVal }) => (
                         <label key={key} className="feat-row">
                           <input
                             type="checkbox"
-                            checked={features[key] ?? true}
+                            checked={features[key] ?? (defaultVal !== undefined ? defaultVal : true)}
                             onChange={(e) => setFeatures((f) => ({ ...f, [key]: e.target.checked }))}
                           />
                           {label}
@@ -1333,7 +1344,11 @@ export default function App() {
                         </div>
                       ) : viewMode === "footprint" ? (
                         <ErrorBoundary>
-                          <FootprintChart candles={displayCandles} symbol={flow.symbol} timeFrameMinutes={timeFrameMinutes} features={features} />
+                          <FootprintChart candles={displayCandles} symbol={flow.symbol} timeFrameMinutes={timeFrameMinutes} features={features} hftSeries={(() => {
+                            const s = (activeSymbol || "").toUpperCase();
+                            const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n));
+                            return idx ? (hftSeriesCache[idx] || []) : [];
+                          })()} />
                         </ErrorBoundary>
                       ) : viewMode === "heatmap" ? (
                         <div className="heatmap-view-wrap">
@@ -1377,7 +1392,11 @@ export default function App() {
                         </div>
                       ) : viewMode === "footprint" ? (
                         <ErrorBoundary>
-                          <FootprintChart candles={displayCandles2} symbol={flow2.symbol} timeFrameMinutes={timeFrameMinutes} features={features} />
+                          <FootprintChart candles={displayCandles2} symbol={flow2.symbol} timeFrameMinutes={timeFrameMinutes} features={features} hftSeries={(() => {
+                            const s = (activeSymbol2 || "").toUpperCase();
+                            const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n));
+                            return idx ? (hftSeriesCache[idx] || []) : [];
+                          })()} />
                         </ErrorBoundary>
                       ) : viewMode === "heatmap" ? (
                         <div className="heatmap-view-wrap">
@@ -1426,7 +1445,11 @@ export default function App() {
                   </div>
                 ) : viewMode === "footprint" ? (
                   <ErrorBoundary>
-                    <FootprintChart candles={displayCandles} symbol={flow.symbol} timeFrameMinutes={timeFrameMinutes} features={features} />
+                    <FootprintChart candles={displayCandles} symbol={flow.symbol} timeFrameMinutes={timeFrameMinutes} features={features} hftSeries={(() => {
+                      const s = (activeSymbol || "").toUpperCase();
+                      const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n));
+                      return idx ? (hftSeriesCache[idx] || []) : [];
+                    })()} />
                   </ErrorBoundary>
                 ) : viewMode === "heatmap" ? (
                   <div className="heatmap-view-wrap">

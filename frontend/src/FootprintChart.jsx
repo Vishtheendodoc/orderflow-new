@@ -209,20 +209,100 @@ function processCandles(candles, maxLevelsCap) {
   return { bars, priceMin: pMin, priceMax: pMax, priceRange, tickSize };
 }
 
+/* ─── computeLTP: Liquidity Trap Pressure from candles + optional HFT ───
+ * DP = (buy_vol - sell_vol) / total_vol
+ * AS = |delta| / max(|price_change|, 0.01) → cap at 20, min(1, AS/20) * sign(delta)
+ * DD = sign(price_slope) - sign(delta_slope) over 5 bars → normalize [-2,2] to [-1,1]
+ * OWP = (Heavy Put Write + Put Write) - (Call Short + Heavy Call Short) — indices only
+ * LTP = 0.30*DP + 0.30*AS_norm + 0.25*DD_norm + 0.15*OWP_norm
+ */
+function computeLTP(candles, hftSeries, symbol) {
+  if (!candles?.length) return [];
+  const s = String(symbol || "").toUpperCase();
+  const isIndex = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"].some(n => s.includes(n));
+  const idx = ["BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTY"].find(n => s.includes(n));
+
+  const hftByMin = new Map();
+  if (isIndex && hftSeries?.length) {
+    hftSeries.forEach((h) => {
+      const ts = h.ts != null ? h.ts : 0;
+      const minKey = Math.floor(ts / 60) * 60;
+      const flows = h.flows || {};
+      const putWrite = (flows["Heavy Put Write"] || 0) + (flows["Put Write"] || 0);
+      const callWrite = (flows["Call Short"] || 0) + (flows["Heavy Call Short"] || 0);
+      const owp = putWrite - callWrite;
+      hftByMin.set(minKey, (hftByMin.get(minKey) || 0) + owp);
+    });
+  }
+
+  const ltpValues = [];
+  const W = 5;
+
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const buyVol = c.buy_vol ?? 0;
+    const sellVol = c.sell_vol ?? 0;
+    const totalVol = buyVol + sellVol;
+    const delta = c.delta ?? (buyVol - sellVol);
+    const open = c.open ?? c.close ?? 0;
+    const close = c.close ?? c.open ?? 0;
+    const priceChange = Math.abs(close - open) || 0;
+
+    let dp = totalVol > 0 ? (buyVol - sellVol) / totalVol : 0;
+
+    let asNorm = 0;
+    if (priceChange > 0.0001) {
+      const as = Math.abs(delta) / priceChange;
+      const capped = Math.min(1, Math.min(20, as) / 20);
+      asNorm = capped * (delta >= 0 ? 1 : -1);
+    }
+
+    let ddNorm = 0;
+    if (i >= W - 1) {
+      const priceSlope = (candles[i].close ?? 0) - (candles[i - W + 1].open ?? candles[i - W + 1].close ?? 0);
+      const deltaSlope = (candles[i].delta ?? 0) - (candles[i - W + 1].delta ?? 0);
+      const dd = (priceSlope >= 0 ? 1 : -1) - (deltaSlope >= 0 ? 1 : -1);
+      ddNorm = Math.max(-1, Math.min(1, dd / 2));
+    }
+
+    let owpRaw = 0;
+    if (isIndex && idx) {
+      const openTime = c.open_time != null ? toMs(c.open_time) : 0;
+      const minKey = Math.floor(openTime / 60000) * 60;
+      owpRaw = hftByMin.get(minKey) ?? 0;
+    }
+
+    ltpValues.push({ open_time: c.open_time, dp, asNorm, ddNorm, owpRaw });
+  }
+
+  const owpVals = ltpValues.map(v => v.owpRaw).filter(x => x !== 0);
+  const owpMin = owpVals.length ? Math.min(...owpVals) : 0;
+  const owpMax = owpVals.length ? Math.max(...owpVals) : 0;
+  const owpRange = owpMax - owpMin || 1;
+
+  return ltpValues.map((v) => {
+    const owpNorm = owpVals.length ? (v.owpRaw - owpMin) / owpRange * 2 - 1 : 0;
+    const ltp = 0.30 * v.dp + 0.30 * v.asNorm + 0.25 * v.ddNorm + 0.15 * owpNorm;
+    return { ...v, ltp };
+  });
+}
+
 /* ════════════════════════════════════════════
    COMPONENT
 ════════════════════════════════════════════ */
-export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMinutes = 1, features = {} }) {
+export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMinutes = 1, features = {}, hftSeries }) {
   const showOI   = features.showOI   ?? true;
   const showVWAP = features.showVWAP ?? true;
   const showVP   = features.showVP   ?? true;
+  const showLTP  = features.showLTP ?? false;
   /* compact layout for narrow/mobile screens */
   const isMobile   = typeof window !== "undefined" && window.innerWidth <= 768;
   const HDR_H_EFF  = isMobile ? 36 : HDR_H;
   const TIME_H_EFF = isMobile ? 18 : TIME_H;
+  const numBotRows = (showOI ? 4 : 3) + (showLTP ? 1 : 0);
   const BOT_H_EFF  = showOI
-    ? (isMobile ? 68 : 90)   // 4 rows
-    : (isMobile ? 52 : BOT_H); // 3 rows
+    ? (showLTP ? (isMobile ? 88 : 112) : (isMobile ? 68 : 90))
+    : (showLTP ? (isMobile ? 72 : 90) : (isMobile ? 52 : BOT_H));
   // eslint-disable-next-line no-shadow
   const NZW  = isMobile ? 40 : 80;  // numbers-zone width per candle slot (20px/40px per side)
   // eslint-disable-next-line no-shadow
@@ -282,7 +362,13 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   const { bars, priceMin, priceMax, priceRange, tickSize } =
     useMemo(() => processCandles(candles, maxLevelsCap), [candles, maxLevelsCap]);
 
+  const ltpSeries = useMemo(
+    () => (showLTP ? computeLTP(candles, hftSeries, symbol) : []),
+    [showLTP, candles, hftSeries, symbol]
+  );
+
   const barsRef     = useRef(bars);
+  const ltpSeriesRef = useRef(ltpSeries);
   const pMinRef     = useRef(priceMin);
   const pMaxRef     = useRef(priceMax);
   const pRanRef     = useRef(priceRange);
@@ -303,7 +389,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     pMaxRef.current = priceMax;
     pRanRef.current = priceRange;
     tickRef.current = tickSize;
-  }, [bars, priceMin, priceMax, priceRange, tickSize]);
+    ltpSeriesRef.current = ltpSeries;
+  }, [bars, priceMin, priceMax, priceRange, tickSize, ltpSeries]);
 
   useEffect(() => {
     if (!bars.length) return;
@@ -857,7 +944,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     ctx.fillStyle = "#fff";
     ctx.fillRect(0, 0, W, H);
 
-    const numRows = showOI ? 4 : 3;
+    const numRows = numBotRows;
     const ROW_H   = Math.floor(H / numRows);
     /* row dividers */
     ctx.strokeStyle = C.border; ctx.lineWidth = 0.5;
@@ -866,6 +953,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     }
 
     const rowYs = Array.from({ length: numRows }, (_, r) => ROW_H * (r + 0.5));
+    const ltpArr = ltpSeriesRef.current;
     ctx.font = `600 9.5px ${MONO}`;
     ctx.textBaseline = "middle";
 
@@ -905,8 +993,13 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         ctx.fillStyle = oiChange >= 0 ? C.buy : C.sell;
         ctx.fillText(oi > 0 ? fmtV(oi) : "—", midX, rowYs[3]);
       }
+      if (showLTP && ltpArr[i] != null) {
+        const ltp = ltpArr[i].ltp;
+        ctx.fillStyle = ltp >= 0 ? C.buy : C.sell;
+        ctx.fillText(ltp.toFixed(2), midX, rowYs[numRows - 1]);
+      }
     }
-  }, [dpr, hoverBar]);
+  }, [dpr, hoverBar, showOI, showLTP, numBotRows]);
 
   const scheduleDraw = useCallback(() => {
     if (rafId.current) cancelAnimationFrame(rafId.current);
@@ -1376,6 +1469,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
               { label: "CVD",    color: C.textDim },
               { label: "VOL",    color: C.textDim },
               ...(showOI ? [{ label: "OI", color: C.textDim }] : []),
+              ...(showLTP ? [{ label: "LTP", color: C.textDim }] : []),
             ].map(({ label, color }) => (
               <span key={label} style={{
                 fontSize: 8, color, fontWeight: 700,
