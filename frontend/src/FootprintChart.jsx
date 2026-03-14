@@ -895,13 +895,18 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       }
     }
 
-    /* ── PASS 7: MII signal arrows (MII > 0.3 or < -0.3) ── */
-    if (showMII && miiSeriesRef.current.length) {
-      const miiArr = miiSeriesRef.current;
-      const arrowSize = 8;
+    /* ── PASS 7: LTP and MII signal arrows (|value| > 0.3) ── */
+    const ltpArr = showLTP ? ltpSeriesRef.current : [];
+    const miiArr = showMII ? miiSeriesRef.current : [];
+    const arrowSize = 8;
+    const arrowOffset = 6;
+    if ((showLTP && ltpArr.length) || (showMII && miiArr.length)) {
       for (let i = 0; i < bs.length; i++) {
+        const ltp = ltpArr[i]?.ltp;
         const mii = miiArr[i]?.mii;
-        if (mii == null || (mii <= 0.3 && mii >= -0.3)) continue;
+        const hasLtp = showLTP && ltp != null && (ltp > 0.3 || ltp < -0.3);
+        const hasMii = showMII && mii != null && (mii > 0.3 || mii < -0.3);
+        if (!hasLtp && !hasMii) continue;
 
         const b = bs[i];
         const x  = i * slotW - pan;
@@ -910,25 +915,36 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
         const high = b.high ?? Math.max(b.open ?? 0, b.close ?? 0);
         const low  = b.low  ?? Math.min(b.open ?? 0, b.close ?? 0);
-        const midX = Math.round(cx + cw / 2);
+        const baseMidX = Math.round(cx + cw / 2);
         const highY = p2y(high, H);
         const lowY  = p2y(low, H);
 
-        ctx.fillStyle = mii > 0.3 ? C.buy : C.sell;
-        ctx.beginPath();
-        if (mii > 0.3) {
-          const ay = highY - arrowSize - 2;
-          ctx.moveTo(midX, ay - arrowSize);
-          ctx.lineTo(midX - arrowSize / 2, ay);
-          ctx.lineTo(midX + arrowSize / 2, ay);
-        } else {
-          const ay = lowY + arrowSize + 2;
-          ctx.moveTo(midX, ay + arrowSize);
-          ctx.lineTo(midX - arrowSize / 2, ay);
-          ctx.lineTo(midX + arrowSize / 2, ay);
+        const drawArrow = (ax, val, isUp) => {
+          ctx.fillStyle = val > 0.3 ? C.buy : C.sell;
+          ctx.beginPath();
+          if (isUp) {
+            const ay = highY - arrowSize - 2;
+            ctx.moveTo(ax, ay - arrowSize);
+            ctx.lineTo(ax - arrowSize / 2, ay);
+            ctx.lineTo(ax + arrowSize / 2, ay);
+          } else {
+            const ay = lowY + arrowSize + 2;
+            ctx.moveTo(ax, ay + arrowSize);
+            ctx.lineTo(ax - arrowSize / 2, ay);
+            ctx.lineTo(ax + arrowSize / 2, ay);
+          }
+          ctx.closePath();
+          ctx.fill();
+        };
+
+        if (hasLtp && hasMii) {
+          drawArrow(baseMidX - arrowOffset, ltp, ltp > 0.3);
+          drawArrow(baseMidX + arrowOffset, mii, mii > 0.3);
+        } else if (hasLtp) {
+          drawArrow(baseMidX, ltp, ltp > 0.3);
+        } else if (hasMii) {
+          drawArrow(baseMidX, mii, mii > 0.3);
         }
-        ctx.closePath();
-        ctx.fill();
       }
     }
 
@@ -937,7 +953,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     _drawTime();
     _drawBot();
   }, [dpr, getCanvasH, getVisRange, getVisPMin, p2y, getMaxPan, hoverBar, hoverPrice,
-      showVWAP, showVP, showMII, isMobile]);
+      showVWAP, showVP, showLTP, showMII, isMobile]);
 
   /* ── price scale: TradingView-style levels + hover price at crosshair ── */
   const PS_LABEL_MIN_PX = 40;
@@ -1496,6 +1512,30 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
                 <span style={{ fontFamily: MONO, fontSize: 9, color: C.textDim }}>
                   Vol {fmtV((hoverBar.buy_vol || 0) + (hoverBar.sell_vol || 0))}
                 </span>
+                {showLTP && (() => {
+                  const barIdx = bars.indexOf(hoverBar);
+                  const ltpVal = barIdx >= 0 ? ltpSeriesRef.current[barIdx]?.ltp : null;
+                  return ltpVal != null && Math.abs(ltpVal) > 0.3 ? (
+                    <span
+                      title="LTP > 0.3: Bullish trap for shorts | LTP < -0.3: Bull trap"
+                      style={{ fontFamily: MONO, fontSize: 9, fontWeight: 700, color: ltpVal >= 0 ? C.buy : C.sell }}
+                    >
+                      LTP {ltpVal.toFixed(2)}
+                    </span>
+                  ) : null;
+                })()}
+                {showMII && (() => {
+                  const barIdx = bars.indexOf(hoverBar);
+                  const miiVal = barIdx >= 0 ? miiSeriesRef.current[barIdx]?.mii : null;
+                  return miiVal != null && Math.abs(miiVal) > 0.3 ? (
+                    <span
+                      title="MII > 0.3: Buying ignition | MII < -0.3: Selling ignition"
+                      style={{ fontFamily: MONO, fontSize: 9, fontWeight: 700, color: miiVal >= 0 ? C.buy : C.sell }}
+                    >
+                      MII {miiVal.toFixed(2)}
+                    </span>
+                  ) : null;
+                })()}
               </>
             )}
           </div>
