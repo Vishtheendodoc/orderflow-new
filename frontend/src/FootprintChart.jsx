@@ -996,7 +996,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         const highY = p2y(high, H);
         const lowY  = p2y(low, H);
 
-        /* Reversal interpretation: positive LTP/MII = buyers exhausted → expect down; negative = sellers exhausted → expect up */
+        /* Direct: positive LTP/MII → up arrow; negative → down arrow */
         const drawArrow = (ax, val, isUp) => {
           ctx.fillStyle = isUp ? C.buy : C.sell;
           ctx.beginPath();
@@ -1016,12 +1016,12 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         };
 
         if (hasLtp && hasMii) {
-          drawArrow(baseMidX - arrowOffset, ltp, ltp < -th);
-          drawArrow(baseMidX + arrowOffset, mii, mii < -th);
+          drawArrow(baseMidX - arrowOffset, ltp, ltp > th);
+          drawArrow(baseMidX + arrowOffset, mii, mii > th);
         } else if (hasLtp) {
-          drawArrow(baseMidX, ltp, ltp < -th);
+          drawArrow(baseMidX, ltp, ltp > th);
         } else if (hasMii) {
-          drawArrow(baseMidX, mii, mii < -th);
+          drawArrow(baseMidX, mii, mii > th);
         }
       }
     }
