@@ -56,7 +56,7 @@ const ROW_MAX  = 28;
 const RPAD = 30;  // space after last candle (shadowed inside component for mobile)
 const MAX_LEVELS_DISPLAY = 26;  // max rows; capped by floor(chartH/ROW_MIN) for auto-adjust
 const MAX_LEVELS_FALLBACK = 16; // when chart height unknown, keep view readable
-const SIGNAL_THRESHOLD = 0.4;   // LTP/MII arrow threshold; 0.4 reduces false signals vs 0.3
+const SIGNAL_THRESHOLD = 0.4;   // LTP/MII arrow threshold; arrows show expected REVERSAL (exhaustion)
 
 /* ─── helpers ─── */
 /* Only >= 1000 use K; 100–999 show as full number */
@@ -920,8 +920,9 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         const highY = p2y(high, H);
         const lowY  = p2y(low, H);
 
+        /* Reversal interpretation: positive LTP/MII = buyers exhausted → expect down; negative = sellers exhausted → expect up */
         const drawArrow = (ax, val, isUp) => {
-          ctx.fillStyle = val > th ? C.buy : C.sell;
+          ctx.fillStyle = isUp ? C.buy : C.sell;
           ctx.beginPath();
           if (isUp) {
             const ay = highY - arrowSize - 2;
@@ -939,12 +940,12 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         };
 
         if (hasLtp && hasMii) {
-          drawArrow(baseMidX - arrowOffset, ltp, ltp > th);
-          drawArrow(baseMidX + arrowOffset, mii, mii > th);
+          drawArrow(baseMidX - arrowOffset, ltp, ltp < -th);
+          drawArrow(baseMidX + arrowOffset, mii, mii < -th);
         } else if (hasLtp) {
-          drawArrow(baseMidX, ltp, ltp > th);
+          drawArrow(baseMidX, ltp, ltp < -th);
         } else if (hasMii) {
-          drawArrow(baseMidX, mii, mii > th);
+          drawArrow(baseMidX, mii, mii < -th);
         }
       }
     }
