@@ -56,6 +56,7 @@ const ROW_MAX  = 28;
 const RPAD = 30;  // space after last candle (shadowed inside component for mobile)
 const MAX_LEVELS_DISPLAY = 26;  // max rows; capped by floor(chartH/ROW_MIN) for auto-adjust
 const MAX_LEVELS_FALLBACK = 16; // when chart height unknown, keep view readable
+const SIGNAL_THRESHOLD = 0.4;   // LTP/MII arrow threshold; 0.4 reduces false signals vs 0.3
 
 /* ─── helpers ─── */
 /* Only >= 1000 use K; 100–999 show as full number */
@@ -254,7 +255,7 @@ function computeLTP(candles, hftSeries, symbol) {
     if (priceChange > 0.0001) {
       const as = Math.abs(delta) / priceChange;
       const capped = Math.min(1, Math.min(20, as) / 20);
-      asNorm = capped * (delta >= 0 ? 1 : -1);
+      asNorm = capped * (delta >= 0 ? -1 : 1);  // absorption: buyers absorbed = bearish, sellers absorbed = bullish
     }
 
     let ddNorm = 0;
@@ -895,20 +896,20 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       }
     }
 
-    /* ── PASS 7: LTP and MII signal arrows (|value| > 0.3) ── */
+    /* ── PASS 7: LTP and MII signal arrows (|value| > SIGNAL_THRESHOLD) ── */
     const ltpArr = showLTP ? ltpSeriesRef.current : [];
     const miiArr = showMII ? miiSeriesRef.current : [];
     const arrowSize = 8;
     const arrowOffset = 6;
+    const th = SIGNAL_THRESHOLD;
     if ((showLTP && ltpArr.length) || (showMII && miiArr.length)) {
       for (let i = 0; i < bs.length; i++) {
+        const b = bs[i];
         const ltp = ltpArr[i]?.ltp;
         const mii = miiArr[i]?.mii;
-        const hasLtp = showLTP && ltp != null && (ltp > 0.3 || ltp < -0.3);
-        const hasMii = showMII && mii != null && (mii > 0.3 || mii < -0.3);
+        const hasLtp = showLTP && ltp != null && (ltp > th || ltp < -th);
+        const hasMii = showMII && mii != null && (mii > th || mii < -th);
         if (!hasLtp && !hasMii) continue;
-
-        const b = bs[i];
         const x  = i * slotW - pan;
         const cx = x + nzHalf;
         if (cx + cw < 0 || cx > W) continue;
@@ -920,7 +921,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         const lowY  = p2y(low, H);
 
         const drawArrow = (ax, val, isUp) => {
-          ctx.fillStyle = val > 0.3 ? C.buy : C.sell;
+          ctx.fillStyle = val > th ? C.buy : C.sell;
           ctx.beginPath();
           if (isUp) {
             const ay = highY - arrowSize - 2;
@@ -938,12 +939,12 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         };
 
         if (hasLtp && hasMii) {
-          drawArrow(baseMidX - arrowOffset, ltp, ltp > 0.3);
-          drawArrow(baseMidX + arrowOffset, mii, mii > 0.3);
+          drawArrow(baseMidX - arrowOffset, ltp, ltp > th);
+          drawArrow(baseMidX + arrowOffset, mii, mii > th);
         } else if (hasLtp) {
-          drawArrow(baseMidX, ltp, ltp > 0.3);
+          drawArrow(baseMidX, ltp, ltp > th);
         } else if (hasMii) {
-          drawArrow(baseMidX, mii, mii > 0.3);
+          drawArrow(baseMidX, mii, mii > th);
         }
       }
     }
@@ -1515,9 +1516,9 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
                 {showLTP && (() => {
                   const barIdx = bars.indexOf(hoverBar);
                   const ltpVal = barIdx >= 0 ? ltpSeriesRef.current[barIdx]?.ltp : null;
-                  return ltpVal != null && Math.abs(ltpVal) > 0.3 ? (
+                  return ltpVal != null && Math.abs(ltpVal) > SIGNAL_THRESHOLD ? (
                     <span
-                      title="LTP > 0.3: Bullish trap for shorts | LTP < -0.3: Bull trap"
+                      title={`LTP > ${SIGNAL_THRESHOLD}: Bullish trap for shorts | LTP < -${SIGNAL_THRESHOLD}: Bull trap`}
                       style={{ fontFamily: MONO, fontSize: 9, fontWeight: 700, color: ltpVal >= 0 ? C.buy : C.sell }}
                     >
                       LTP {ltpVal.toFixed(2)}
@@ -1527,9 +1528,9 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
                 {showMII && (() => {
                   const barIdx = bars.indexOf(hoverBar);
                   const miiVal = barIdx >= 0 ? miiSeriesRef.current[barIdx]?.mii : null;
-                  return miiVal != null && Math.abs(miiVal) > 0.3 ? (
+                  return miiVal != null && Math.abs(miiVal) > SIGNAL_THRESHOLD ? (
                     <span
-                      title="MII > 0.3: Buying ignition | MII < -0.3: Selling ignition"
+                      title={`MII > ${SIGNAL_THRESHOLD}: Buying ignition | MII < -${SIGNAL_THRESHOLD}: Selling ignition`}
                       style={{ fontFamily: MONO, fontSize: 9, fontWeight: 700, color: miiVal >= 0 ? C.buy : C.sell }}
                     >
                       MII {miiVal.toFixed(2)}
