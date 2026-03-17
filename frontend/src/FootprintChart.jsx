@@ -208,7 +208,7 @@ function processCandles(candles, maxLevelsCap) {
   return { bars, priceMin: pMin, priceMax: pMax, priceRange, tickSize };
 }
 
-import { computeLTP, computeMII, computeVPT, SIGNAL_THRESHOLD } from "./utils/orderflowIndicators";
+import { computeLTP, computeMII, computeVPT, computeVZP, SIGNAL_THRESHOLD } from "./utils/orderflowIndicators";
 
 function _median(arr) {
   if (!arr?.length) return 0;
@@ -227,12 +227,13 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   const showLTP  = features.showLTP ?? false;
   const showMII  = features.showMII ?? false;
   const showVPT  = features.showVPT ?? false;
+  const showVZP  = features.showVZP ?? false;
   /* compact layout for narrow/mobile screens */
   const isMobile   = typeof window !== "undefined" && window.innerWidth <= 768;
   const HDR_H_EFF  = isMobile ? 36 : HDR_H;
   const TIME_H_EFF = isMobile ? 18 : TIME_H;
-  const numBotRows = (showOI ? 4 : 3) + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0);
-  const extraRows = (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0);
+  const numBotRows = (showOI ? 4 : 3) + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0);
+  const extraRows = (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0);
   const BOT_H_EFF  = showOI
     ? (extraRows > 0 ? (isMobile ? 68 + extraRows * 18 : 90 + extraRows * 22) : (isMobile ? 68 : 90))
     : (extraRows > 0 ? (isMobile ? 52 + extraRows * 18 : BOT_H + extraRows * 22) : (isMobile ? 52 : BOT_H));
@@ -310,10 +311,16 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     [showVPT, candles]
   );
 
+  const vzpSeries = useMemo(
+    () => (showVZP ? computeVZP(candles) : []),
+    [showVZP, candles]
+  );
+
   const barsRef     = useRef(bars);
   const ltpSeriesRef = useRef(ltpSeries);
   const miiSeriesRef = useRef(miiSeries);
   const vptSeriesRef = useRef(vptSeries);
+  const vzpSeriesRef = useRef(vzpSeries);
   const pMinRef     = useRef(priceMin);
   const pMaxRef     = useRef(priceMax);
   const pRanRef     = useRef(priceRange);
@@ -337,7 +344,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     ltpSeriesRef.current = ltpSeries;
     miiSeriesRef.current = miiSeries;
     vptSeriesRef.current = vptSeries;
-  }, [bars, priceMin, priceMax, priceRange, tickSize, ltpSeries, miiSeries, vptSeries]);
+    vzpSeriesRef.current = vzpSeries;
+  }, [bars, priceMin, priceMax, priceRange, tickSize, ltpSeries, miiSeries, vptSeries, vzpSeries]);
 
   useEffect(() => {
     if (!bars.length) return;
@@ -778,10 +786,11 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       }
     }
 
-    /* ── PASS 7: LTP and MII signal arrows (|value| > SIGNAL_THRESHOLD) ── */
+    /* ── PASS 7: LTP, MII, VPT, VZP signal arrows (|value| > SIGNAL_THRESHOLD) ── */
     const ltpArr = showLTP ? ltpSeriesRef.current : [];
     const miiArr = showMII ? miiSeriesRef.current : [];
     const vptArr = showVPT ? vptSeriesRef.current : [];
+    const vzpArr = showVZP ? vzpSeriesRef.current : [];
     const arrowSize = 8;
     const arrowOffset = 6;
     const th = SIGNAL_THRESHOLD;
@@ -792,7 +801,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const deltaThreshold = allBars.length
       ? _median(allBars.map(b => Math.abs(b.delta ?? 0)))
       : 0;
-    if ((showLTP && ltpArr.length) || (showMII && miiArr.length) || (showVPT && vptArr.length)) {
+    if ((showLTP && ltpArr.length) || (showMII && miiArr.length) || (showVPT && vptArr.length) || (showVZP && vzpArr.length)) {
       for (let i = 0; i < bs.length; i++) {
         const b = bs[i];
         const vol = (b.buy_vol ?? 0) + (b.sell_vol ?? 0);
@@ -801,10 +810,12 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         const ltp = ltpArr[i]?.ltp;
         const mii = miiArr[i]?.mii;
         const vpt = vptArr[i]?.vpt;
+        const vzp = vzpArr[i]?.vzp;
         const hasLtp = showLTP && ltp != null && (ltp > th || ltp < -th);
         const hasMii = showMII && mii != null && (mii > th || mii < -th);
         const hasVpt = showVPT && vpt != null && (vpt > th || vpt < -th);
-        if (!hasLtp && !hasMii && !hasVpt) continue;
+        const hasVzp = showVZP && vzp != null && (vzp > th || vzp < -th);
+        if (!hasLtp && !hasMii && !hasVpt && !hasVzp) continue;
         if (!passFilter) continue;
         const x  = i * slotW - pan;
         const cx = x + nzHalf;
@@ -854,25 +865,72 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           ctx.closePath();
           ctx.fill();
         };
-        if (hasLtp && hasMii && hasVpt) {
+
+        const drawVzpArrow = (ax, val, isUp) => {
+          const colors = { up: "#d97706", down: "#b45309" };
+          ctx.fillStyle = isUp ? colors.up : colors.down;
+          ctx.beginPath();
+          if (isUp) {
+            const ay = highY - arrowSize - 2;
+            ctx.moveTo(ax, ay - arrowSize);
+            ctx.lineTo(ax - arrowSize / 2, ay);
+            ctx.lineTo(ax + arrowSize / 2, ay);
+          } else {
+            const ay = lowY + arrowSize + 2;
+            ctx.moveTo(ax, ay + arrowSize);
+            ctx.lineTo(ax - arrowSize / 2, ay);
+            ctx.lineTo(ax + arrowSize / 2, ay);
+          }
+          ctx.closePath();
+          ctx.fill();
+        };
+        if (hasLtp && hasMii && hasVpt && hasVzp) {
+          drawArrow(baseMidX - arrowOffset * 1.5, ltp, ltp > th, true);
+          drawArrow(baseMidX - arrowOffset / 2, mii, mii > th, false);
+          drawVptArrow(baseMidX + arrowOffset / 2, vpt, vpt > th);
+          drawVzpArrow(baseMidX + arrowOffset * 1.5, vzp, vzp > th);
+        } else if (hasLtp && hasMii && hasVpt) {
           drawArrow(baseMidX - arrowOffset, ltp, ltp > th, true);
           drawArrow(baseMidX + arrowOffset, mii, mii > th, false);
           drawVptArrow(baseMidX, vpt, vpt > th);
+        } else if (hasLtp && hasMii && hasVzp) {
+          drawArrow(baseMidX - arrowOffset, ltp, ltp > th, true);
+          drawArrow(baseMidX, mii, mii > th, false);
+          drawVzpArrow(baseMidX + arrowOffset, vzp, vzp > th);
         } else if (hasLtp && hasMii) {
           drawArrow(baseMidX - arrowOffset, ltp, ltp > th, true);
           drawArrow(baseMidX + arrowOffset, mii, mii > th, false);
+        } else if (hasLtp && hasVpt && hasVzp) {
+          drawArrow(baseMidX - arrowOffset, ltp, ltp > th, true);
+          drawVptArrow(baseMidX, vpt, vpt > th);
+          drawVzpArrow(baseMidX + arrowOffset, vzp, vzp > th);
         } else if (hasLtp && hasVpt) {
           drawArrow(baseMidX - arrowOffset, ltp, ltp > th, true);
           drawVptArrow(baseMidX + arrowOffset, vpt, vpt > th);
+        } else if (hasLtp && hasVzp) {
+          drawArrow(baseMidX - arrowOffset, ltp, ltp > th, true);
+          drawVzpArrow(baseMidX + arrowOffset, vzp, vzp > th);
+        } else if (hasMii && hasVpt && hasVzp) {
+          drawArrow(baseMidX - arrowOffset, mii, mii > th, false);
+          drawVptArrow(baseMidX, vpt, vpt > th);
+          drawVzpArrow(baseMidX + arrowOffset, vzp, vzp > th);
         } else if (hasMii && hasVpt) {
           drawArrow(baseMidX - arrowOffset, mii, mii > th, false);
           drawVptArrow(baseMidX + arrowOffset, vpt, vpt > th);
+        } else if (hasMii && hasVzp) {
+          drawArrow(baseMidX - arrowOffset, mii, mii > th, false);
+          drawVzpArrow(baseMidX + arrowOffset, vzp, vzp > th);
+        } else if (hasVpt && hasVzp) {
+          drawVptArrow(baseMidX - arrowOffset, vpt, vpt > th);
+          drawVzpArrow(baseMidX + arrowOffset, vzp, vzp > th);
         } else if (hasLtp) {
           drawArrow(baseMidX, ltp, ltp > th, true);
         } else if (hasMii) {
           drawArrow(baseMidX, mii, mii > th, false);
         } else if (hasVpt) {
           drawVptArrow(baseMidX, vpt, vpt > th);
+        } else if (hasVzp) {
+          drawVzpArrow(baseMidX, vzp, vzp > th);
         }
       }
     }
@@ -882,7 +940,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     _drawTime();
     _drawBot();
   }, [dpr, getCanvasH, getVisRange, getVisPMin, p2y, getMaxPan, hoverBar, hoverPrice,
-      showVWAP, showVP, showLTP, showMII, showVPT, isMobile]);
+      showVWAP, showVP, showLTP, showMII, showVPT, showVZP, isMobile]);
 
   /* ── price scale: TradingView-style levels + hover price at crosshair ── */
   const PS_LABEL_MIN_PX = 40;
@@ -1002,6 +1060,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const ltpArr = ltpSeriesRef.current;
     const miiArr = miiSeriesRef.current;
     const vptArr = vptSeriesRef.current;
+    const vzpArr = vzpSeriesRef.current;
     ctx.font = `600 9.5px ${MONO}`;
     ctx.textBaseline = "middle";
 
@@ -1055,10 +1114,16 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       if (showVPT && vptArr[i] != null) {
         const vpt = vptArr[i].vpt;
         ctx.fillStyle = vpt >= 0 ? "#7c3aed" : "#6d28d9";
-        ctx.fillText(vpt.toFixed(2), midX, rowYs[numRows - 1]);
+        const vptRowIdx = showVZP ? baseIdx + (showLTP ? 1 : 0) + (showMII ? 1 : 0) : numRows - 1;
+        ctx.fillText(vpt.toFixed(2), midX, rowYs[vptRowIdx]);
+      }
+      if (showVZP && vzpArr[i] != null) {
+        const vzp = vzpArr[i].vzp;
+        ctx.fillStyle = vzp >= 0 ? "#d97706" : "#b45309";
+        ctx.fillText(vzp.toFixed(2), midX, rowYs[numRows - 1]);
       }
     }
-  }, [dpr, hoverBar, showOI, showLTP, showMII, showVPT, numBotRows]);
+  }, [dpr, hoverBar, showOI, showLTP, showMII, showVPT, showVZP, numBotRows]);
 
   const scheduleDraw = useCallback(() => {
     if (rafId.current) cancelAnimationFrame(rafId.current);
@@ -1484,6 +1549,18 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
                     </span>
                   ) : null;
                 })()}
+                {showVZP && (() => {
+                  const barIdx = bars.indexOf(hoverBar);
+                  const vzpVal = barIdx >= 0 ? vzpSeriesRef.current[barIdx]?.vzp : null;
+                  return vzpVal != null && Math.abs(vzpVal) > SIGNAL_THRESHOLD ? (
+                    <span
+                      title={`VZP predicts next bar direction. VZP > ${SIGNAL_THRESHOLD}: Ask zone heavy (bearish) | VZP < -${SIGNAL_THRESHOLD}: Bid zone heavy (bullish)`}
+                      style={{ fontFamily: MONO, fontSize: 9, fontWeight: 700, color: vzpVal >= 0 ? "#d97706" : "#b45309" }}
+                    >
+                      VZP {vzpVal.toFixed(2)}
+                    </span>
+                  ) : null;
+                })()}
               </>
             )}
           </div>
@@ -1567,6 +1644,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
               ...(showLTP ? [{ label: "LTP", color: C.textDim }] : []),
               ...(showMII ? [{ label: "MII", color: C.textDim }] : []),
               ...(showVPT ? [{ label: "VPT", color: C.textDim }] : []),
+              ...(showVZP ? [{ label: "VZP", color: C.textDim }] : []),
             ].map(({ label, color }) => (
               <span key={label} style={{
                 fontSize: 8, color, fontWeight: 700,

@@ -244,3 +244,56 @@ export function computeVPT(candles) {
     return { ...r, vpt };
   });
 }
+
+/**
+ * Volume Zone Pressure (VZP) — leading indicator from footprint level data.
+ * Uses bid/ask zone volume imbalance: where is volume concentrated relative to mid?
+ * VZP = (askVol - bidVol) / totalVol → positive = ask zone heavy (leading bearish), negative = bid zone heavy (leading bullish)
+ * Predicts next bar direction. Fallback when levels missing: -sign(delta).
+ */
+export function computeVZP(candles) {
+  if (!candles?.length) return [];
+  const eps = 1e-8;
+
+  const raw = [];
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const open = c.open ?? c.close ?? 0;
+    const close = c.close ?? c.open ?? 0;
+    const high = c.high ?? Math.max(open, close);
+    const low = c.low ?? Math.min(open, close);
+    const mid = (high + low) / 2;
+    const delta = c.delta ?? (c.buy_vol ?? 0) - (c.sell_vol ?? 0);
+
+    let bidVol = 0;
+    let askVol = 0;
+
+    const lvs = Object.values(c.levels || {});
+    if (lvs.length > 0) {
+      for (const lv of lvs) {
+        const p = lv.price ?? 0;
+        const vol = (lv.buy_vol ?? 0) + (lv.sell_vol ?? 0) || (lv.total_vol ?? 0);
+        if (vol > 0 && isFinite(p)) {
+          if (p < mid) bidVol += vol;
+          else if (p > mid) askVol += vol;
+        }
+      }
+    }
+
+    const totalVol = bidVol + askVol;
+    let vzpRaw;
+    if (totalVol > eps) {
+      vzpRaw = (askVol - bidVol) / totalVol;
+    } else {
+      vzpRaw = delta !== 0 ? -Math.sign(delta) : 0;
+    }
+
+    raw.push({ open_time: c.open_time, chartTime: c.chartTime, vzpRaw });
+  }
+
+  const vzpMax = Math.max(0.01, ...raw.map(r => Math.abs(r.vzpRaw)));
+  return raw.map((r) => {
+    const vzp = Math.max(-1, Math.min(1, r.vzpRaw / vzpMax));
+    return { ...r, vzp };
+  });
+}
