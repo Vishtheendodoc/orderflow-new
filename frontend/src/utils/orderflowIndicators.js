@@ -190,3 +190,57 @@ export function computeMII(candles) {
 }
 
 export const SIGNAL_THRESHOLD = 0.4;
+
+/**
+ * Volume Profile Tilt (VPT) — from footprint level data.
+ * Uses intra-candle volume distribution: where is volume concentrated?
+ * VPC = Σ(price × vol_at_level) / total_vol = volume-weighted price center
+ * VPT = (VPC - mid) / range → positive = volume skewed up (buying at highs), negative = skewed down
+ * Divergence: bearish candle + high VPT = absorption at highs (reversal down likely)
+ */
+export function computeVPT(candles) {
+  if (!candles?.length) return [];
+  const eps = 1e-8;
+
+  const raw = [];
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const open = c.open ?? c.close ?? 0;
+    const close = c.close ?? c.open ?? 0;
+    const high = c.high ?? Math.max(open, close);
+    const low = c.low ?? Math.min(open, close);
+    const range = Math.max(eps, high - low);
+    const mid = (high + low) / 2;
+
+    let vpc = mid;
+    let totalVol = 0;
+
+    const lvs = Object.values(c.levels || {});
+    if (lvs.length > 0) {
+      let sumPv = 0;
+      for (const lv of lvs) {
+        const p = lv.price ?? 0;
+        const vol = (lv.buy_vol ?? 0) + (lv.sell_vol ?? 0) || (lv.total_vol ?? 0);
+        if (vol > 0 && isFinite(p)) {
+          sumPv += p * vol;
+          totalVol += vol;
+        }
+      }
+      if (totalVol > 0) vpc = sumPv / totalVol;
+    } else {
+      totalVol = (c.buy_vol ?? 0) + (c.sell_vol ?? 0);
+      if (totalVol > 0) {
+        vpc = (open + close) / 2;
+      }
+    }
+
+    const vptRaw = range > 0 ? (vpc - mid) / range : 0;
+    raw.push({ open_time: c.open_time, chartTime: c.chartTime, vptRaw, close, open, range });
+  }
+
+  const vptMax = Math.max(0.01, ...raw.map(r => Math.abs(r.vptRaw)));
+  return raw.map((r) => {
+    const vpt = Math.max(-1, Math.min(1, r.vptRaw / vptMax));
+    return { ...r, vpt };
+  });
+}

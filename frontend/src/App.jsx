@@ -629,7 +629,7 @@ export default function App() {
   // Ref copy of activeSymbol so WS callbacks can read it without stale closures
   const activeSymbolRef = useRef(activeSymbol);
   /* ── Feature toggles ── */
-  const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true, showHFT: false, showLTP: false, showMII: false });
+  const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true, showHFT: false, showLTP: false, showMII: false, showVPT: false });
   const [splitView, setSplitView] = useState(false);
   const [activeSymbol2, setActiveSymbol2] = useState(null);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -1225,6 +1225,7 @@ export default function App() {
                         { key: "showVP",   label: "Volume Profile (VPOC / VAH / VAL)" },
                         { key: "showLTP",   label: "Liquidity Trap Pressure (LTP)", defaultVal: false },
                         { key: "showMII",   label: "Momentum Ignition Index (MII)", defaultVal: false },
+                        { key: "showVPT",   label: "Volume Profile Tilt (VPT)", defaultVal: false },
                       ].map(({ key, label, defaultVal }) => (
                         <label key={key} className="feat-row">
                           <input
