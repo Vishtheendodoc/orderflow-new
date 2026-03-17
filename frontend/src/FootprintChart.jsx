@@ -208,7 +208,7 @@ function processCandles(candles, maxLevelsCap) {
   return { bars, priceMin: pMin, priceMax: pMax, priceRange, tickSize };
 }
 
-import { computeLTP, computeMII, computeVPT, computeVZP, SIGNAL_THRESHOLD } from "./utils/orderflowIndicators";
+import { computeLTP, computeMII, computeVPT, computeVZP, computeContextEvents, SIGNAL_THRESHOLD, LTP_THRESHOLD, VZP_THRESHOLD } from "./utils/orderflowIndicators";
 
 function _median(arr) {
   if (!arr?.length) return 0;
@@ -228,12 +228,14 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   const showMII  = features.showMII ?? false;
   const showVPT  = features.showVPT ?? false;
   const showVZP  = features.showVZP ?? false;
+  const showContextEvents = features.showContextEvents ?? false;
+  const filterByVolume = features.filterByVolume ?? false;
   /* compact layout for narrow/mobile screens */
   const isMobile   = typeof window !== "undefined" && window.innerWidth <= 768;
   const HDR_H_EFF  = isMobile ? 36 : HDR_H;
   const TIME_H_EFF = isMobile ? 18 : TIME_H;
-  const numBotRows = (showOI ? 4 : 3) + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0);
-  const extraRows = (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0);
+  const numBotRows = (showOI ? 4 : 3) + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0) + (showContextEvents ? 1 : 0);
+  const extraRows = (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0) + (showContextEvents ? 1 : 0);
   const BOT_H_EFF  = showOI
     ? (extraRows > 0 ? (isMobile ? 68 + extraRows * 18 : 90 + extraRows * 22) : (isMobile ? 68 : 90))
     : (extraRows > 0 ? (isMobile ? 52 + extraRows * 18 : BOT_H + extraRows * 22) : (isMobile ? 52 : BOT_H));
@@ -316,11 +318,17 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     [showVZP, candles]
   );
 
+  const contextEventsSeries = useMemo(
+    () => (showContextEvents ? computeContextEvents(candles) : []),
+    [showContextEvents, candles]
+  );
+
   const barsRef     = useRef(bars);
   const ltpSeriesRef = useRef(ltpSeries);
   const miiSeriesRef = useRef(miiSeries);
   const vptSeriesRef = useRef(vptSeries);
   const vzpSeriesRef = useRef(vzpSeries);
+  const contextEventsSeriesRef = useRef(contextEventsSeries);
   const pMinRef     = useRef(priceMin);
   const pMaxRef     = useRef(priceMax);
   const pRanRef     = useRef(priceRange);
@@ -345,7 +353,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     miiSeriesRef.current = miiSeries;
     vptSeriesRef.current = vptSeries;
     vzpSeriesRef.current = vzpSeries;
-  }, [bars, priceMin, priceMax, priceRange, tickSize, ltpSeries, miiSeries, vptSeries, vzpSeries]);
+    contextEventsSeriesRef.current = contextEventsSeries;
+  }, [bars, priceMin, priceMax, priceRange, tickSize, ltpSeries, miiSeries, vptSeries, vzpSeries, contextEventsSeries]);
 
   useEffect(() => {
     if (!bars.length) return;
@@ -786,14 +795,18 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       }
     }
 
-    /* ── PASS 7: LTP, MII, VPT, VZP signal arrows (|value| > SIGNAL_THRESHOLD) ── */
+    /* ── PASS 7: LTP, MII, VPT, VZP signal arrows ── */
     const ltpArr = showLTP ? ltpSeriesRef.current : [];
     const miiArr = showMII ? miiSeriesRef.current : [];
     const vptArr = showVPT ? vptSeriesRef.current : [];
     const vzpArr = showVZP ? vzpSeriesRef.current : [];
+    const ctxEventsArr = showContextEvents ? contextEventsSeriesRef.current : [];
     const arrowSize = 8;
     const arrowOffset = 6;
-    const th = SIGNAL_THRESHOLD;
+    const thLtp = LTP_THRESHOLD;
+    const thMii = SIGNAL_THRESHOLD;
+    const thVpt = SIGNAL_THRESHOLD;
+    const thVzp = VZP_THRESHOLD;
     const allBars = barsRef.current;
     const sessionMedianVol = allBars.length
       ? _median(allBars.map(b => (b.buy_vol ?? 0) + (b.sell_vol ?? 0)))
@@ -801,22 +814,25 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const deltaThreshold = allBars.length
       ? _median(allBars.map(b => Math.abs(b.delta ?? 0)))
       : 0;
-    if ((showLTP && ltpArr.length) || (showMII && miiArr.length) || (showVPT && vptArr.length) || (showVZP && vzpArr.length)) {
+    if ((showLTP && ltpArr.length) || (showMII && miiArr.length) || (showVPT && vptArr.length) || (showVZP && vzpArr.length) || (showContextEvents && ctxEventsArr.length)) {
       for (let i = 0; i < bs.length; i++) {
         const b = bs[i];
         const vol = (b.buy_vol ?? 0) + (b.sell_vol ?? 0);
         const absDelta = Math.abs(b.delta ?? 0);
-        const passFilter = vol > sessionMedianVol || absDelta > deltaThreshold;
+        const passFilter = !filterByVolume || vol > sessionMedianVol || absDelta > deltaThreshold;
         const ltp = ltpArr[i]?.ltp;
         const mii = miiArr[i]?.mii;
         const vpt = vptArr[i]?.vpt;
-        const vzp = vzpArr[i]?.vzp;
-        const hasLtp = showLTP && ltp != null && (ltp > th || ltp < -th);
-        const hasMii = showMII && mii != null && (mii > th || mii < -th);
-        const hasVpt = showVPT && vpt != null && (vpt > th || vpt < -th);
-        const hasVzp = showVZP && vzp != null && (vzp > th || vzp < -th);
-        if (!hasLtp && !hasMii && !hasVpt && !hasVzp) continue;
-        if (!passFilter) continue;
+        const vzpVal = vzpArr[i];
+        const vzpRaw = vzpVal?.vzpRaw ?? vzpVal?.vzp;
+        const hasLtp = showLTP && ltp != null && (ltp > thLtp || ltp < -thLtp);
+        const hasMii = showMII && mii != null && (mii > thMii || mii < -thMii);
+        const hasVpt = showVPT && vpt != null && (vpt > thVpt || vpt < -thVpt);
+        const hasVzp = showVZP && vzpRaw != null && (vzpRaw > thVzp || vzpRaw < -thVzp);
+        const ctxEv = ctxEventsArr[i]?.event;
+        const hasCtxEv = showContextEvents && ctxEv != null;
+        if (!hasLtp && !hasMii && !hasVpt && !hasVzp && !hasCtxEv) continue;
+        if (!passFilter && !hasCtxEv) continue;
         const x  = i * slotW - pan;
         const cx = x + nzHalf;
         if (cx + cw < 0 || cx > W) continue;
@@ -884,53 +900,88 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           ctx.closePath();
           ctx.fill();
         };
+
+        const drawContextEvent = (ctx2, ax, hY, lY, eventType, size) => {
+          const s = size || 8;
+          if (eventType === "REVERSAL_TOP" || eventType === "RALLY_END") {
+            ctx2.fillStyle = eventType === "REVERSAL_TOP" ? "#c62828" : "#e65100";
+            const ay = hY - s - 2;
+            ctx2.beginPath();
+            if (eventType === "REVERSAL_TOP") {
+              ctx2.moveTo(ax, ay - s);
+              ctx2.lineTo(ax - s / 2, ay);
+              ctx2.lineTo(ax + s / 2, ay);
+            } else {
+              ctx2.moveTo(ax, ay - s / 2);
+              ctx2.lineTo(ax + s / 2, ay);
+              ctx2.lineTo(ax, ay + s / 2);
+              ctx2.lineTo(ax - s / 2, ay);
+            }
+            ctx2.closePath();
+            ctx2.fill();
+          } else {
+            ctx2.fillStyle = "#2e7d32";
+            const ay = lY + s + 2;
+            ctx2.beginPath();
+            ctx2.moveTo(ax, ay + s);
+            ctx2.lineTo(ax - s / 2, ay);
+            ctx2.lineTo(ax + s / 2, ay);
+            ctx2.closePath();
+            ctx2.fill();
+          }
+        };
+        const vzpIsUp = vzpRaw != null && vzpRaw < -thVzp;
         if (hasLtp && hasMii && hasVpt && hasVzp) {
-          drawArrow(baseMidX - arrowOffset * 1.5, ltp, ltp > th, true);
-          drawArrow(baseMidX - arrowOffset / 2, mii, mii > th, false);
-          drawVptArrow(baseMidX + arrowOffset / 2, vpt, vpt > th);
-          drawVzpArrow(baseMidX + arrowOffset * 1.5, vzp, vzp > th);
+          drawArrow(baseMidX - arrowOffset * 1.5, ltp, ltp > thLtp, true);
+          drawArrow(baseMidX - arrowOffset / 2, mii, mii > thMii, false);
+          drawVptArrow(baseMidX + arrowOffset / 2, vpt, vpt > thVpt);
+          drawVzpArrow(baseMidX + arrowOffset * 1.5, vzpRaw, vzpIsUp);
         } else if (hasLtp && hasMii && hasVpt) {
-          drawArrow(baseMidX - arrowOffset, ltp, ltp > th, true);
-          drawArrow(baseMidX + arrowOffset, mii, mii > th, false);
-          drawVptArrow(baseMidX, vpt, vpt > th);
+          drawArrow(baseMidX - arrowOffset, ltp, ltp > thLtp, true);
+          drawArrow(baseMidX + arrowOffset, mii, mii > thMii, false);
+          drawVptArrow(baseMidX, vpt, vpt > thVpt);
         } else if (hasLtp && hasMii && hasVzp) {
-          drawArrow(baseMidX - arrowOffset, ltp, ltp > th, true);
-          drawArrow(baseMidX, mii, mii > th, false);
-          drawVzpArrow(baseMidX + arrowOffset, vzp, vzp > th);
+          drawArrow(baseMidX - arrowOffset, ltp, ltp > thLtp, true);
+          drawArrow(baseMidX, mii, mii > thMii, false);
+          drawVzpArrow(baseMidX + arrowOffset, vzpRaw, vzpIsUp);
         } else if (hasLtp && hasMii) {
-          drawArrow(baseMidX - arrowOffset, ltp, ltp > th, true);
-          drawArrow(baseMidX + arrowOffset, mii, mii > th, false);
+          drawArrow(baseMidX - arrowOffset, ltp, ltp > thLtp, true);
+          drawArrow(baseMidX + arrowOffset, mii, mii > thMii, false);
         } else if (hasLtp && hasVpt && hasVzp) {
-          drawArrow(baseMidX - arrowOffset, ltp, ltp > th, true);
-          drawVptArrow(baseMidX, vpt, vpt > th);
-          drawVzpArrow(baseMidX + arrowOffset, vzp, vzp > th);
+          drawArrow(baseMidX - arrowOffset, ltp, ltp > thLtp, true);
+          drawVptArrow(baseMidX, vpt, vpt > thVpt);
+          drawVzpArrow(baseMidX + arrowOffset, vzpRaw, vzpIsUp);
         } else if (hasLtp && hasVpt) {
-          drawArrow(baseMidX - arrowOffset, ltp, ltp > th, true);
-          drawVptArrow(baseMidX + arrowOffset, vpt, vpt > th);
+          drawArrow(baseMidX - arrowOffset, ltp, ltp > thLtp, true);
+          drawVptArrow(baseMidX + arrowOffset, vpt, vpt > thVpt);
         } else if (hasLtp && hasVzp) {
-          drawArrow(baseMidX - arrowOffset, ltp, ltp > th, true);
-          drawVzpArrow(baseMidX + arrowOffset, vzp, vzp > th);
+          drawArrow(baseMidX - arrowOffset, ltp, ltp > thLtp, true);
+          drawVzpArrow(baseMidX + arrowOffset, vzpRaw, vzpIsUp);
         } else if (hasMii && hasVpt && hasVzp) {
-          drawArrow(baseMidX - arrowOffset, mii, mii > th, false);
-          drawVptArrow(baseMidX, vpt, vpt > th);
-          drawVzpArrow(baseMidX + arrowOffset, vzp, vzp > th);
+          drawArrow(baseMidX - arrowOffset, mii, mii > thMii, false);
+          drawVptArrow(baseMidX, vpt, vpt > thVpt);
+          drawVzpArrow(baseMidX + arrowOffset, vzpRaw, vzpIsUp);
         } else if (hasMii && hasVpt) {
-          drawArrow(baseMidX - arrowOffset, mii, mii > th, false);
-          drawVptArrow(baseMidX + arrowOffset, vpt, vpt > th);
+          drawArrow(baseMidX - arrowOffset, mii, mii > thMii, false);
+          drawVptArrow(baseMidX + arrowOffset, vpt, vpt > thVpt);
         } else if (hasMii && hasVzp) {
-          drawArrow(baseMidX - arrowOffset, mii, mii > th, false);
-          drawVzpArrow(baseMidX + arrowOffset, vzp, vzp > th);
+          drawArrow(baseMidX - arrowOffset, mii, mii > thMii, false);
+          drawVzpArrow(baseMidX + arrowOffset, vzpRaw, vzpIsUp);
         } else if (hasVpt && hasVzp) {
-          drawVptArrow(baseMidX - arrowOffset, vpt, vpt > th);
-          drawVzpArrow(baseMidX + arrowOffset, vzp, vzp > th);
+          drawVptArrow(baseMidX - arrowOffset, vpt, vpt > thVpt);
+          drawVzpArrow(baseMidX + arrowOffset, vzpRaw, vzpIsUp);
         } else if (hasLtp) {
-          drawArrow(baseMidX, ltp, ltp > th, true);
+          drawArrow(baseMidX, ltp, ltp > thLtp, true);
         } else if (hasMii) {
-          drawArrow(baseMidX, mii, mii > th, false);
+          drawArrow(baseMidX, mii, mii > thMii, false);
         } else if (hasVpt) {
-          drawVptArrow(baseMidX, vpt, vpt > th);
+          drawVptArrow(baseMidX, vpt, vpt > thVpt);
         } else if (hasVzp) {
-          drawVzpArrow(baseMidX, vzp, vzp > th);
+          drawVzpArrow(baseMidX, vzpRaw, vzpIsUp);
+        }
+        if (hasCtxEv) {
+          const offset = (hasLtp || hasMii || hasVpt || hasVzp) ? arrowOffset : 0;
+          drawContextEvent(ctx, baseMidX + offset, highY, lowY, ctxEv, arrowSize);
         }
       }
     }
@@ -940,7 +991,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     _drawTime();
     _drawBot();
   }, [dpr, getCanvasH, getVisRange, getVisPMin, p2y, getMaxPan, hoverBar, hoverPrice,
-      showVWAP, showVP, showLTP, showMII, showVPT, showVZP, isMobile]);
+      showVWAP, showVP, showLTP, showMII, showVPT, showVZP, showContextEvents, filterByVolume, isMobile]);
 
   /* ── price scale: TradingView-style levels + hover price at crosshair ── */
   const PS_LABEL_MIN_PX = 40;
@@ -1061,6 +1112,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const miiArr = miiSeriesRef.current;
     const vptArr = vptSeriesRef.current;
     const vzpArr = vzpSeriesRef.current;
+    const ctxEventsArr = contextEventsSeriesRef.current;
     ctx.font = `600 9.5px ${MONO}`;
     ctx.textBaseline = "middle";
 
@@ -1114,16 +1166,24 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       if (showVPT && vptArr[i] != null) {
         const vpt = vptArr[i].vpt;
         ctx.fillStyle = vpt >= 0 ? "#7c3aed" : "#6d28d9";
-        const vptRowIdx = showVZP ? baseIdx + (showLTP ? 1 : 0) + (showMII ? 1 : 0) : numRows - 1;
+        const vptRowIdx = (showVZP || showContextEvents) ? baseIdx + (showLTP ? 1 : 0) + (showMII ? 1 : 0) : numRows - 1;
         ctx.fillText(vpt.toFixed(2), midX, rowYs[vptRowIdx]);
       }
       if (showVZP && vzpArr[i] != null) {
-        const vzp = vzpArr[i].vzp;
+        const vzpVal = vzpArr[i];
+        const vzp = vzpVal.vzpRaw ?? vzpVal.vzp;
         ctx.fillStyle = vzp >= 0 ? "#d97706" : "#b45309";
-        ctx.fillText(vzp.toFixed(2), midX, rowYs[numRows - 1]);
+        const vzpRowIdx = showContextEvents ? baseIdx + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) : numRows - 1;
+        ctx.fillText(vzp != null ? vzp.toFixed(2) : "—", midX, rowYs[vzpRowIdx]);
+      }
+      if (showContextEvents && ctxEventsArr[i]?.event != null) {
+        const ev = ctxEventsArr[i].event;
+        const short = ev === "REVERSAL_TOP" ? "Rev↑" : ev === "RALLY_END" ? "REnd" : ev === "RALLY_START" ? "RStart" : "Rev↓";
+        ctx.fillStyle = ev === "REVERSAL_TOP" || ev === "RALLY_END" ? "#c62828" : "#2e7d32";
+        ctx.fillText(short, midX, rowYs[numRows - 1]);
       }
     }
-  }, [dpr, hoverBar, showOI, showLTP, showMII, showVPT, showVZP, numBotRows]);
+  }, [dpr, hoverBar, showOI, showLTP, showMII, showVPT, showVZP, showContextEvents, numBotRows]);
 
   const scheduleDraw = useCallback(() => {
     if (rafId.current) cancelAnimationFrame(rafId.current);
@@ -1516,9 +1576,9 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
                 {showLTP && (() => {
                   const barIdx = bars.indexOf(hoverBar);
                   const ltpVal = barIdx >= 0 ? ltpSeriesRef.current[barIdx]?.ltp : null;
-                  return ltpVal != null && Math.abs(ltpVal) > SIGNAL_THRESHOLD ? (
+                  return ltpVal != null && Math.abs(ltpVal) > LTP_THRESHOLD ? (
                     <span
-                      title={`LTP > ${SIGNAL_THRESHOLD}: Bullish trap for shorts | LTP < -${SIGNAL_THRESHOLD}: Bull trap`}
+                      title={`LTP > ${LTP_THRESHOLD}: Bullish trap for shorts | LTP < -${LTP_THRESHOLD}: Bull trap`}
                       style={{ fontFamily: MONO, fontSize: 9, fontWeight: 700, color: ltpVal >= 0 ? C.buy : C.sell }}
                     >
                       LTP {ltpVal.toFixed(2)}
@@ -1551,13 +1611,26 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
                 })()}
                 {showVZP && (() => {
                   const barIdx = bars.indexOf(hoverBar);
-                  const vzpVal = barIdx >= 0 ? vzpSeriesRef.current[barIdx]?.vzp : null;
-                  return vzpVal != null && Math.abs(vzpVal) > SIGNAL_THRESHOLD ? (
+                  const vzpVal = barIdx >= 0 ? vzpSeriesRef.current[barIdx] : null;
+                  const vzp = vzpVal?.vzpRaw ?? vzpVal?.vzp;
+                  return vzp != null && Math.abs(vzp) > VZP_THRESHOLD ? (
                     <span
-                      title={`VZP predicts next bar direction. VZP > ${SIGNAL_THRESHOLD}: Ask zone heavy (bearish) | VZP < -${SIGNAL_THRESHOLD}: Bid zone heavy (bullish)`}
-                      style={{ fontFamily: MONO, fontSize: 9, fontWeight: 700, color: vzpVal >= 0 ? "#d97706" : "#b45309" }}
+                      title={`VZP predicts next bar direction. VZP > ${VZP_THRESHOLD}: Ask zone heavy (bearish) | VZP < -${VZP_THRESHOLD}: Bid zone heavy (bullish)`}
+                      style={{ fontFamily: MONO, fontSize: 9, fontWeight: 700, color: vzp >= 0 ? "#d97706" : "#b45309" }}
                     >
-                      VZP {vzpVal.toFixed(2)}
+                      VZP {vzp.toFixed(2)}
+                    </span>
+                  ) : null;
+                })()}
+                {showContextEvents && (() => {
+                  const barIdx = bars.indexOf(hoverBar);
+                  const ev = barIdx >= 0 ? contextEventsSeriesRef.current[barIdx] : null;
+                  return ev?.event != null ? (
+                    <span
+                      title={`${ev.event}: confidence ${ev.confidence?.toFixed(2) ?? "—"}. Predicts next bar direction.`}
+                      style={{ fontFamily: MONO, fontSize: 9, fontWeight: 700, color: ev.event === "REVERSAL_TOP" || ev.event === "RALLY_END" ? "#c62828" : "#2e7d32" }}
+                    >
+                      {ev.event === "REVERSAL_TOP" ? "Rev↑" : ev.event === "RALLY_END" ? "REnd" : ev.event === "RALLY_START" ? "RStart" : "Rev↓"}
                     </span>
                   ) : null;
                 })()}
@@ -1645,6 +1718,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
               ...(showMII ? [{ label: "MII", color: C.textDim }] : []),
               ...(showVPT ? [{ label: "VPT", color: C.textDim }] : []),
               ...(showVZP ? [{ label: "VZP", color: C.textDim }] : []),
+              ...(showContextEvents ? [{ label: "CAE", color: C.textDim }] : []),
             ].map(({ label, color }) => (
               <span key={label} style={{
                 fontSize: 8, color, fontWeight: 700,

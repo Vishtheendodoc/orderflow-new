@@ -190,6 +190,8 @@ export function computeMII(candles) {
 }
 
 export const SIGNAL_THRESHOLD = 0.4;
+export const LTP_THRESHOLD = 0.3;
+export const VZP_THRESHOLD = 0.2;
 
 /**
  * Volume Profile Tilt (VPT) — from footprint level data.
@@ -294,6 +296,89 @@ export function computeVZP(candles) {
   const vzpMax = Math.max(0.01, ...raw.map(r => Math.abs(r.vzpRaw)));
   return raw.map((r) => {
     const vzp = Math.max(-1, Math.min(1, r.vzpRaw / vzpMax));
-    return { ...r, vzp };
+    return { ...r, vzp, vzpRaw: r.vzpRaw };
   });
+}
+
+/**
+ * Context-Aware Events (CAE) — reversal and rally detection.
+ * Combines VZP raw with trend context (prev 2/3 bar direction).
+ * Returns REVERSAL_TOP, RALLY_END, RALLY_START, REVERSAL_BOTTOM when conditions align.
+ */
+export function computeContextEvents(candles) {
+  if (!candles?.length) return [];
+  const eps = 1e-8;
+  const PREV3_UP = 5;
+  const PREV3_DOWN = -5;
+  const PREV2_UP = 5;
+  const PREV2_FLAT = 2;
+  const VZP_REV_TOP = 0.25;
+  const VZP_RALLY_END = 0.2;
+  const VZP_RALLY_START = 0.25;
+  const VZP_REV_BOTTOM = 0.2;
+
+  const out = [];
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const open = c.open ?? c.close ?? 0;
+    const close = c.close ?? c.open ?? 0;
+    const high = c.high ?? Math.max(open, close);
+    const low = c.low ?? Math.min(open, close);
+    const mid = (high + low) / 2;
+    const delta = c.delta ?? (c.buy_vol ?? 0) - (c.sell_vol ?? 0);
+
+    let bidVol = 0;
+    let askVol = 0;
+    const lvs = Object.values(c.levels || {});
+    if (lvs.length > 0) {
+      for (const lv of lvs) {
+        const p = lv.price ?? 0;
+        const vol = (lv.buy_vol ?? 0) + (lv.sell_vol ?? 0) || (lv.total_vol ?? 0);
+        if (vol > 0 && isFinite(p)) {
+          if (p < mid) bidVol += vol;
+          else if (p > mid) askVol += vol;
+        }
+      }
+    }
+    const totalVol = bidVol + askVol;
+    const vzpRaw = totalVol > eps ? (askVol - bidVol) / totalVol : (delta !== 0 ? -Math.sign(delta) : 0);
+
+    let prev3Chg = 0;
+    let prev2Chg = 0;
+    if (i >= 3) {
+      for (let j = i - 3; j < i; j++) {
+        prev3Chg += (candles[j].close ?? candles[j].open ?? 0) - (candles[j].open ?? candles[j].close ?? 0);
+      }
+    }
+    if (i >= 2) {
+      for (let j = i - 2; j < i; j++) {
+        prev2Chg += (candles[j].close ?? candles[j].open ?? 0) - (candles[j].open ?? candles[j].close ?? 0);
+      }
+    }
+
+    let event = null;
+    let confidence = 0;
+
+    if (prev3Chg > PREV3_UP && vzpRaw > VZP_REV_TOP) {
+      event = "REVERSAL_TOP";
+      confidence = vzpRaw;
+    } else if (prev2Chg > PREV2_UP && vzpRaw > VZP_RALLY_END) {
+      event = "RALLY_END";
+      confidence = vzpRaw;
+    } else if (prev2Chg < PREV2_FLAT && vzpRaw < -VZP_RALLY_START) {
+      event = "RALLY_START";
+      confidence = -vzpRaw;
+    } else if (prev3Chg < PREV3_DOWN && vzpRaw < -VZP_REV_BOTTOM) {
+      event = "REVERSAL_BOTTOM";
+      confidence = -vzpRaw;
+    }
+
+    out.push({
+      open_time: c.open_time,
+      chartTime: c.chartTime,
+      event,
+      confidence,
+    });
+  }
+  return out;
 }
