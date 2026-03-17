@@ -9,6 +9,7 @@
  */
 import { useEffect, useRef, useCallback, useState } from "react";
 import { createChart } from "lightweight-charts";
+import { computeLTP, computeMII, SIGNAL_THRESHOLD } from "./utils/orderflowIndicators";
 
 /* ── helpers ── */
 const fmtVol = (v) => {
@@ -163,9 +164,14 @@ function aggregateHftForOverlay(series, targetMinutes) {
 /* ════════════════════════════════════════════════════════
    COMPONENT
 ════════════════════════════════════════════════════════ */
+const LTP_COLORS = { up: "#00695c", down: "#c62828" };
+const MII_COLORS = { up: "#4ade80", down: "#f87171" };
+
 export default function OrderflowChart({ candles, symbol, features = {}, isIndexFuture = false, hftSeries = [], timeFrameMinutes = 1 }) {
   const showOI  = features.showOI  ?? true;
   const showHFT = features.showHFT ?? false;
+  const showLTP = features.showLTP ?? false;
+  const showMII = features.showMII ?? false;
   const showHftOverlay = showHFT && isIndexFuture;
 
   const priceContainerRef = useRef(null);
@@ -451,6 +457,54 @@ export default function OrderflowChart({ candles, symbol, features = {}, isIndex
       refs[ft]?.setData(sorted);
     });
   }, [hftSeries, showHftOverlay, timeFrameMinutes, hftVisibleFlows]);
+
+  /* ── LTP/MII markers on candlestick ──────────────────────────────────── */
+  useEffect(() => {
+    const series = priceSeriesRef.current;
+    const merged = mergedRef.current;
+    if (!series || !merged.length) return;
+
+    if (!showLTP && !showMII) {
+      series.setMarkers([]);
+      return;
+    }
+
+    const candlesForIndicators = merged.map((c) => ({
+      ...c,
+      open_time: c.chartTime != null ? c.chartTime * 1000 : c.open_time,
+    }));
+    const ltpArr = showLTP ? computeLTP(candlesForIndicators, hftSeries, symbol) : [];
+    const miiArr = showMII ? computeMII(candlesForIndicators) : [];
+
+    const th = SIGNAL_THRESHOLD;
+    const markers = [];
+    for (let i = 0; i < merged.length; i++) {
+      const t = merged[i].chartTime;
+      const ltp = ltpArr[i]?.ltp;
+      const mii = miiArr[i]?.mii;
+      const hasLtp = showLTP && ltp != null && (ltp > th || ltp < -th);
+      const hasMii = showMII && mii != null && (mii > th || mii < -th);
+      if (hasLtp) {
+        markers.push({
+          time: t,
+          position: "aboveBar",
+          shape: ltp > th ? "arrowUp" : "arrowDown",
+          color: ltp > th ? LTP_COLORS.up : LTP_COLORS.down,
+          text: "LTP",
+        });
+      }
+      if (hasMii) {
+        markers.push({
+          time: t,
+          position: "belowBar",
+          shape: mii > th ? "arrowUp" : "arrowDown",
+          color: mii > th ? MII_COLORS.up : MII_COLORS.down,
+          text: "MII",
+        });
+      }
+    }
+    series.setMarkers(markers);
+  }, [candles, showLTP, showMII, symbol, hftSeries]);
 
   /* ── Drag handle: resize HFT strip (adjusts scaleMargins) ─────────────── */
   const handleDragStart = useCallback((e) => {

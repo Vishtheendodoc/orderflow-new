@@ -15,6 +15,7 @@
 
 import { useEffect, useRef, useCallback, useState, useMemo } from "react";
 import { createChart } from "lightweight-charts";
+import { computeLTP, computeMII, SIGNAL_THRESHOLD } from "./utils/orderflowIndicators";
 
 const POLL_MS    = 30_000;  // poll every 30s so HFT bars appear sooner after backend write
 const IST_OFFSET = 19800;   // UTC+5:30 in seconds
@@ -79,8 +80,7 @@ const TIMEFRAMES = [
   { label: "1h",  minutes: 60 },
 ];
 
-/** Aggregate 1m candles into N-min candles. Always runs (even for 1m) to deduplicate
- *  by minute and ensure strictly increasing times — duplicate times crash lightweight-charts. */
+/** Aggregate 1m candles into N-min candles. Merges OHLC + buy_vol, sell_vol, delta for LTP/MII. */
 function aggregateCandlesForHft(candles, tfMin) {
   if (!candles?.length) return [];
   const secPerBucket = Math.max(1, tfMin) * 60;
@@ -88,13 +88,26 @@ function aggregateCandlesForHft(candles, tfMin) {
   for (const c of candles) {
     const tSec = Math.floor((c.open_time || 0) / 1000);
     const bucket = Math.floor(tSec / secPerBucket) * secPerBucket;
+    const buyVol = c.buy_vol ?? 0;
+    const sellVol = c.sell_vol ?? 0;
+    const delta = c.delta ?? (buyVol - sellVol);
     if (!buckets[bucket]) {
-      buckets[bucket] = { time: bucket, open: c.open, high: c.high, low: c.low, close: c.close };
+      buckets[bucket] = {
+        time: bucket,
+        open: c.open ?? c.close ?? 0,
+        high: c.high ?? Math.max(c.open ?? 0, c.close ?? 0),
+        low: c.low ?? Math.min(c.open ?? 1e9, c.close ?? 1e9),
+        close: c.close ?? c.open ?? 0,
+        buy_vol: buyVol, sell_vol: sellVol, delta,
+      };
     } else {
       const b = buckets[bucket];
       b.high = Math.max(b.high ?? 0, c.high ?? 0);
       b.low = Math.min(b.low ?? 1e9, c.low ?? 1e9);
       b.close = c.close ?? b.close;
+      b.buy_vol = (b.buy_vol ?? 0) + buyVol;
+      b.sell_vol = (b.sell_vol ?? 0) + sellVol;
+      b.delta = (b.delta ?? 0) + delta;
     }
   }
   return Object.values(buckets).sort((a, b) => a.time - b.time);
@@ -181,10 +194,13 @@ const PRICE_PANE_MIN = 15;   // % of chart area
 const PRICE_PANE_MAX = 75;
 const PRICE_PANE_DEF = 50;   // 50% candles / 50% HFT — reduces HFT bar height
 
+const LTP_COLORS = { up: "#00695c", down: "#c62828" };
+const MII_COLORS = { up: "#4ade80", down: "#f87171" };
+
 /* ═══════════════════════════════════════════════════════════════════════════
    COMPONENT
 ═══════════════════════════════════════════════════════════════════════════ */
-export default function HftScannerChart({ symbol, apiBase, candles = [], livePrice }) {
+export default function HftScannerChart({ symbol, apiBase, candles = [], livePrice, features = {}, hftSeries = [] }) {
   const chartContainerRef = useRef(null);
   const chartRef          = useRef(null);
   const candleSeriesRef   = useRef(null);
@@ -212,6 +228,9 @@ export default function HftScannerChart({ symbol, apiBase, candles = [], livePri
   });
   const [visibleFlows,  setVisibleFlows]  = useState(() => new Set(STACK_ORDER));
   const [pricePaneH,    setPricePaneH]    = useState(PRICE_PANE_DEF); // % height
+
+  const showLTP = features.showLTP ?? false;
+  const showMII = features.showMII ?? false;
 
   const visibleFlowsRef = useRef(visibleFlows);
   useEffect(() => { visibleFlowsRef.current = visibleFlows; }, [visibleFlows]);
@@ -316,6 +335,57 @@ export default function HftScannerChart({ symbol, apiBase, candles = [], livePri
       }
     }
   }, [candles, tfMin]);
+
+  /* ── Effect 2a: LTP/MII markers on candlestick ───────────────────────────────────────── */
+  useEffect(() => {
+    const series = candleSeriesRef.current;
+    if (!series || !candles?.length) return;
+
+    if (!showLTP && !showMII) {
+      series.setMarkers([]);
+      return;
+    }
+
+    const filtered = candles.filter((c) => c.open_time && (c.open != null || c.close != null));
+    const merged = aggregateCandlesForHft(filtered, tfMin);
+    const candlesForIndicators = merged.map((c) => ({
+      ...c,
+      open_time: (c.time ?? c.open_time) * (c.time != null && c.time < 1e12 ? 1000 : 1),
+      chartTime: c.time,
+    }));
+
+    const ltpArr = showLTP ? computeLTP(candlesForIndicators, hftSeries, symbol) : [];
+    const miiArr = showMII ? computeMII(candlesForIndicators) : [];
+
+    const th = SIGNAL_THRESHOLD;
+    const markers = [];
+    for (let i = 0; i < merged.length; i++) {
+      const t = merged[i].time;
+      const ltp = ltpArr[i]?.ltp;
+      const mii = miiArr[i]?.mii;
+      const hasLtp = showLTP && ltp != null && (ltp > th || ltp < -th);
+      const hasMii = showMII && mii != null && (mii > th || mii < -th);
+      if (hasLtp) {
+        markers.push({
+          time: t,
+          position: "aboveBar",
+          shape: ltp > th ? "arrowUp" : "arrowDown",
+          color: ltp > th ? LTP_COLORS.up : LTP_COLORS.down,
+          text: "LTP",
+        });
+      }
+      if (hasMii) {
+        markers.push({
+          time: t,
+          position: "belowBar",
+          shape: mii > th ? "arrowUp" : "arrowDown",
+          color: mii > th ? MII_COLORS.up : MII_COLORS.down,
+          text: "MII",
+        });
+      }
+    }
+    series.setMarkers(markers);
+  }, [candles, tfMin, showLTP, showMII, symbol, hftSeries]);
 
   /* ── Effect 2b: live tick update — update last bar with livePrice when it changes ──────── */
   useEffect(() => {

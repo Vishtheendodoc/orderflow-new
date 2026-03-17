@@ -1361,7 +1361,7 @@ export default function App() {
                         </div>
                       ) : viewMode === "hft" ? (
                         <div className="chart-view-wrap">
-                          <HftScannerChart symbol={activeSymbol} apiBase={API_URL || window.location.origin} candles={hftChartData.candles} livePrice={hftChartData.livePrice} />
+                          <HftScannerChart symbol={activeSymbol} apiBase={API_URL || window.location.origin} candles={hftChartData.candles} livePrice={hftChartData.livePrice} features={features} hftSeries={(() => { const s = (activeSymbol || "").toUpperCase(); const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n)); return idx ? (hftSeriesCache[idx] || []) : []; })()} />
                         </div>
                       ) : viewMode === "strike" ? (
                         <div className="chart-view-wrap">
@@ -1409,7 +1409,7 @@ export default function App() {
                         </div>
                       ) : viewMode === "hft" ? (
                         <div className="chart-view-wrap">
-                          <HftScannerChart symbol={activeSymbol2} apiBase={API_URL || window.location.origin} candles={hftChartData2.candles} livePrice={hftChartData2.livePrice} />
+                          <HftScannerChart symbol={activeSymbol2} apiBase={API_URL || window.location.origin} candles={hftChartData2.candles} livePrice={hftChartData2.livePrice} features={features} hftSeries={(() => { const s = (activeSymbol2 || "").toUpperCase(); const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n)); return idx ? (hftSeriesCache[idx] || []) : []; })()} />
                         </div>
                       ) : viewMode === "strike" ? (
                         <div className="chart-view-wrap">
@@ -1462,7 +1462,7 @@ export default function App() {
                   </div>
                 ) : viewMode === "hft" ? (
                   <div className="chart-view-wrap">
-                    <HftScannerChart symbol={activeSymbol} apiBase={API_URL || window.location.origin} candles={hftChartData.candles} livePrice={hftChartData.livePrice} />
+                    <HftScannerChart symbol={activeSymbol} apiBase={API_URL || window.location.origin} candles={hftChartData.candles} livePrice={hftChartData.livePrice} features={features} hftSeries={(() => { const s = (activeSymbol || "").toUpperCase(); const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n)); return idx ? (hftSeriesCache[idx] || []) : []; })()} />
                   </div>
                 ) : viewMode === "strike" ? (
                   <div className="chart-view-wrap">
