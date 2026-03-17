@@ -985,9 +985,9 @@ export default function App() {
     return ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"].some(n => s.includes(n));
   }, [activeSymbol]);
 
-  // HFT overlay: poll scanner data when showHFT or showLTP is enabled on an index future (chart view only)
+  // HFT overlay: poll scanner data when showHFT or showLTP/showMII is enabled (for LTP OWP on HFT chart)
   useEffect(() => {
-    if (!(features.showHFT || features.showLTP)) return;
+    if (!(features.showHFT || features.showLTP || features.showMII)) return;
     const base = API_URL || window.location.origin;
     const indices = new Set();
     const idx1 = activeSymbol ? ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => String(activeSymbol).toUpperCase().includes(n)) : null;
@@ -1008,7 +1008,7 @@ export default function App() {
     poll();
     const id = setInterval(poll, 30_000);
     return () => clearInterval(id);
-  }, [features.showHFT, features.showLTP, activeSymbol, splitView, activeSymbol2]);
+  }, [features.showHFT, features.showLTP, features.showMII, activeSymbol, splitView, activeSymbol2]);
 
   // HFT chart: request index history (disk-backed, same as futures — no Dhan API)
   useEffect(() => {
@@ -1025,17 +1025,18 @@ export default function App() {
 
   const CANDLE_MINUTES = [1, 5, 10, 15, 30, 45, 60, 120];
 
-  // HFT chart: index live market feed only (like futures — no Dhan history)
+  // HFT chart: index candles for display; futures candles for LTP/MII overlay (matched by time)
   const hftChartData = useMemo(() => {
     const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find((n) =>
       String(activeSymbol || "").toUpperCase().includes(n)
     ) || null;
     const indexFlow = idx ? flows[idx] : null;
     const candlesOut = indexFlow?.candles || [];
+    const ltpMiiCandles = (flow?.candles?.length && flow !== indexFlow) ? flow.candles : null;
     const livePrice = (indexFlow?.ltp != null && Number.isFinite(indexFlow.ltp))
       ? indexFlow.ltp
       : flow?.ltp;
-    return { candles: candlesOut, livePrice };
+    return { candles: candlesOut, livePrice, ltpMiiCandles };
   }, [activeSymbol, flows, flow]);
 
   // Derive the correct market-open offset for the active symbol's exchange
@@ -1067,10 +1068,11 @@ export default function App() {
     ) || null;
     const indexFlow = idx ? flows[idx] : null;
     const candlesOut = indexFlow?.candles || [];
+    const ltpMiiCandles = (flow2?.candles?.length && flow2 !== indexFlow) ? flow2.candles : null;
     const livePrice = (indexFlow?.ltp != null && Number.isFinite(indexFlow.ltp))
       ? indexFlow.ltp
       : flow2?.ltp;
-    return { candles: candlesOut, livePrice };
+    return { candles: candlesOut, livePrice, ltpMiiCandles };
   }, [activeSymbol2, flows, flow2]);
 
   /* ── dedicated full-screen footprint tab (opened via ⧉) ── */
@@ -1361,7 +1363,7 @@ export default function App() {
                         </div>
                       ) : viewMode === "hft" ? (
                         <div className="chart-view-wrap">
-                          <HftScannerChart symbol={activeSymbol} apiBase={API_URL || window.location.origin} candles={hftChartData.candles} livePrice={hftChartData.livePrice} features={features} hftSeries={(() => { const s = (activeSymbol || "").toUpperCase(); const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n)); return idx ? (hftSeriesCache[idx] || []) : []; })()} />
+                          <HftScannerChart symbol={activeSymbol} apiBase={API_URL || window.location.origin} candles={hftChartData.candles} livePrice={hftChartData.livePrice} ltpMiiCandles={hftChartData.ltpMiiCandles} features={features} hftSeries={(() => { const s = (activeSymbol || "").toUpperCase(); const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n)); return idx ? (hftSeriesCache[idx] || []) : []; })()} />
                         </div>
                       ) : viewMode === "strike" ? (
                         <div className="chart-view-wrap">
@@ -1409,7 +1411,7 @@ export default function App() {
                         </div>
                       ) : viewMode === "hft" ? (
                         <div className="chart-view-wrap">
-                          <HftScannerChart symbol={activeSymbol2} apiBase={API_URL || window.location.origin} candles={hftChartData2.candles} livePrice={hftChartData2.livePrice} features={features} hftSeries={(() => { const s = (activeSymbol2 || "").toUpperCase(); const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n)); return idx ? (hftSeriesCache[idx] || []) : []; })()} />
+                          <HftScannerChart symbol={activeSymbol2} apiBase={API_URL || window.location.origin} candles={hftChartData2.candles} livePrice={hftChartData2.livePrice} ltpMiiCandles={hftChartData2.ltpMiiCandles} features={features} hftSeries={(() => { const s = (activeSymbol2 || "").toUpperCase(); const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n)); return idx ? (hftSeriesCache[idx] || []) : []; })()} />
                         </div>
                       ) : viewMode === "strike" ? (
                         <div className="chart-view-wrap">
@@ -1462,7 +1464,7 @@ export default function App() {
                   </div>
                 ) : viewMode === "hft" ? (
                   <div className="chart-view-wrap">
-                    <HftScannerChart symbol={activeSymbol} apiBase={API_URL || window.location.origin} candles={hftChartData.candles} livePrice={hftChartData.livePrice} features={features} hftSeries={(() => { const s = (activeSymbol || "").toUpperCase(); const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n)); return idx ? (hftSeriesCache[idx] || []) : []; })()} />
+                    <HftScannerChart symbol={activeSymbol} apiBase={API_URL || window.location.origin} candles={hftChartData.candles} livePrice={hftChartData.livePrice} ltpMiiCandles={hftChartData.ltpMiiCandles} features={features} hftSeries={(() => { const s = (activeSymbol || "").toUpperCase(); const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n)); return idx ? (hftSeriesCache[idx] || []) : []; })()} />
                   </div>
                 ) : viewMode === "strike" ? (
                   <div className="chart-view-wrap">

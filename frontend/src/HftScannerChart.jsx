@@ -200,7 +200,7 @@ const MII_COLORS = { up: "#4ade80", down: "#f87171" };
 /* ═══════════════════════════════════════════════════════════════════════════
    COMPONENT
 ═══════════════════════════════════════════════════════════════════════════ */
-export default function HftScannerChart({ symbol, apiBase, candles = [], livePrice, features = {}, hftSeries = [] }) {
+export default function HftScannerChart({ symbol, apiBase, candles = [], livePrice, ltpMiiCandles = null, features = {}, hftSeries = [] }) {
   const chartContainerRef = useRef(null);
   const chartRef          = useRef(null);
   const candleSeriesRef   = useRef(null);
@@ -336,7 +336,7 @@ export default function HftScannerChart({ symbol, apiBase, candles = [], livePri
     }
   }, [candles, tfMin]);
 
-  /* ── Effect 2a: LTP/MII markers on candlestick ───────────────────────────────────────── */
+  /* ── Effect 2a: LTP/MII markers from futures data, matched to index candle times ─────── */
   useEffect(() => {
     const series = candleSeriesRef.current;
     if (!series || !candles?.length) return;
@@ -347,22 +347,32 @@ export default function HftScannerChart({ symbol, apiBase, candles = [], livePri
     }
 
     const filtered = candles.filter((c) => c.open_time && (c.open != null || c.close != null));
-    const merged = aggregateCandlesForHft(filtered, tfMin);
-    const candlesForIndicators = merged.map((c) => ({
+    const indexMerged = aggregateCandlesForHft(filtered, tfMin);
+
+    const futuresForLTP = ltpMiiCandles?.length ? ltpMiiCandles : filtered;
+    const futuresMerged = aggregateCandlesForHft(futuresForLTP, tfMin);
+    const futuresForIndicators = futuresMerged.map((c) => ({
       ...c,
       open_time: (c.time ?? c.open_time) * (c.time != null && c.time < 1e12 ? 1000 : 1),
       chartTime: c.time,
     }));
 
-    const ltpArr = showLTP ? computeLTP(candlesForIndicators, hftSeries, symbol) : [];
-    const miiArr = showMII ? computeMII(candlesForIndicators) : [];
+    const ltpArr = showLTP ? computeLTP(futuresForIndicators, hftSeries, symbol) : [];
+    const miiArr = showMII ? computeMII(futuresForIndicators) : [];
+    const ltpByTime = new Map();
+    const miiByTime = new Map();
+    for (let i = 0; i < futuresMerged.length; i++) {
+      const t = futuresMerged[i].time;
+      ltpByTime.set(t, ltpArr[i]?.ltp);
+      miiByTime.set(t, miiArr[i]?.mii);
+    }
 
     const th = SIGNAL_THRESHOLD;
     const markers = [];
-    for (let i = 0; i < merged.length; i++) {
-      const t = merged[i].time;
-      const ltp = ltpArr[i]?.ltp;
-      const mii = miiArr[i]?.mii;
+    for (const bar of indexMerged) {
+      const t = bar.time ?? Math.floor((bar.open_time || 0) / 1000);
+      const ltp = ltpByTime.get(t);
+      const mii = miiByTime.get(t);
       const hasLtp = showLTP && ltp != null && (ltp > th || ltp < -th);
       const hasMii = showMII && mii != null && (mii > th || mii < -th);
       if (hasLtp) {
@@ -385,7 +395,7 @@ export default function HftScannerChart({ symbol, apiBase, candles = [], livePri
       }
     }
     series.setMarkers(markers);
-  }, [candles, tfMin, showLTP, showMII, symbol, hftSeries]);
+  }, [candles, tfMin, showLTP, showMII, symbol, hftSeries, ltpMiiCandles]);
 
   /* ── Effect 2b: live tick update — update last bar with livePrice when it changes ──────── */
   useEffect(() => {
