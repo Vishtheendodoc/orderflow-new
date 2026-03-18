@@ -77,16 +77,17 @@ function nextBarDirection(candles, i) {
   return 0;
 }
 
-function evalIndicator(series, candles, threshold, useRaw = false) {
+function evalIndicator(series, candles, threshold, useRaw = false, contrarian = false) {
   let signals = 0;
   let correct = 0;
   for (let i = 0; i < series.length - 1; i++) {
-    const val = useRaw ? series[i].vzpRaw : (series[i].ltp ?? series[i].mii ?? series[i].vpt ?? series[i].vzp ?? 0);
-    if (Math.abs(val) <= threshold) continue;
+    const val = useRaw ? series[i].vzpRaw : (series[i].ltp ?? series[i].mii ?? series[i].vpt ?? series[i].vzp ?? series[i].da ?? series[i].oid ?? 0);
+    if (val == null || Math.abs(val) <= threshold) continue;
     signals++;
     const dir = nextBarDirection(candles, i);
     if (dir === null || dir === 0) continue;
-    const expectedDir = val > 0 ? 1 : -1;
+    let expectedDir = val > 0 ? 1 : -1;
+    if (contrarian) expectedDir = -expectedDir;
     if (dir === expectedDir) correct++;
   }
   return { signals, correct };
@@ -250,10 +251,51 @@ function computeVZP(candles) {
   return raw;
 }
 
+function computeDA(candles) {
+  if (!candles?.length) return [];
+  const eps = 1e-8;
+  const raw = [];
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const delta = c.delta ?? (c.buy_vol ?? 0) - (c.sell_vol ?? 0);
+    const prevDelta = i > 0 ? (candles[i - 1].delta ?? (candles[i - 1].buy_vol ?? 0) - (candles[i - 1].sell_vol ?? 0)) : delta;
+    const daRaw = Math.abs(prevDelta) + eps > 0 ? (delta - prevDelta) / (Math.abs(prevDelta) + eps) : 0;
+    raw.push({ daRaw });
+  }
+  // Option A: normalize by max (current - few signals)
+  const daMax = Math.max(0.01, ...raw.map((r) => Math.abs(r.daRaw)));
+  // Option B: use tanh for better spread
+  return raw.map((r) => {
+    const daNorm = r.daRaw / daMax;
+    const daTanh = Math.tanh(r.daRaw * 0.5);
+    return { da: Math.max(-1, Math.min(1, daNorm)), daTanh };
+  });
+}
+
+function computeOID(candles) {
+  if (!candles?.length) return [];
+  const eps = 1e-8;
+  const raw = [];
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const delta = c.delta ?? (c.buy_vol ?? 0) - (c.sell_vol ?? 0);
+    const oiChg = c.oi_change ?? 0;
+    const signOi = oiChg > eps ? 1 : oiChg < -eps ? -1 : 0;
+    const signDelta = delta > eps ? 1 : delta < -eps ? -1 : 0;
+    const signProduct = signOi * signDelta;
+    const mag = Math.min(1, (Math.abs(oiChg) / 100 + Math.abs(delta) / 10000) * 0.5);
+    const oidRaw = signProduct * (mag > 0 ? mag : 0.5);
+    raw.push({ oid: Math.max(-1, Math.min(1, oidRaw)), oidRaw });
+  }
+  return raw;
+}
+
 const LTP_GRID = [0.2, 0.25, 0.3, 0.35, 0.4];
 const MII_GRID = [0.3, 0.35, 0.4, 0.45, 0.5];
 const VPT_GRID = [0.3, 0.35, 0.4, 0.45, 0.5];
 const VZP_GRID = [0.15, 0.18, 0.2, 0.22, 0.25];
+const DA_GRID = [0.1, 0.12, 0.15, 0.18, 0.2, 0.25, 0.3];
+const OID_GRID = [0.2, 0.25, 0.3, 0.35, 0.4];
 
 async function main() {
   console.error("Fetching today's March future data...");
@@ -281,7 +323,7 @@ async function main() {
   const totalCandles = allCandles.reduce((s, x) => s + x.candles.length, 0);
   console.error(`Loaded ${allCandles.length} symbols, ${totalCandles} candles total.\n`);
 
-  const best = { ltp: { th: 0, acc: 0, sig: 0 }, mii: { th: 0, acc: 0, sig: 0 }, vpt: { th: 0, acc: 0, sig: 0 }, vzp: { th: 0, acc: 0, sig: 0 } };
+  const best = { ltp: { th: 0, acc: 0, sig: 0 }, mii: { th: 0, acc: 0, sig: 0 }, vpt: { th: 0, acc: 0, sig: 0 }, vzp: { th: 0, acc: 0, sig: 0 }, da: { th: 0, acc: 0, sig: 0, useTanh: false }, daTanh: { th: 0, acc: 0, sig: 0 }, oid: { th: 0, acc: 0, sig: 0 }, oidContrarian: { th: 0, acc: 0, sig: 0 } };
 
   for (const th of LTP_GRID) {
     let totalS = 0, totalC = 0;
@@ -339,12 +381,73 @@ async function main() {
     }
   }
 
+  for (const th of DA_GRID) {
+    let totalS = 0, totalC = 0;
+    for (const { candles } of allCandles) {
+      const da = computeDA(candles);
+      const e = evalIndicator(da, candles, th);
+      totalS += e.signals;
+      totalC += e.correct;
+    }
+    const acc = totalS > 0 ? (totalC / totalS) * 100 : 0;
+    if (totalS >= 10 && acc > best.da.acc) {
+      best.da = { th, acc, sig: totalS, useTanh: false };
+    }
+  }
+
+  for (const th of DA_GRID) {
+    let totalS = 0, totalC = 0;
+    for (const { candles } of allCandles) {
+      const da = computeDA(candles);
+      const daTanh = da.map((r) => ({ da: r.daTanh }));
+      const e = evalIndicator(daTanh, candles, th);
+      totalS += e.signals;
+      totalC += e.correct;
+    }
+    const acc = totalS > 0 ? (totalC / totalS) * 100 : 0;
+    if (totalS >= 30 && acc > best.daTanh.acc) {
+      best.daTanh = { th, acc, sig: totalS };
+    }
+  }
+
+  for (const th of OID_GRID) {
+    let totalS = 0, totalC = 0;
+    for (const { candles } of allCandles) {
+      const oid = computeOID(candles);
+      const e = evalIndicator(oid, candles, th);
+      totalS += e.signals;
+      totalC += e.correct;
+    }
+    const acc = totalS > 0 ? (totalC / totalS) * 100 : 0;
+    if (totalS >= 30 && acc > best.oid.acc) {
+      best.oid = { th, acc, sig: totalS };
+    }
+  }
+
+  for (const th of OID_GRID) {
+    let totalS = 0, totalC = 0;
+    for (const { candles } of allCandles) {
+      const oid = computeOID(candles);
+      const e = evalIndicator(oid, candles, th, false, true);
+      totalS += e.signals;
+      totalC += e.correct;
+    }
+    const acc = totalS > 0 ? (totalC / totalS) * 100 : 0;
+    if (totalS >= 30 && acc > best.oidContrarian.acc) {
+      best.oidContrarian = { th, acc, sig: totalS };
+    }
+  }
+
   console.log("=== Footprint Indicator Threshold Tuning (Today's Data) ===\n");
-  console.log("Best threshold per indicator (min 30 signals):\n");
+  console.log("Best threshold per indicator (min 30 signals, DA min 10):\n");
   console.log(`LTP:  th=${best.ltp.th}  accuracy=${best.ltp.acc.toFixed(1)}%  signals=${best.ltp.sig}`);
   console.log(`MII:  th=${best.mii.th}  accuracy=${best.mii.acc.toFixed(1)}%  signals=${best.mii.sig}`);
   console.log(`VPT:  th=${best.vpt.th}  accuracy=${best.vpt.acc.toFixed(1)}%  signals=${best.vpt.sig}`);
   console.log(`VZP:  th=${best.vzp.th}  accuracy=${best.vzp.acc.toFixed(1)}%  signals=${best.vzp.sig}`);
+  console.log(`DA:   th=${best.da.th}  accuracy=${best.da.acc.toFixed(1)}%  signals=${best.da.sig}`);
+  console.log(`DA(tanh): th=${best.daTanh.th}  accuracy=${best.daTanh.acc.toFixed(1)}%  signals=${best.daTanh.sig}`);
+  console.log(`OID:  th=${best.oid.th}  accuracy=${best.oid.acc.toFixed(1)}%  signals=${best.oid.sig}`);
+  console.log(`OID(contrarian): th=${best.oidContrarian.th}  accuracy=${best.oidContrarian.acc.toFixed(1)}%  signals=${best.oidContrarian.sig}`);
 }
 
 main().catch((e) => {

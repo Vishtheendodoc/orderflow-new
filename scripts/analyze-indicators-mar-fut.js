@@ -17,6 +17,9 @@ const LTP_THRESHOLD = 0.3;
 const MII_THRESHOLD = 0.4;
 const VPT_THRESHOLD = 0.4;
 const VZP_THRESHOLD = 0.2;
+const DA_THRESHOLD = 0.2;    // tuned 2026-03: higher = less noise
+const OID_THRESHOLD = 0.35;  // tuned 2026-03
+const OID_CONTRARIAN = true; // OID divergence (neg) = expect up; confluence (pos) = expect down
 
 const TIER1 = [
   "NIFTY MAR FUT",
@@ -403,6 +406,72 @@ function computeContextEvents(candles) {
   return out;
 }
 
+function computeDA(candles) {
+  if (!candles?.length) return [];
+  const eps = 1e-8;
+  const raw = [];
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const delta = c.delta ?? (c.buy_vol ?? 0) - (c.sell_vol ?? 0);
+    const prevDelta = i > 0 ? (candles[i - 1].delta ?? (candles[i - 1].buy_vol ?? 0) - (candles[i - 1].sell_vol ?? 0)) : delta;
+    const daRaw = Math.abs(prevDelta) + eps > 0 ? (delta - prevDelta) / (Math.abs(prevDelta) + eps) : 0;
+    const da = Math.tanh(daRaw * 0.5);
+    raw.push({ open_time: c.open_time, chartTime: c.chartTime, daRaw, delta, da });
+  }
+  return raw;
+}
+
+function computeOID(candles) {
+  if (!candles?.length) return [];
+  const eps = 1e-8;
+  const raw = [];
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const delta = c.delta ?? (c.buy_vol ?? 0) - (c.sell_vol ?? 0);
+    const oiChg = c.oi_change ?? 0;
+    const signOi = oiChg > eps ? 1 : oiChg < -eps ? -1 : 0;
+    const signDelta = delta > eps ? 1 : delta < -eps ? -1 : 0;
+    const signProduct = signOi * signDelta;
+    const mag = Math.min(1, (Math.abs(oiChg) / 100 + Math.abs(delta) / 10000) * 0.5);
+    const oidRaw = signProduct * (mag > 0 ? mag : 0.5);
+    raw.push({ open_time: c.open_time, chartTime: c.chartTime, oidRaw, signProduct });
+  }
+  return raw.map((r) => {
+    const oid = Math.max(-1, Math.min(1, r.oidRaw));
+    return { ...r, oid };
+  });
+}
+
+/** Range Expansion Reversal (REX) — bar range >= mult × avg(range of last lookback). Predict reversal. */
+function computeRangeExpansion(candles, lookback = 5, mult = 1.8) {
+  if (!candles?.length) return [];
+  const eps = 1e-8;
+  const out = [];
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const open = c.open ?? c.close ?? 0;
+    const close = c.close ?? c.open ?? 0;
+    const high = c.high ?? Math.max(open, close);
+    const low = c.low ?? Math.min(open, close);
+    const currRange = high - low;
+    let rex = 0;
+    if (i >= lookback) {
+      const ranges = [];
+      for (let j = i - lookback; j < i; j++) {
+        const h = candles[j].high ?? Math.max(candles[j].open ?? 0, candles[j].close ?? 0);
+        const l = candles[j].low ?? Math.min(candles[j].open ?? 1e9, candles[j].close ?? 1e9);
+        ranges.push(h - l);
+      }
+      const avgRange = ranges.reduce((a, b) => a + b, 0) / ranges.length || eps;
+      if (currRange >= mult * avgRange) {
+        rex = close > open ? -1 : close < open ? 1 : 0;
+      }
+    }
+    out.push({ open_time: c.open_time, chartTime: c.chartTime, rex, currRange, expanded: rex !== 0 });
+  }
+  return out;
+}
+
 // ─── Evaluation ───
 
 function nextBarDirection(candles, i) {
@@ -416,16 +485,17 @@ function nextBarDirection(candles, i) {
   return 0;
 }
 
-function evalIndicator(series, candles, threshold, useRaw = false) {
+function evalIndicator(series, candles, threshold, useRaw = false, contrarian = false) {
   let signals = 0;
   let correct = 0;
   for (let i = 0; i < series.length - 1; i++) {
-    const val = useRaw ? series[i].vzpRaw : (series[i].ltp ?? series[i].mii ?? series[i].vpt ?? series[i].vzp ?? 0);
+    const val = useRaw ? series[i].vzpRaw : (series[i].ltp ?? series[i].mii ?? series[i].vpt ?? series[i].vzp ?? series[i].da ?? series[i].oid ?? series[i].rex ?? 0);
     if (Math.abs(val) <= threshold) continue;
     signals++;
     const dir = nextBarDirection(candles, i);
     if (dir === null || dir === 0) continue;
-    const expectedDir = val > 0 ? 1 : -1;
+    let expectedDir = val > 0 ? 1 : -1;
+    if (contrarian) expectedDir = -expectedDir;
     if (dir === expectedDir) correct++;
   }
   return { signals, correct };
@@ -449,7 +519,7 @@ function evalContextEvents(events, candles) {
 }
 
 /** Combined: signal when 2+ indicators agree on direction at same bar */
-function evalCombined(ltp, mii, vpt, vzp, cae, candles) {
+function evalCombined(ltp, mii, vpt, vzp, da, oid, cae, candles) {
   let signals = 0;
   let correct = 0;
   const bearishEvents = new Set(["REVERSAL_TOP", "RALLY_END"]);
@@ -466,6 +536,10 @@ function evalCombined(ltp, mii, vpt, vzp, cae, candles) {
     if (vVpt != null && Math.abs(vVpt) > VPT_THRESHOLD) votes.push(vVpt > 0 ? 1 : -1);
     const vVzp = vzp[i]?.vzpRaw;
     if (vVzp != null && Math.abs(vVzp) > VZP_THRESHOLD) votes.push(vVzp > 0 ? -1 : 1); // VZP: pos=bearish
+    const vDa = da[i]?.da;
+    if (vDa != null && Math.abs(vDa) > DA_THRESHOLD) votes.push(vDa > 0 ? 1 : -1);
+    const vOid = oid[i]?.oid;
+    if (vOid != null && Math.abs(vOid) > OID_THRESHOLD) votes.push(OID_CONTRARIAN ? (vOid > 0 ? -1 : 1) : (vOid > 0 ? 1 : -1));
     const ev = cae[i]?.event;
     if (ev) votes.push(bearishEvents.has(ev) ? -1 : 1);
     if (votes.length < 2) continue;
@@ -511,14 +585,20 @@ function analyzeSymbol(symbol, state) {
   const mii = computeMII(candles);
   const vpt = computeVPT(candles);
   const vzp = computeVZP(candles);
+  const da = computeDA(candles);
+  const oid = computeOID(candles);
   const cae = computeContextEvents(candles);
+  const rex = computeRangeExpansion(candles, 5, 1.8);
 
   const ltpEval = evalIndicator(ltp, candles, LTP_THRESHOLD);
   const miiEval = evalIndicator(mii, candles, MII_THRESHOLD);
   const vptEval = evalIndicator(vpt, candles, VPT_THRESHOLD);
   const vzpEval = evalIndicator(vzp, candles, VZP_THRESHOLD, true);
+  const daEval = evalIndicator(da, candles, DA_THRESHOLD);
+  const oidEval = evalIndicator(oid, candles, OID_THRESHOLD, false, OID_CONTRARIAN);
   const caeEval = evalContextEvents(cae, candles);
-  const combinedEval = COMBINED_MODE ? evalCombined(ltp, mii, vpt, vzp, cae, candles) : null;
+  const rexEval = evalIndicator(rex, candles, 0.5);
+  const combinedEval = COMBINED_MODE ? evalCombined(ltp, mii, vpt, vzp, da, oid, cae, candles) : null;
 
   const fmt = (e) => (e.signals > 0 ? `${e.signals}/${((e.correct / e.signals) * 100).toFixed(1)}` : "0/-");
 
@@ -529,14 +609,20 @@ function analyzeSymbol(symbol, state) {
     mii: fmt(miiEval),
     vpt: fmt(vptEval),
     vzp: fmt(vzpEval),
+    da: fmt(daEval),
+    oid: fmt(oidEval),
     cae: fmt(caeEval),
+    rex: fmt(rexEval),
     combined: combinedEval ? fmt(combinedEval) : null,
     raw: {
       ltp: ltpEval,
       mii: miiEval,
       vpt: vptEval,
       vzp: vzpEval,
+      da: daEval,
+      oid: oidEval,
       cae: caeEval,
+      rex: rexEval,
       combined: combinedEval,
     },
   };
@@ -547,7 +633,7 @@ function formatTable(rows, dateStr) {
   const wSym = Math.max(20, ...rows.map((r) => r.symbol.length));
   const hasCombined = rows.some((r) => r.combined != null);
   const combinedCol = hasCombined ? ` | ${pad("Combined(2+)", 14)}` : "";
-  const header = `${pad("Symbol", wSym)} | ${pad("Candles", 7)} | ${pad("LTP (sig/acc%)", 14)} | ${pad("MII (sig/acc%)", 14)} | ${pad("VPT (sig/acc%)", 14)} | ${pad("VZP (sig/acc%)", 14)} | ${pad("CAE (sig/acc%)", 14)}${combinedCol}`;
+  const header = `${pad("Symbol", wSym)} | ${pad("Candles", 7)} | ${pad("LTP (sig/acc%)", 14)} | ${pad("MII (sig/acc%)", 14)} | ${pad("VPT (sig/acc%)", 14)} | ${pad("VZP (sig/acc%)", 14)} | ${pad("DA (sig/acc%)", 14)} | ${pad("OID (sig/acc%)", 14)} | ${pad("CAE (sig/acc%)", 14)} | ${pad("REX (sig/acc%)", 14)}${combinedCol}`;
   const sep = "-".repeat(header.length);
   const lines = [
     `=== Indicator Performance: March Futures (${dateStr}) ===`,
@@ -556,7 +642,7 @@ function formatTable(rows, dateStr) {
     header,
     sep,
     ...rows.map((r) => {
-      const base = `${pad(r.symbol, wSym)} | ${pad(r.candles, 7)} | ${pad(r.ltp, 14)} | ${pad(r.mii, 14)} | ${pad(r.vpt, 14)} | ${pad(r.vzp, 14)} | ${pad(r.cae, 14)}`;
+      const base = `${pad(r.symbol, wSym)} | ${pad(r.candles, 7)} | ${pad(r.ltp, 14)} | ${pad(r.mii, 14)} | ${pad(r.vpt, 14)} | ${pad(r.vzp, 14)} | ${pad(r.da ?? "-", 14)} | ${pad(r.oid ?? "-", 14)} | ${pad(r.cae, 14)} | ${pad(r.rex ?? "-", 14)}`;
       return hasCombined ? `${base} | ${pad(r.combined ?? "-", 14)}` : base;
     }),
   ];
@@ -567,12 +653,15 @@ function formatTable(rows, dateStr) {
     const avgMii = rows.reduce((s, r) => s + (r.raw.mii.signals > 0 ? (r.raw.mii.correct / r.raw.mii.signals) * 100 : 0), 0) / n;
     const avgVpt = rows.reduce((s, r) => s + (r.raw.vpt.signals > 0 ? (r.raw.vpt.correct / r.raw.vpt.signals) * 100 : 0), 0) / n;
     const avgVzp = rows.reduce((s, r) => s + (r.raw.vzp.signals > 0 ? (r.raw.vzp.correct / r.raw.vzp.signals) * 100 : 0), 0) / n;
+    const avgDa = rows.reduce((s, r) => s + (r.raw.da.signals > 0 ? (r.raw.da.correct / r.raw.da.signals) * 100 : 0), 0) / n;
+    const avgOid = rows.reduce((s, r) => s + (r.raw.oid.signals > 0 ? (r.raw.oid.correct / r.raw.oid.signals) * 100 : 0), 0) / n;
     const avgCae = rows.reduce((s, r) => s + (r.raw.cae.signals > 0 ? (r.raw.cae.correct / r.raw.cae.signals) * 100 : 0), 0) / n;
+    const avgRex = rows.reduce((s, r) => s + (r.raw.rex?.signals > 0 ? (r.raw.rex.correct / r.raw.rex.signals) * 100 : 0), 0) / n;
     const avgCombined = hasCombined
       ? rows.reduce((s, r) => s + (r.raw.combined?.signals > 0 ? (r.raw.combined.correct / r.raw.combined.signals) * 100 : 0), 0) / n
       : 0;
     lines.push(sep);
-    const aggBase = `${pad(`AGGREGATE (${n} symbols)`, wSym)} | ${pad("-", 7)} | ${pad(`avg LTP ${avgLtp.toFixed(1)}%`, 14)} | ${pad(`avg MII ${avgMii.toFixed(1)}%`, 14)} | ${pad(`avg VPT ${avgVpt.toFixed(1)}%`, 14)} | ${pad(`avg VZP ${avgVzp.toFixed(1)}%`, 14)} | ${pad(`avg CAE ${avgCae.toFixed(1)}%`, 14)}`;
+    const aggBase = `${pad(`AGGREGATE (${n} symbols)`, wSym)} | ${pad("-", 7)} | ${pad(`avg LTP ${avgLtp.toFixed(1)}%`, 14)} | ${pad(`avg MII ${avgMii.toFixed(1)}%`, 14)} | ${pad(`avg VPT ${avgVpt.toFixed(1)}%`, 14)} | ${pad(`avg VZP ${avgVzp.toFixed(1)}%`, 14)} | ${pad(`avg DA ${avgDa.toFixed(1)}%`, 14)} | ${pad(`avg OID ${avgOid.toFixed(1)}%`, 14)} | ${pad(`avg CAE ${avgCae.toFixed(1)}%`, 14)} | ${pad(`avg REX ${avgRex.toFixed(1)}%`, 14)}`;
     lines.push(hasCombined ? `${aggBase} | ${pad(`avg Combined ${avgCombined.toFixed(1)}%`, 14)}` : aggBase);
     if (EXCLUDE_SYMBOLS && EXCLUDE_SYMBOLS.size > 0) {
       const filtered = rows.filter((r) => !EXCLUDE_SYMBOLS.has(r.symbol));
@@ -582,10 +671,13 @@ function formatTable(rows, dateStr) {
         const avgMiiF = filtered.reduce((s, r) => s + (r.raw.mii.signals > 0 ? (r.raw.mii.correct / r.raw.mii.signals) * 100 : 0), 0) / nf;
         const avgVptF = filtered.reduce((s, r) => s + (r.raw.vpt.signals > 0 ? (r.raw.vpt.correct / r.raw.vpt.signals) * 100 : 0), 0) / nf;
         const avgVzpF = filtered.reduce((s, r) => s + (r.raw.vzp.signals > 0 ? (r.raw.vzp.correct / r.raw.vzp.signals) * 100 : 0), 0) / nf;
+        const avgDaF = filtered.reduce((s, r) => s + (r.raw.da.signals > 0 ? (r.raw.da.correct / r.raw.da.signals) * 100 : 0), 0) / nf;
+        const avgOidF = filtered.reduce((s, r) => s + (r.raw.oid.signals > 0 ? (r.raw.oid.correct / r.raw.oid.signals) * 100 : 0), 0) / nf;
         const avgCaeF = filtered.reduce((s, r) => s + (r.raw.cae.signals > 0 ? (r.raw.cae.correct / r.raw.cae.signals) * 100 : 0), 0) / nf;
+        const avgRexF = filtered.reduce((s, r) => s + (r.raw.rex?.signals > 0 ? (r.raw.rex.correct / r.raw.rex.signals) * 100 : 0), 0) / nf;
         const avgCombinedF = hasCombined ? filtered.reduce((s, r) => s + (r.raw.combined?.signals > 0 ? (r.raw.combined.correct / r.raw.combined.signals) * 100 : 0), 0) / nf : 0;
         lines.push(sep);
-        const aggF = `${pad(`AGGREGATE (${nf} excl)`, wSym)} | ${pad("-", 7)} | ${pad(`avg LTP ${avgLtpF.toFixed(1)}%`, 14)} | ${pad(`avg MII ${avgMiiF.toFixed(1)}%`, 14)} | ${pad(`avg VPT ${avgVptF.toFixed(1)}%`, 14)} | ${pad(`avg VZP ${avgVzpF.toFixed(1)}%`, 14)} | ${pad(`avg CAE ${avgCaeF.toFixed(1)}%`, 14)}`;
+        const aggF = `${pad(`AGGREGATE (${nf} excl)`, wSym)} | ${pad("-", 7)} | ${pad(`avg LTP ${avgLtpF.toFixed(1)}%`, 14)} | ${pad(`avg MII ${avgMiiF.toFixed(1)}%`, 14)} | ${pad(`avg VPT ${avgVptF.toFixed(1)}%`, 14)} | ${pad(`avg VZP ${avgVzpF.toFixed(1)}%`, 14)} | ${pad(`avg DA ${avgDaF.toFixed(1)}%`, 14)} | ${pad(`avg OID ${avgOidF.toFixed(1)}%`, 14)} | ${pad(`avg CAE ${avgCaeF.toFixed(1)}%`, 14)} | ${pad(`avg REX ${avgRexF.toFixed(1)}%`, 14)}`;
         lines.push(hasCombined ? `${aggF} | ${pad(`avg Combined ${avgCombinedF.toFixed(1)}%`, 14)}` : aggF);
       }
     }

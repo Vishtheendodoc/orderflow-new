@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite --port 5173",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "analyze:indicators": "node ../scripts/analyze-indicators-mar-fut.js",
+    "analyze:hft": "node ../scripts/analyze-hft-performance.js"
   },
   "dependencies": {
     "lightweight-charts": "^4.2.0",
