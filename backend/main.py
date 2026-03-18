@@ -109,8 +109,8 @@ HFT_LTP_MOVE_PCT    = float(os.getenv("HFT_LTP_MOVE_PCT", "2"))          # meani
 HFT_OI_CHG_MIN      = float(os.getenv("HFT_OI_CHG_MIN", "3"))             # min OI chg for short/write
 HFT_CE_VOL_MIN      = int(os.getenv("HFT_CE_VOL_MIN", "100000"))          # min CE volume; NIFTY ~1L, FINNIFTY ~1K
 HFT_PE_VOL_MIN      = int(os.getenv("HFT_PE_VOL_MIN", "100000"))          # min PE volume; index-specific
-HFT_MFI_OVERBOUGHT  = float(os.getenv("HFT_MFI_OVERBOUGHT", "70"))        # MFI overbought
-HFT_MFI_OVERSOLD    = float(os.getenv("HFT_MFI_OVERSOLD", "30"))         # MFI oversold
+HFT_MFI_OVERBOUGHT  = float(os.getenv("HFT_MFI_OVERBOUGHT", "75"))        # MFI overbought (tuned 2026-03)
+HFT_MFI_OVERSOLD    = float(os.getenv("HFT_MFI_OVERSOLD", "25"))         # MFI oversold (tuned 2026-03)
 # Per-index HFT defaults (from calibration). Env overrides: HFT_OI_CHG_PCT_NIFTY, etc.
 _HFT_DEFAULTS = {
     "NIFTY":      {"oi_chg_pct": 3.0, "ltp_stable": 1.6, "ce_vol": 100_000, "pe_vol": 100_000},
@@ -2602,8 +2602,9 @@ async def get_index_ltp(index: str):
 
 
 # Flow types: bullish (positive score) vs bearish (negative score)
-_STRIKE_BULLISH_FLOWS = {"Aggressive Call Buy", "Dark Pool CE", "Heavy Put Write"}
-_STRIKE_BEARISH_FLOWS = {"Aggressive Put Buy", "Dark Pool PE", "Call Short", "Heavy Call Short", "Put Write"}
+# Put writing = bullish; call writing = bearish
+_STRIKE_BULLISH_FLOWS = {"Aggressive Call Buy", "Dark Pool CE", "Heavy Put Write", "Put Write"}
+_STRIKE_BEARISH_FLOWS = {"Aggressive Put Buy", "Dark Pool PE", "Call Short", "Heavy Call Short"}
 
 
 def _aggregate_flows(snapshots: list) -> dict:
