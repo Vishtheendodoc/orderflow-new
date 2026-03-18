@@ -20,6 +20,7 @@ const VZP_THRESHOLD = 0.2;
 const DA_THRESHOLD = 0.2;    // tuned 2026-03: higher = less noise
 const OID_THRESHOLD = 0.35;  // tuned 2026-03
 const OID_CONTRARIAN = true; // OID divergence (neg) = expect up; confluence (pos) = expect down
+const IFI_THRESHOLD = 0.88; // Initiator Flow: open/close mid zone split, tuned NIFTY MAR FUT ~63%
 
 const TIER1 = [
   "NIFTY MAR FUT",
@@ -327,6 +328,38 @@ function computeVZP(candles) {
   });
 }
 
+/** Initiator Flow Index: open/close mid zone split. IFI = -(ask-bid)/tot. */
+function computeInitiatorFlow(candles) {
+  if (!candles?.length) return [];
+  const eps = 1e-8;
+  const raw = [];
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const open = c.open ?? c.close ?? 0;
+    const close = c.close ?? c.open ?? 0;
+    const mid = (open + close) / 2;
+    const delta = c.delta ?? (c.buy_vol ?? 0) - (c.sell_vol ?? 0);
+    let askVol = 0, bidVol = 0;
+    const lvs = Object.values(c.levels || {});
+    if (lvs.length > 0) {
+      for (const lv of lvs) {
+        const p = lv.price ?? 0;
+        const vol = (lv.buy_vol ?? 0) + (lv.sell_vol ?? 0) || (lv.total_vol ?? 0);
+        if (vol > 0 && isFinite(p)) {
+          if (p < mid) bidVol += vol;
+          else if (p > mid) askVol += vol;
+        }
+      }
+    }
+    const tot = bidVol + askVol || eps;
+    const vzpRaw = lvs.length > 0 ? (askVol - bidVol) / tot : 0;
+    const ifiRaw = -vzpRaw;
+    const ifi = Math.max(-1, Math.min(1, ifiRaw));
+    raw.push({ open_time: c.open_time, chartTime: c.chartTime, ifi, ifiRaw });
+  }
+  return raw;
+}
+
 function computeContextEvents(candles) {
   if (!candles?.length) return [];
   const eps = 1e-8;
@@ -501,6 +534,207 @@ function evalIndicator(series, candles, threshold, useRaw = false, contrarian = 
   return { signals, correct };
 }
 
+/** Generic indicator with breakdown: worked/opposite/flat. Accuracy = worked/(worked+opposite). */
+function evalIndicatorBreakdown(series, candles, threshold, useRaw = false, contrarian = false) {
+  let worked = 0;
+  let opposite = 0;
+  let flat = 0;
+  for (let i = 0; i < series.length - 1; i++) {
+    const val = useRaw ? series[i].vzpRaw : (series[i].ltp ?? series[i].mii ?? series[i].vpt ?? series[i].vzp ?? series[i].da ?? series[i].oid ?? 0);
+    if (Math.abs(val) <= threshold) continue;
+    const dir = nextBarDirection(candles, i);
+    if (dir === null) continue;
+    let expectedDir = val > 0 ? 1 : -1;
+    if (contrarian) expectedDir = -expectedDir;
+    if (dir === 0) {
+      flat++;
+    } else if (dir === expectedDir) {
+      worked++;
+    } else {
+      opposite++;
+    }
+  }
+  const signals = worked + opposite;
+  const accuracy = signals > 0 ? (worked / signals) * 100 : 0;
+  return { signals, correct: worked, worked, opposite, flat, accuracy };
+}
+
+/** CAE with breakdown: worked/opposite/flat. */
+function evalContextEventsBreakdown(events, candles) {
+  let worked = 0;
+  let opposite = 0;
+  let flat = 0;
+  const bearishEvents = new Set(["REVERSAL_TOP", "RALLY_END"]);
+  for (let i = 0; i < events.length - 1; i++) {
+    const ev = events[i].event;
+    if (!ev) continue;
+    const dir = nextBarDirection(candles, i);
+    if (dir === null) continue;
+    const expectedDir = bearishEvents.has(ev) ? -1 : 1;
+    if (dir === 0) {
+      flat++;
+    } else if (dir === expectedDir) {
+      worked++;
+    } else {
+      opposite++;
+    }
+  }
+  const signals = worked + opposite;
+  const accuracy = signals > 0 ? (worked / signals) * 100 : 0;
+  return { signals, correct: worked, worked, opposite, flat, accuracy };
+}
+
+/** In trend: last n bars all same direction (close vs open). Returns 1=uptrend, -1=downtrend, 0=no trend. */
+function trendDirection(candles, i, n = 3) {
+  if (i < n) return 0;
+  let up = 0, down = 0;
+  for (let j = i - n; j <= i; j++) {
+    const c = candles[j];
+    const open = c.open ?? c.close ?? 0;
+    const close = c.close ?? c.open ?? 0;
+    if (close > open) up++;
+    else if (close < open) down++;
+  }
+  if (up === n + 1) return 1;
+  if (down === n + 1) return -1;
+  return 0;
+}
+
+/** Trend continuation: only when in trend AND indicator agrees with trend. Accuracy = did trend continue? */
+function evalIndicatorContinuation(series, candles, threshold, useRaw = false, contrarian = false) {
+  let worked = 0;
+  let opposite = 0;
+  let flat = 0;
+  for (let i = 0; i < series.length - 1; i++) {
+    const trendDir = trendDirection(candles, i);
+    if (trendDir === 0) continue;
+    const val = useRaw ? series[i].vzpRaw : (series[i].ltp ?? series[i].mii ?? series[i].vpt ?? series[i].vzp ?? series[i].da ?? series[i].oid ?? 0);
+    if (Math.abs(val) <= threshold) continue;
+    let signalDir = val > 0 ? 1 : -1;
+    if (contrarian) signalDir = -signalDir;
+    if (signalDir !== trendDir) continue;
+    const dir = nextBarDirection(candles, i);
+    if (dir === null) continue;
+    const expectedDir = trendDir;
+    if (dir === 0) flat++;
+    else if (dir === expectedDir) worked++;
+    else opposite++;
+  }
+  const signals = worked + opposite;
+  const accuracy = signals > 0 ? (worked / signals) * 100 : 0;
+  return { signals, correct: worked, worked, opposite, flat, accuracy };
+}
+
+/** CAE trend continuation: only when in trend AND event agrees with trend. */
+function evalContextEventsContinuation(events, candles) {
+  let worked = 0;
+  let opposite = 0;
+  let flat = 0;
+  const bearishEvents = new Set(["REVERSAL_TOP", "RALLY_END"]);
+  for (let i = 0; i < events.length - 1; i++) {
+    const trendDir = trendDirection(candles, i);
+    if (trendDir === 0) continue;
+    const ev = events[i].event;
+    if (!ev) continue;
+    const signalDir = bearishEvents.has(ev) ? -1 : 1;
+    if (signalDir !== trendDir) continue;
+    const dir = nextBarDirection(candles, i);
+    if (dir === null) continue;
+    const expectedDir = trendDir;
+    if (dir === 0) flat++;
+    else if (dir === expectedDir) worked++;
+    else opposite++;
+  }
+  const signals = worked + opposite;
+  const accuracy = signals > 0 ? (worked / signals) * 100 : 0;
+  return { signals, correct: worked, worked, opposite, flat, accuracy };
+}
+
+/** REX trend continuation: REX predicts reversal. For continuation we expect opposite of REX. Only when in trend. */
+function evalRexContinuation(series, candles, threshold) {
+  let worked = 0;
+  let opposite = 0;
+  let flat = 0;
+  for (let i = 0; i < series.length - 1; i++) {
+    const trendDir = trendDirection(candles, i);
+    if (trendDir === 0) continue;
+    const val = series[i].rex ?? 0;
+    if (Math.abs(val) <= threshold) continue;
+    const dir = nextBarDirection(candles, i);
+    if (dir === null) continue;
+    const expectedDir = trendDir;
+    if (dir === 0) flat++;
+    else if (dir === expectedDir) worked++;
+    else opposite++;
+  }
+  const signals = worked + opposite;
+  const accuracy = signals > 0 ? (worked / signals) * 100 : 0;
+  return { signals, correct: worked, worked, opposite, flat, accuracy };
+}
+
+/** REX: accuracy = worked / (worked + opposite). Flat bars excluded. */
+function evalRexIndicator(series, candles, threshold) {
+  let worked = 0;
+  let opposite = 0;
+  let flat = 0;
+  for (let i = 0; i < series.length - 1; i++) {
+    const val = series[i].rex ?? 0;
+    if (Math.abs(val) <= threshold) continue;
+    const dir = nextBarDirection(candles, i);
+    if (dir === null) continue;
+    const expectedDir = val > 0 ? 1 : -1;
+    if (dir === 0) {
+      flat++;
+    } else if (dir === expectedDir) {
+      worked++;
+    } else {
+      opposite++;
+    }
+  }
+  const signals = worked + opposite;
+  const accuracy = signals > 0 ? (worked / signals) * 100 : 0;
+  return { signals, correct: worked, worked, opposite, flat, accuracy };
+}
+
+/** IFI: accuracy = worked / (worked + opposite). Uses ifi field. */
+function evalIFIIndicator(series, candles, threshold) {
+  let worked = 0, opposite = 0, flat = 0;
+  for (let i = 0; i < series.length - 1; i++) {
+    const val = series[i].ifi ?? series[i].ifiRaw ?? 0;
+    if (Math.abs(val) <= threshold) continue;
+    const dir = nextBarDirection(candles, i);
+    if (dir === null) continue;
+    const expectedDir = val > 0 ? 1 : -1;
+    if (dir === 0) flat++;
+    else if (dir === expectedDir) worked++;
+    else opposite++;
+  }
+  const signals = worked + opposite;
+  const accuracy = signals > 0 ? (worked / signals) * 100 : 0;
+  return { signals, correct: worked, worked, opposite, flat, accuracy };
+}
+
+/** IFI trend continuation: in trend + indicator agrees. */
+function evalIFIContinuation(series, candles, threshold) {
+  let worked = 0, opposite = 0, flat = 0;
+  for (let i = 0; i < series.length - 1; i++) {
+    const trendDir = trendDirection(candles, i);
+    if (trendDir === 0) continue;
+    const val = series[i].ifi ?? series[i].ifiRaw ?? 0;
+    if (Math.abs(val) <= threshold) continue;
+    const signalDir = val > 0 ? 1 : -1;
+    if (signalDir !== trendDir) continue;
+    const dir = nextBarDirection(candles, i);
+    if (dir === null) continue;
+    if (dir === 0) flat++;
+    else if (dir === trendDir) worked++;
+    else opposite++;
+  }
+  const signals = worked + opposite;
+  const accuracy = signals > 0 ? (worked / signals) * 100 : 0;
+  return { signals, correct: worked, worked, opposite, flat, accuracy };
+}
+
 function evalContextEvents(events, candles) {
   let signals = 0;
   let correct = 0;
@@ -589,31 +823,45 @@ function analyzeSymbol(symbol, state) {
   const oid = computeOID(candles);
   const cae = computeContextEvents(candles);
   const rex = computeRangeExpansion(candles, 5, 1.8);
+  const ifi = computeInitiatorFlow(candles);
 
-  const ltpEval = evalIndicator(ltp, candles, LTP_THRESHOLD);
-  const miiEval = evalIndicator(mii, candles, MII_THRESHOLD);
-  const vptEval = evalIndicator(vpt, candles, VPT_THRESHOLD);
-  const vzpEval = evalIndicator(vzp, candles, VZP_THRESHOLD, true);
-  const daEval = evalIndicator(da, candles, DA_THRESHOLD);
-  const oidEval = evalIndicator(oid, candles, OID_THRESHOLD, false, OID_CONTRARIAN);
-  const caeEval = evalContextEvents(cae, candles);
-  const rexEval = evalIndicator(rex, candles, 0.5);
+  const ltpEval = evalIndicatorBreakdown(ltp, candles, LTP_THRESHOLD);
+  const miiEval = evalIndicatorBreakdown(mii, candles, MII_THRESHOLD);
+  const vptEval = evalIndicatorBreakdown(vpt, candles, VPT_THRESHOLD);
+  const vzpEval = evalIndicatorBreakdown(vzp, candles, VZP_THRESHOLD, true);
+  const daEval = evalIndicatorBreakdown(da, candles, DA_THRESHOLD);
+  const oidEval = evalIndicatorBreakdown(oid, candles, OID_THRESHOLD, false, OID_CONTRARIAN);
+  const caeEval = evalContextEventsBreakdown(cae, candles);
+  const rexEval = evalRexIndicator(rex, candles, 0.5);
+  const ifiEval = evalIFIIndicator(ifi, candles, IFI_THRESHOLD);
   const combinedEval = COMBINED_MODE ? evalCombined(ltp, mii, vpt, vzp, da, oid, cae, candles) : null;
 
-  const fmt = (e) => (e.signals > 0 ? `${e.signals}/${((e.correct / e.signals) * 100).toFixed(1)}` : "0/-");
+  const ltpCont = evalIndicatorContinuation(ltp, candles, LTP_THRESHOLD);
+  const miiCont = evalIndicatorContinuation(mii, candles, MII_THRESHOLD);
+  const vptCont = evalIndicatorContinuation(vpt, candles, VPT_THRESHOLD);
+  const vzpCont = evalIndicatorContinuation(vzp, candles, VZP_THRESHOLD, true);
+  const daCont = evalIndicatorContinuation(da, candles, DA_THRESHOLD);
+  const oidCont = evalIndicatorContinuation(oid, candles, OID_THRESHOLD, false, OID_CONTRARIAN);
+  const caeCont = evalContextEventsContinuation(cae, candles);
+  const rexCont = evalRexContinuation(rex, candles, 0.5);
+  const ifiCont = evalIFIContinuation(ifi, candles, IFI_THRESHOLD);
+
+  const fmtBreakdown = (e) => (e.signals > 0 ? `${e.signals}/${e.accuracy.toFixed(1)} W:${e.worked} O:${e.opposite}${e.flat > 0 ? ` F:${e.flat}` : ""}` : "0/-");
+  const fmtSimple = (e) => (e?.signals > 0 ? `${e.signals}/${((e.correct / e.signals) * 100).toFixed(1)}` : "0/-");
 
   return {
     symbol,
     candles: candles.length,
-    ltp: fmt(ltpEval),
-    mii: fmt(miiEval),
-    vpt: fmt(vptEval),
-    vzp: fmt(vzpEval),
-    da: fmt(daEval),
-    oid: fmt(oidEval),
-    cae: fmt(caeEval),
-    rex: fmt(rexEval),
-    combined: combinedEval ? fmt(combinedEval) : null,
+    ltp: fmtBreakdown(ltpEval),
+    mii: fmtBreakdown(miiEval),
+    vpt: fmtBreakdown(vptEval),
+    vzp: fmtBreakdown(vzpEval),
+    da: fmtBreakdown(daEval),
+    oid: fmtBreakdown(oidEval),
+    cae: fmtBreakdown(caeEval),
+    rex: fmtBreakdown(rexEval),
+    ifi: fmtBreakdown(ifiEval),
+    combined: combinedEval ? fmtSimple(combinedEval) : null,
     raw: {
       ltp: ltpEval,
       mii: miiEval,
@@ -623,7 +871,19 @@ function analyzeSymbol(symbol, state) {
       oid: oidEval,
       cae: caeEval,
       rex: rexEval,
+      ifi: ifiEval,
       combined: combinedEval,
+    },
+    cont: {
+      ltp: ltpCont,
+      mii: miiCont,
+      vpt: vptCont,
+      vzp: vzpCont,
+      da: daCont,
+      oid: oidCont,
+      cae: caeCont,
+      rex: rexCont,
+      ifi: ifiCont,
     },
   };
 }
@@ -632,8 +892,9 @@ function formatTable(rows, dateStr) {
   const pad = (s, w) => String(s).padEnd(w);
   const wSym = Math.max(20, ...rows.map((r) => r.symbol.length));
   const hasCombined = rows.some((r) => r.combined != null);
+  const colW = 24;
   const combinedCol = hasCombined ? ` | ${pad("Combined(2+)", 14)}` : "";
-  const header = `${pad("Symbol", wSym)} | ${pad("Candles", 7)} | ${pad("LTP (sig/acc%)", 14)} | ${pad("MII (sig/acc%)", 14)} | ${pad("VPT (sig/acc%)", 14)} | ${pad("VZP (sig/acc%)", 14)} | ${pad("DA (sig/acc%)", 14)} | ${pad("OID (sig/acc%)", 14)} | ${pad("CAE (sig/acc%)", 14)} | ${pad("REX (sig/acc%)", 14)}${combinedCol}`;
+  const header = `${pad("Symbol", wSym)} | ${pad("Candles", 7)} | ${pad("LTP (sig/acc W/O/F)", colW)} | ${pad("MII", colW)} | ${pad("VPT", colW)} | ${pad("VZP", colW)} | ${pad("DA", colW)} | ${pad("OID", colW)} | ${pad("CAE", colW)} | ${pad("REX", colW)} | ${pad("IFI", colW)}${combinedCol}`;
   const sep = "-".repeat(header.length);
   const lines = [
     `=== Indicator Performance: March Futures (${dateStr}) ===`,
@@ -642,7 +903,7 @@ function formatTable(rows, dateStr) {
     header,
     sep,
     ...rows.map((r) => {
-      const base = `${pad(r.symbol, wSym)} | ${pad(r.candles, 7)} | ${pad(r.ltp, 14)} | ${pad(r.mii, 14)} | ${pad(r.vpt, 14)} | ${pad(r.vzp, 14)} | ${pad(r.da ?? "-", 14)} | ${pad(r.oid ?? "-", 14)} | ${pad(r.cae, 14)} | ${pad(r.rex ?? "-", 14)}`;
+      const base = `${pad(r.symbol, wSym)} | ${pad(r.candles, 7)} | ${pad(r.ltp, colW)} | ${pad(r.mii, colW)} | ${pad(r.vpt, colW)} | ${pad(r.vzp, colW)} | ${pad(r.da ?? "-", colW)} | ${pad(r.oid ?? "-", colW)} | ${pad(r.cae, colW)} | ${pad(r.rex ?? "-", colW)} | ${pad(r.ifi ?? "-", colW)}`;
       return hasCombined ? `${base} | ${pad(r.combined ?? "-", 14)}` : base;
     }),
   ];
@@ -657,11 +918,12 @@ function formatTable(rows, dateStr) {
     const avgOid = rows.reduce((s, r) => s + (r.raw.oid.signals > 0 ? (r.raw.oid.correct / r.raw.oid.signals) * 100 : 0), 0) / n;
     const avgCae = rows.reduce((s, r) => s + (r.raw.cae.signals > 0 ? (r.raw.cae.correct / r.raw.cae.signals) * 100 : 0), 0) / n;
     const avgRex = rows.reduce((s, r) => s + (r.raw.rex?.signals > 0 ? (r.raw.rex.correct / r.raw.rex.signals) * 100 : 0), 0) / n;
+    const avgIfi = rows.reduce((s, r) => s + (r.raw.ifi?.signals > 0 ? (r.raw.ifi.correct / r.raw.ifi.signals) * 100 : 0), 0) / n;
     const avgCombined = hasCombined
       ? rows.reduce((s, r) => s + (r.raw.combined?.signals > 0 ? (r.raw.combined.correct / r.raw.combined.signals) * 100 : 0), 0) / n
       : 0;
     lines.push(sep);
-    const aggBase = `${pad(`AGGREGATE (${n} symbols)`, wSym)} | ${pad("-", 7)} | ${pad(`avg LTP ${avgLtp.toFixed(1)}%`, 14)} | ${pad(`avg MII ${avgMii.toFixed(1)}%`, 14)} | ${pad(`avg VPT ${avgVpt.toFixed(1)}%`, 14)} | ${pad(`avg VZP ${avgVzp.toFixed(1)}%`, 14)} | ${pad(`avg DA ${avgDa.toFixed(1)}%`, 14)} | ${pad(`avg OID ${avgOid.toFixed(1)}%`, 14)} | ${pad(`avg CAE ${avgCae.toFixed(1)}%`, 14)} | ${pad(`avg REX ${avgRex.toFixed(1)}%`, 14)}`;
+    const aggBase = `${pad(`AGGREGATE (${n} symbols)`, wSym)} | ${pad("-", 7)} | ${pad(`avg LTP ${avgLtp.toFixed(1)}%`, 14)} | ${pad(`avg MII ${avgMii.toFixed(1)}%`, 14)} | ${pad(`avg VPT ${avgVpt.toFixed(1)}%`, 14)} | ${pad(`avg VZP ${avgVzp.toFixed(1)}%`, 14)} | ${pad(`avg DA ${avgDa.toFixed(1)}%`, 14)} | ${pad(`avg OID ${avgOid.toFixed(1)}%`, 14)} | ${pad(`avg CAE ${avgCae.toFixed(1)}%`, 14)} | ${pad(`avg REX ${avgRex.toFixed(1)}%`, 14)} | ${pad(`avg IFI ${avgIfi.toFixed(1)}%`, 14)}`;
     lines.push(hasCombined ? `${aggBase} | ${pad(`avg Combined ${avgCombined.toFixed(1)}%`, 14)}` : aggBase);
     if (EXCLUDE_SYMBOLS && EXCLUDE_SYMBOLS.size > 0) {
       const filtered = rows.filter((r) => !EXCLUDE_SYMBOLS.has(r.symbol));
@@ -675,14 +937,36 @@ function formatTable(rows, dateStr) {
         const avgOidF = filtered.reduce((s, r) => s + (r.raw.oid.signals > 0 ? (r.raw.oid.correct / r.raw.oid.signals) * 100 : 0), 0) / nf;
         const avgCaeF = filtered.reduce((s, r) => s + (r.raw.cae.signals > 0 ? (r.raw.cae.correct / r.raw.cae.signals) * 100 : 0), 0) / nf;
         const avgRexF = filtered.reduce((s, r) => s + (r.raw.rex?.signals > 0 ? (r.raw.rex.correct / r.raw.rex.signals) * 100 : 0), 0) / nf;
+        const avgIfiF = filtered.reduce((s, r) => s + (r.raw.ifi?.signals > 0 ? (r.raw.ifi.correct / r.raw.ifi.signals) * 100 : 0), 0) / nf;
         const avgCombinedF = hasCombined ? filtered.reduce((s, r) => s + (r.raw.combined?.signals > 0 ? (r.raw.combined.correct / r.raw.combined.signals) * 100 : 0), 0) / nf : 0;
         lines.push(sep);
-        const aggF = `${pad(`AGGREGATE (${nf} excl)`, wSym)} | ${pad("-", 7)} | ${pad(`avg LTP ${avgLtpF.toFixed(1)}%`, 14)} | ${pad(`avg MII ${avgMiiF.toFixed(1)}%`, 14)} | ${pad(`avg VPT ${avgVptF.toFixed(1)}%`, 14)} | ${pad(`avg VZP ${avgVzpF.toFixed(1)}%`, 14)} | ${pad(`avg DA ${avgDaF.toFixed(1)}%`, 14)} | ${pad(`avg OID ${avgOidF.toFixed(1)}%`, 14)} | ${pad(`avg CAE ${avgCaeF.toFixed(1)}%`, 14)} | ${pad(`avg REX ${avgRexF.toFixed(1)}%`, 14)}`;
+        const aggF = `${pad(`AGGREGATE (${nf} excl)`, wSym)} | ${pad("-", 7)} | ${pad(`avg LTP ${avgLtpF.toFixed(1)}%`, 14)} | ${pad(`avg MII ${avgMiiF.toFixed(1)}%`, 14)} | ${pad(`avg VPT ${avgVptF.toFixed(1)}%`, 14)} | ${pad(`avg VZP ${avgVzpF.toFixed(1)}%`, 14)} | ${pad(`avg DA ${avgDaF.toFixed(1)}%`, 14)} | ${pad(`avg OID ${avgOidF.toFixed(1)}%`, 14)} | ${pad(`avg CAE ${avgCaeF.toFixed(1)}%`, 14)} | ${pad(`avg REX ${avgRexF.toFixed(1)}%`, 14)} | ${pad(`avg IFI ${avgIfiF.toFixed(1)}%`, 14)}`;
         lines.push(hasCombined ? `${aggF} | ${pad(`avg Combined ${avgCombinedF.toFixed(1)}%`, 14)}` : aggF);
       }
     }
   }
 
+  return lines.join("\n");
+}
+
+function formatContinuationTable(rows, dateStr) {
+  const pad = (s, w) => String(s).padEnd(w);
+  const wSym = Math.max(20, ...rows.map((r) => r.symbol.length));
+  const colW = 24;
+  const header = `${pad("Symbol", wSym)} | ${pad("Candles", 7)} | ${pad("LTP (cont)", colW)} | ${pad("MII", colW)} | ${pad("VPT", colW)} | ${pad("VZP", colW)} | ${pad("DA", colW)} | ${pad("OID", colW)} | ${pad("CAE", colW)} | ${pad("REX", colW)} | ${pad("IFI", colW)}`;
+  const sep = "-".repeat(header.length);
+  const fmtBreakdown = (e) => (e?.signals > 0 ? `${e.signals}/${e.accuracy.toFixed(1)} W:${e.worked} O:${e.opposite}${e.flat > 0 ? ` F:${e.flat}` : ""}` : "0/-");
+  const lines = [
+    "",
+    `=== Trend Continuation (in trend + indicator agrees, 3-bar trend) ${dateStr} ===`,
+    "",
+    header,
+    sep,
+    ...rows.map((r) => {
+      const c = r.cont || {};
+      return `${pad(r.symbol, wSym)} | ${pad(r.candles, 7)} | ${pad(fmtBreakdown(c.ltp), colW)} | ${pad(fmtBreakdown(c.mii), colW)} | ${pad(fmtBreakdown(c.vpt), colW)} | ${pad(fmtBreakdown(c.vzp), colW)} | ${pad(fmtBreakdown(c.da), colW)} | ${pad(fmtBreakdown(c.oid), colW)} | ${pad(fmtBreakdown(c.cae), colW)} | ${pad(fmtBreakdown(c.rex), colW)} | ${pad(fmtBreakdown(c.ifi), colW)}`;
+    }),
+  ];
   return lines.join("\n");
 }
 
@@ -712,6 +996,7 @@ async function main() {
   }
 
   console.log(formatTable(results, dateStr));
+  console.log(formatContinuationTable(results, dateStr));
 
   const outPath = process.env.OUTPUT_JSON;
   if (outPath) {

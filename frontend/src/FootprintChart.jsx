@@ -208,7 +208,7 @@ function processCandles(candles, maxLevelsCap) {
   return { bars, priceMin: pMin, priceMax: pMax, priceRange, tickSize };
 }
 
-import { computeLTP, computeMII, computeVPT, computeVZP, computeContextEvents, computeDA, computeOID, computeRangeExpansion, REX_LOOKBACK, REX_MULT, SIGNAL_THRESHOLD, LTP_THRESHOLD, VZP_THRESHOLD, DA_THRESHOLD, OID_THRESHOLD, OID_CONTRARIAN } from "./utils/orderflowIndicators";
+import { computeLTP, computeMII, computeVPT, computeVZP, computeContextEvents, computeDA, computeOID, computeRangeExpansion, computeInitiatorFlow, REX_LOOKBACK, REX_MULT, IFI_THRESHOLD, SIGNAL_THRESHOLD, LTP_THRESHOLD, VZP_THRESHOLD, DA_THRESHOLD, OID_THRESHOLD, OID_CONTRARIAN } from "./utils/orderflowIndicators";
 
 function _median(arr) {
   if (!arr?.length) return 0;
@@ -231,14 +231,15 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   const showDA  = features.showDA ?? false;
   const showOID = features.showOID ?? false;
   const showREX = features.showREX ?? false;
+  const showIFI = features.showIFI ?? false;
   const showContextEvents = features.showContextEvents ?? false;
   const filterByVolume = features.filterByVolume ?? false;
   /* compact layout for narrow/mobile screens */
   const isMobile   = typeof window !== "undefined" && window.innerWidth <= 768;
   const HDR_H_EFF  = isMobile ? 36 : HDR_H;
   const TIME_H_EFF = isMobile ? 18 : TIME_H;
-  const numBotRows = (showOI ? 4 : 3) + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0) + (showDA ? 1 : 0) + (showOID ? 1 : 0) + (showREX ? 1 : 0) + (showContextEvents ? 1 : 0);
-  const extraRows = (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0) + (showDA ? 1 : 0) + (showOID ? 1 : 0) + (showREX ? 1 : 0) + (showContextEvents ? 1 : 0);
+  const numBotRows = (showOI ? 4 : 3) + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0) + (showDA ? 1 : 0) + (showOID ? 1 : 0) + (showREX ? 1 : 0) + (showIFI ? 1 : 0) + (showContextEvents ? 1 : 0);
+  const extraRows = (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0) + (showDA ? 1 : 0) + (showOID ? 1 : 0) + (showREX ? 1 : 0) + (showIFI ? 1 : 0) + (showContextEvents ? 1 : 0);
   const BOT_H_EFF  = showOI
     ? (extraRows > 0 ? (isMobile ? 68 + extraRows * 18 : 90 + extraRows * 22) : (isMobile ? 68 : 90))
     : (extraRows > 0 ? (isMobile ? 52 + extraRows * 18 : BOT_H + extraRows * 22) : (isMobile ? 52 : BOT_H));
@@ -340,6 +341,10 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     () => (showREX ? computeRangeExpansion(candles, REX_LOOKBACK, REX_MULT) : []),
     [showREX, candles]
   );
+  const ifiSeries = useMemo(
+    () => (showIFI ? computeInitiatorFlow(candles) : []),
+    [showIFI, candles]
+  );
 
   const barsRef     = useRef(bars);
   const ltpSeriesRef = useRef(ltpSeries);
@@ -350,6 +355,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   const daSeriesRef = useRef(daSeries);
   const oidSeriesRef = useRef(oidSeries);
   const rexSeriesRef = useRef(rexSeries);
+  const ifiSeriesRef = useRef(ifiSeries);
   const pMinRef     = useRef(priceMin);
   const pMaxRef     = useRef(priceMax);
   const pRanRef     = useRef(priceRange);
@@ -376,6 +382,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     daSeriesRef.current = daSeries;
     oidSeriesRef.current = oidSeries;
     rexSeriesRef.current = rexSeries;
+    ifiSeriesRef.current = ifiSeries;
     vzpSeriesRef.current = vzpSeries;
     contextEventsSeriesRef.current = contextEventsSeries;
   }, [bars, priceMin, priceMax, priceRange, tickSize, ltpSeries, miiSeries, vptSeries, vzpSeries, contextEventsSeries]);
@@ -827,6 +834,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const daArr = showDA ? daSeriesRef.current : [];
     const oidArr = showOID ? oidSeriesRef.current : [];
     const rexArr = showREX ? rexSeriesRef.current : [];
+    const ifiArr = showIFI ? ifiSeriesRef.current : [];
     const ctxEventsArr = showContextEvents ? contextEventsSeriesRef.current : [];
     const arrowSize = 8;
     const arrowOffset = 6;
@@ -843,7 +851,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const deltaThreshold = allBars.length
       ? _median(allBars.map(b => Math.abs(b.delta ?? 0)))
       : 0;
-    if ((showLTP && ltpArr.length) || (showMII && miiArr.length) || (showVPT && vptArr.length) || (showVZP && vzpArr.length) || (showDA && daArr.length) || (showOID && oidArr.length) || (showREX && rexArr.length) || (showContextEvents && ctxEventsArr.length)) {
+    if ((showLTP && ltpArr.length) || (showMII && miiArr.length) || (showVPT && vptArr.length) || (showVZP && vzpArr.length) || (showDA && daArr.length) || (showOID && oidArr.length) || (showREX && rexArr.length) || (showIFI && ifiArr.length) || (showContextEvents && ctxEventsArr.length)) {
       for (let i = 0; i < bs.length; i++) {
         const b = bs[i];
         const vol = (b.buy_vol ?? 0) + (b.sell_vol ?? 0);
@@ -864,9 +872,11 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         const hasOid = showOID && oid != null && (oid > thOid || oid < -thOid);
         const rex = rexArr[i]?.rex;
         const hasRex = showREX && rex != null && rex !== 0;
+        const ifiVal = ifiArr[i]?.ifi ?? ifiArr[i]?.ifiRaw;
+        const hasIFI = showIFI && ifiVal != null && Math.abs(ifiVal) > IFI_THRESHOLD;
         const ctxEv = ctxEventsArr[i]?.event;
         const hasCtxEv = showContextEvents && ctxEv != null;
-        if (!hasLtp && !hasMii && !hasVpt && !hasVzp && !hasDa && !hasOid && !hasRex && !hasCtxEv) continue;
+        if (!hasLtp && !hasMii && !hasVpt && !hasVzp && !hasDa && !hasOid && !hasRex && !hasIFI && !hasCtxEv) continue;
         if (!passFilter && !hasCtxEv) continue;
         const x  = i * slotW - pan;
         const cx = x + nzHalf;
@@ -1077,9 +1087,11 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           drawOidArrow(baseMidX, oid, oidUp);
         } else if (hasRex) {
           drawRexArrow(baseMidX, rex > 0);
+        } else if (hasIFI) {
+          drawRexArrow(baseMidX, ifiVal > 0);
         }
         if (hasCtxEv) {
-          const offset = (hasLtp || hasMii || hasVpt || hasVzp || hasDa || hasOid || hasRex) ? arrowOffset : 0;
+          const offset = (hasLtp || hasMii || hasVpt || hasVzp || hasDa || hasOid || hasRex || hasIFI) ? arrowOffset : 0;
           drawContextEvent(ctx, baseMidX + offset, highY, lowY, ctxEv, arrowSize);
         }
       }
@@ -1090,7 +1102,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     _drawTime();
     _drawBot();
   }, [dpr, getCanvasH, getVisRange, getVisPMin, p2y, getMaxPan, hoverBar, hoverPrice,
-      showVWAP, showVP, showLTP, showMII, showVPT, showVZP, showDA, showOID, showREX, showContextEvents, filterByVolume, isMobile]);
+      showVWAP, showVP, showLTP, showMII, showVPT, showVZP, showDA, showOID, showREX, showIFI, showContextEvents, filterByVolume, isMobile]);
 
   /* ── price scale: TradingView-style levels + hover price at crosshair ── */
   const PS_LABEL_MIN_PX = 40;
@@ -1214,6 +1226,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const daArr = daSeriesRef.current;
     const oidArr = oidSeriesRef.current;
     const rexArr = rexSeriesRef.current;
+    const ifiArr = ifiSeriesRef.current;
     const ctxEventsArr = contextEventsSeriesRef.current;
     ctx.font = `600 9.5px ${MONO}`;
     ctx.textBaseline = "middle";
@@ -1268,34 +1281,41 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       if (showVPT && vptArr[i] != null) {
         const vpt = vptArr[i].vpt;
         ctx.fillStyle = vpt >= 0 ? "#7c3aed" : "#6d28d9";
-        const vptRowIdx = (showVZP || showDA || showOID || showREX || showContextEvents) ? baseIdx + (showLTP ? 1 : 0) + (showMII ? 1 : 0) : numRows - 1;
+        const vptRowIdx = (showVZP || showDA || showOID || showREX || showIFI || showContextEvents) ? baseIdx + (showLTP ? 1 : 0) + (showMII ? 1 : 0) : numRows - 1;
         ctx.fillText(vpt.toFixed(2), midX, rowYs[vptRowIdx]);
       }
       if (showVZP && vzpArr[i] != null) {
         const vzpVal = vzpArr[i];
         const vzp = vzpVal.vzpRaw ?? vzpVal.vzp;
         ctx.fillStyle = vzp >= 0 ? "#d97706" : "#b45309";
-        const vzpRowIdx = (showDA || showOID || showREX || showContextEvents) ? baseIdx + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) : numRows - 1;
+        const vzpRowIdx = (showDA || showOID || showREX || showIFI || showContextEvents) ? baseIdx + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) : numRows - 1;
         ctx.fillText(vzp != null ? vzp.toFixed(2) : "—", midX, rowYs[vzpRowIdx]);
       }
       if (showDA && daArr[i] != null) {
         const da = daArr[i].da;
         ctx.fillStyle = da >= 0 ? "#0d9488" : "#be123c";
-        const daRowIdx = (showOID || showREX || showContextEvents) ? baseIdx + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0) : numRows - 1;
+        const daRowIdx = (showOID || showREX || showIFI || showContextEvents) ? baseIdx + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0) : numRows - 1;
         ctx.fillText(da != null ? da.toFixed(2) : "—", midX, rowYs[daRowIdx]);
       }
       if (showOID && oidArr[i] != null) {
         const oid = oidArr[i].oid;
         const oidBullish = OID_CONTRARIAN ? oid < 0 : oid > 0;
         ctx.fillStyle = oidBullish ? "#0891b2" : "#b91c1c";
-        const oidRowIdx = (showREX || showContextEvents) ? baseIdx + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0) + (showDA ? 1 : 0) : numRows - 1;
+        const oidRowIdx = (showREX || showIFI || showContextEvents) ? baseIdx + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0) + (showDA ? 1 : 0) : numRows - 1;
         ctx.fillText(oid != null ? oid.toFixed(2) : "—", midX, rowYs[oidRowIdx]);
       }
       if (showREX && rexArr[i] != null) {
         const rex = rexArr[i].rex;
         ctx.fillStyle = rex > 0 ? "#059669" : rex < 0 ? "#dc2626" : C.textDim;
-        const rexRowIdx = showContextEvents ? baseIdx + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0) + (showDA ? 1 : 0) + (showOID ? 1 : 0) : numRows - 1;
+        const rexRowIdx = showIFI || showContextEvents ? baseIdx + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0) + (showDA ? 1 : 0) + (showOID ? 1 : 0) : numRows - 1;
         ctx.fillText(rex !== 0 ? (rex > 0 ? "↑" : "↓") : "—", midX, rowYs[rexRowIdx]);
+      }
+      if (showIFI && ifiArr[i] != null) {
+        const ifi = ifiArr[i].ifi ?? ifiArr[i].ifiRaw ?? 0;
+        const hasIfiSig = Math.abs(ifi) > IFI_THRESHOLD;
+        ctx.fillStyle = hasIfiSig ? (ifi > 0 ? "#059669" : "#dc2626") : C.textDim;
+        const ifiRowIdx = showContextEvents ? baseIdx + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0) + (showDA ? 1 : 0) + (showOID ? 1 : 0) + (showREX ? 1 : 0) : numRows - 1;
+        ctx.fillText(hasIfiSig ? (ifi > 0 ? "↑" : "↓") : "—", midX, rowYs[ifiRowIdx]);
       }
       if (showContextEvents && ctxEventsArr[i]?.event != null) {
         const ev = ctxEventsArr[i].event;
@@ -1304,7 +1324,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         ctx.fillText(short, midX, rowYs[numRows - 1]);
       }
     }
-  }, [dpr, hoverBar, showOI, showLTP, showMII, showVPT, showVZP, showDA, showOID, showREX, showContextEvents, numBotRows]);
+  }, [dpr, hoverBar, showOI, showLTP, showMII, showVPT, showVZP, showDA, showOID, showREX, showIFI, showContextEvents, numBotRows]);
 
   const scheduleDraw = useCallback(() => {
     if (rafId.current) cancelAnimationFrame(rafId.current);
@@ -1780,6 +1800,18 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
                     </span>
                   ) : null;
                 })()}
+                {showIFI && (() => {
+                  const barIdx = bars.indexOf(hoverBar);
+                  const ifiVal = barIdx >= 0 ? (ifiSeriesRef.current[barIdx]?.ifi ?? ifiSeriesRef.current[barIdx]?.ifiRaw) : null;
+                  return ifiVal != null && Math.abs(ifiVal) > IFI_THRESHOLD ? (
+                    <span
+                      title="Initiator Flow: bid vs ask zone volume (open/close mid). Bid heavy → expect up. Ask heavy → expect down."
+                      style={{ fontFamily: MONO, fontSize: 9, fontWeight: 700, color: ifiVal > 0 ? "#059669" : "#dc2626" }}
+                    >
+                      IFI {ifiVal > 0 ? "↑" : "↓"}
+                    </span>
+                  ) : null;
+                })()}
                 {showContextEvents && (() => {
                   const barIdx = bars.indexOf(hoverBar);
                   const ev = barIdx >= 0 ? contextEventsSeriesRef.current[barIdx] : null;
@@ -1879,6 +1911,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
               ...(showDA ? [{ label: "DA", color: C.textDim }] : []),
               ...(showOID ? [{ label: "OID", color: C.textDim }] : []),
               ...(showREX ? [{ label: "REX", color: C.textDim }] : []),
+              ...(showIFI ? [{ label: "IFI", color: C.textDim }] : []),
               ...(showContextEvents ? [{ label: "CAE", color: C.textDim }] : []),
             ].map(({ label, color }) => (
               <span key={label} style={{
