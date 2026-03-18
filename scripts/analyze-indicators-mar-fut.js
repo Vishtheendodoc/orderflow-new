@@ -21,6 +21,7 @@ const DA_THRESHOLD = 0.2;    // tuned 2026-03: higher = less noise
 const OID_THRESHOLD = 0.35;  // tuned 2026-03
 const OID_CONTRARIAN = true; // OID divergence (neg) = expect up; confluence (pos) = expect down
 const IFI_THRESHOLD = 0.88; // Initiator Flow: open/close mid zone split, tuned NIFTY MAR FUT ~63%
+const IFID_THRESHOLD = 0.85; // IFI+Depth: footprint + 200-level order book (indices only)
 
 const TIER1 = [
   "NIFTY MAR FUT",
@@ -354,6 +355,68 @@ function computeInitiatorFlow(candles) {
     const tot = bidVol + askVol || eps;
     const vzpRaw = lvs.length > 0 ? (askVol - bidVol) / tot : 0;
     const ifiRaw = -vzpRaw;
+    const ifi = Math.max(-1, Math.min(1, ifiRaw));
+    raw.push({ open_time: c.open_time, chartTime: c.chartTime, ifi, ifiRaw });
+  }
+  return raw;
+}
+
+/** IFI+Depth: footprint + 200-level order book. depthSnapshots: [{ ts, bids:[{p,q}], asks:[{p,q}] }] */
+function computeInitiatorFlowWithDepth(candles, depthSnapshots, wFootprint = 0.7) {
+  if (!candles?.length) return [];
+  const eps = 1e-8;
+  const snaps = depthSnapshots || [];
+  const raw = [];
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const open = c.open ?? c.close ?? 0;
+    const close = c.close ?? c.open ?? 0;
+    const mid = (open + close) / 2;
+    const delta = c.delta ?? (c.buy_vol ?? 0) - (c.sell_vol ?? 0);
+    let askVol = 0, bidVol = 0;
+    const lvs = Object.values(c.levels || {});
+    if (lvs.length > 0) {
+      for (const lv of lvs) {
+        const p = lv.price ?? 0;
+        const vol = (lv.buy_vol ?? 0) + (lv.sell_vol ?? 0) || (lv.total_vol ?? 0);
+        if (vol > 0 && isFinite(p)) {
+          if (p < mid) bidVol += vol;
+          else if (p > mid) askVol += vol;
+        }
+      }
+    }
+    const tot = bidVol + askVol || eps;
+    const vzpRaw = lvs.length > 0 ? (askVol - bidVol) / tot : 0;
+    const ifiFootprint = -vzpRaw;
+
+    const openTimeMs = (c.open_time != null && c.open_time < 1e12) ? c.open_time * 1000 : (c.open_time ?? 0);
+    const candleEndMs = openTimeMs + 60000;
+    const maxDeltaMs = 60000;
+
+    let ifiDepth = 0;
+    let hasDepth = false;
+    if (snaps.length > 0) {
+      let best = null;
+      let bestDist = Infinity;
+      for (const s of snaps) {
+        const ts = s.ts ?? 0;
+        const dist = Math.abs(ts - candleEndMs);
+        if (dist <= maxDeltaMs && dist < bestDist) {
+          bestDist = dist;
+          best = s;
+        }
+      }
+      if (best) {
+        const bidQty = (best.bids || []).reduce((sum, l) => sum + (l.q ?? 0), 0);
+        const askQty = (best.asks || []).reduce((sum, l) => sum + (l.q ?? 0), 0);
+        const totQ = bidQty + askQty || eps;
+        const depthImb = (askQty - bidQty) / totQ;
+        ifiDepth = -depthImb;
+        hasDepth = true;
+      }
+    }
+
+    const ifiRaw = hasDepth ? wFootprint * ifiFootprint + (1 - wFootprint) * ifiDepth : ifiFootprint;
     const ifi = Math.max(-1, Math.min(1, ifiRaw));
     raw.push({ open_time: c.open_time, chartTime: c.chartTime, ifi, ifiRaw });
   }
@@ -735,6 +798,45 @@ function evalIFIContinuation(series, candles, threshold) {
   return { signals, correct: worked, worked, opposite, flat, accuracy };
 }
 
+/** IFI+Depth: same as IFI eval, uses ifi field. */
+function evalIFIDIndicator(series, candles, threshold) {
+  let worked = 0, opposite = 0, flat = 0;
+  for (let i = 0; i < series.length - 1; i++) {
+    const val = series[i].ifi ?? series[i].ifiRaw ?? 0;
+    if (Math.abs(val) <= threshold) continue;
+    const dir = nextBarDirection(candles, i);
+    if (dir === null) continue;
+    const expectedDir = val > 0 ? 1 : -1;
+    if (dir === 0) flat++;
+    else if (dir === expectedDir) worked++;
+    else opposite++;
+  }
+  const signals = worked + opposite;
+  const accuracy = signals > 0 ? (worked / signals) * 100 : 0;
+  return { signals, correct: worked, worked, opposite, flat, accuracy };
+}
+
+/** IFI+Depth trend continuation. */
+function evalIFIDContinuation(series, candles, threshold) {
+  let worked = 0, opposite = 0, flat = 0;
+  for (let i = 0; i < series.length - 1; i++) {
+    const trendDir = trendDirection(candles, i);
+    if (trendDir === 0) continue;
+    const val = series[i].ifi ?? series[i].ifiRaw ?? 0;
+    if (Math.abs(val) <= threshold) continue;
+    const signalDir = val > 0 ? 1 : -1;
+    if (signalDir !== trendDir) continue;
+    const dir = nextBarDirection(candles, i);
+    if (dir === null) continue;
+    if (dir === 0) flat++;
+    else if (dir === trendDir) worked++;
+    else opposite++;
+  }
+  const signals = worked + opposite;
+  const accuracy = signals > 0 ? (worked / signals) * 100 : 0;
+  return { signals, correct: worked, worked, opposite, flat, accuracy };
+}
+
 function evalContextEvents(events, candles) {
   let signals = 0;
   let correct = 0;
@@ -811,7 +913,28 @@ async function fetchState(symbol) {
   }
 }
 
-function analyzeSymbol(symbol, state) {
+async function fetchDepth(symbol) {
+  const url = `${API_BASE.replace(/\/$/, "")}/api/heatmap/${encodeURIComponent(symbol)}?n=500`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data?.snapshots || [];
+  } catch (e) {
+    clearTimeout(timeout);
+    return [];
+  }
+}
+
+function isIndexSymbol(symbol) {
+  const s = String(symbol || "").toUpperCase();
+  return ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"].some((n) => s.includes(n));
+}
+
+function analyzeSymbol(symbol, state, depthSnapshots = null) {
   const candles = state.candles.filter((c) => c.closed !== false);
   if (candles.length < 2) return null;
 
@@ -824,6 +947,7 @@ function analyzeSymbol(symbol, state) {
   const cae = computeContextEvents(candles);
   const rex = computeRangeExpansion(candles, 5, 1.8);
   const ifi = computeInitiatorFlow(candles);
+  const ifid = isIndexSymbol(symbol) && depthSnapshots?.length ? computeInitiatorFlowWithDepth(candles, depthSnapshots, 0.7) : [];
 
   const ltpEval = evalIndicatorBreakdown(ltp, candles, LTP_THRESHOLD);
   const miiEval = evalIndicatorBreakdown(mii, candles, MII_THRESHOLD);
@@ -834,6 +958,7 @@ function analyzeSymbol(symbol, state) {
   const caeEval = evalContextEventsBreakdown(cae, candles);
   const rexEval = evalRexIndicator(rex, candles, 0.5);
   const ifiEval = evalIFIIndicator(ifi, candles, IFI_THRESHOLD);
+  const ifidEval = ifid.length ? evalIFIDIndicator(ifid, candles, IFID_THRESHOLD) : null;
   const combinedEval = COMBINED_MODE ? evalCombined(ltp, mii, vpt, vzp, da, oid, cae, candles) : null;
 
   const ltpCont = evalIndicatorContinuation(ltp, candles, LTP_THRESHOLD);
@@ -845,8 +970,9 @@ function analyzeSymbol(symbol, state) {
   const caeCont = evalContextEventsContinuation(cae, candles);
   const rexCont = evalRexContinuation(rex, candles, 0.5);
   const ifiCont = evalIFIContinuation(ifi, candles, IFI_THRESHOLD);
+  const ifidCont = ifid.length ? evalIFIDContinuation(ifid, candles, IFID_THRESHOLD) : null;
 
-  const fmtBreakdown = (e) => (e.signals > 0 ? `${e.signals}/${e.accuracy.toFixed(1)} W:${e.worked} O:${e.opposite}${e.flat > 0 ? ` F:${e.flat}` : ""}` : "0/-");
+  const fmtBreakdown = (e) => (e?.signals > 0 ? `${e.signals}/${e.accuracy.toFixed(1)} W:${e.worked} O:${e.opposite}${e.flat > 0 ? ` F:${e.flat}` : ""}` : "0/-");
   const fmtSimple = (e) => (e?.signals > 0 ? `${e.signals}/${((e.correct / e.signals) * 100).toFixed(1)}` : "0/-");
 
   return {
@@ -861,6 +987,7 @@ function analyzeSymbol(symbol, state) {
     cae: fmtBreakdown(caeEval),
     rex: fmtBreakdown(rexEval),
     ifi: fmtBreakdown(ifiEval),
+    ifid: ifidEval ? fmtBreakdown(ifidEval) : "-",
     combined: combinedEval ? fmtSimple(combinedEval) : null,
     raw: {
       ltp: ltpEval,
@@ -872,6 +999,7 @@ function analyzeSymbol(symbol, state) {
       cae: caeEval,
       rex: rexEval,
       ifi: ifiEval,
+      ifid: ifidEval,
       combined: combinedEval,
     },
     cont: {
@@ -884,6 +1012,7 @@ function analyzeSymbol(symbol, state) {
       cae: caeCont,
       rex: rexCont,
       ifi: ifiCont,
+      ifid: ifidCont,
     },
   };
 }
@@ -894,7 +1023,7 @@ function formatTable(rows, dateStr) {
   const hasCombined = rows.some((r) => r.combined != null);
   const colW = 24;
   const combinedCol = hasCombined ? ` | ${pad("Combined(2+)", 14)}` : "";
-  const header = `${pad("Symbol", wSym)} | ${pad("Candles", 7)} | ${pad("LTP (sig/acc W/O/F)", colW)} | ${pad("MII", colW)} | ${pad("VPT", colW)} | ${pad("VZP", colW)} | ${pad("DA", colW)} | ${pad("OID", colW)} | ${pad("CAE", colW)} | ${pad("REX", colW)} | ${pad("IFI", colW)}${combinedCol}`;
+  const header = `${pad("Symbol", wSym)} | ${pad("Candles", 7)} | ${pad("LTP (sig/acc W/O/F)", colW)} | ${pad("MII", colW)} | ${pad("VPT", colW)} | ${pad("VZP", colW)} | ${pad("DA", colW)} | ${pad("OID", colW)} | ${pad("CAE", colW)} | ${pad("REX", colW)} | ${pad("IFI", colW)} | ${pad("IFID", colW)}${combinedCol}`;
   const sep = "-".repeat(header.length);
   const lines = [
     `=== Indicator Performance: March Futures (${dateStr}) ===`,
@@ -903,7 +1032,7 @@ function formatTable(rows, dateStr) {
     header,
     sep,
     ...rows.map((r) => {
-      const base = `${pad(r.symbol, wSym)} | ${pad(r.candles, 7)} | ${pad(r.ltp, colW)} | ${pad(r.mii, colW)} | ${pad(r.vpt, colW)} | ${pad(r.vzp, colW)} | ${pad(r.da ?? "-", colW)} | ${pad(r.oid ?? "-", colW)} | ${pad(r.cae, colW)} | ${pad(r.rex ?? "-", colW)} | ${pad(r.ifi ?? "-", colW)}`;
+      const base = `${pad(r.symbol, wSym)} | ${pad(r.candles, 7)} | ${pad(r.ltp, colW)} | ${pad(r.mii, colW)} | ${pad(r.vpt, colW)} | ${pad(r.vzp, colW)} | ${pad(r.da ?? "-", colW)} | ${pad(r.oid ?? "-", colW)} | ${pad(r.cae, colW)} | ${pad(r.rex ?? "-", colW)} | ${pad(r.ifi ?? "-", colW)} | ${pad(r.ifid ?? "-", colW)}`;
       return hasCombined ? `${base} | ${pad(r.combined ?? "-", 14)}` : base;
     }),
   ];
@@ -919,11 +1048,13 @@ function formatTable(rows, dateStr) {
     const avgCae = rows.reduce((s, r) => s + (r.raw.cae.signals > 0 ? (r.raw.cae.correct / r.raw.cae.signals) * 100 : 0), 0) / n;
     const avgRex = rows.reduce((s, r) => s + (r.raw.rex?.signals > 0 ? (r.raw.rex.correct / r.raw.rex.signals) * 100 : 0), 0) / n;
     const avgIfi = rows.reduce((s, r) => s + (r.raw.ifi?.signals > 0 ? (r.raw.ifi.correct / r.raw.ifi.signals) * 100 : 0), 0) / n;
+    const ifidRows = rows.filter((r) => r.raw.ifid?.signals > 0);
+    const avgIfid = ifidRows.length > 0 ? ifidRows.reduce((s, r) => s + (r.raw.ifid.correct / r.raw.ifid.signals) * 100, 0) / ifidRows.length : 0;
     const avgCombined = hasCombined
       ? rows.reduce((s, r) => s + (r.raw.combined?.signals > 0 ? (r.raw.combined.correct / r.raw.combined.signals) * 100 : 0), 0) / n
       : 0;
     lines.push(sep);
-    const aggBase = `${pad(`AGGREGATE (${n} symbols)`, wSym)} | ${pad("-", 7)} | ${pad(`avg LTP ${avgLtp.toFixed(1)}%`, 14)} | ${pad(`avg MII ${avgMii.toFixed(1)}%`, 14)} | ${pad(`avg VPT ${avgVpt.toFixed(1)}%`, 14)} | ${pad(`avg VZP ${avgVzp.toFixed(1)}%`, 14)} | ${pad(`avg DA ${avgDa.toFixed(1)}%`, 14)} | ${pad(`avg OID ${avgOid.toFixed(1)}%`, 14)} | ${pad(`avg CAE ${avgCae.toFixed(1)}%`, 14)} | ${pad(`avg REX ${avgRex.toFixed(1)}%`, 14)} | ${pad(`avg IFI ${avgIfi.toFixed(1)}%`, 14)}`;
+    const aggBase = `${pad(`AGGREGATE (${n} symbols)`, wSym)} | ${pad("-", 7)} | ${pad(`avg LTP ${avgLtp.toFixed(1)}%`, 14)} | ${pad(`avg MII ${avgMii.toFixed(1)}%`, 14)} | ${pad(`avg VPT ${avgVpt.toFixed(1)}%`, 14)} | ${pad(`avg VZP ${avgVzp.toFixed(1)}%`, 14)} | ${pad(`avg DA ${avgDa.toFixed(1)}%`, 14)} | ${pad(`avg OID ${avgOid.toFixed(1)}%`, 14)} | ${pad(`avg CAE ${avgCae.toFixed(1)}%`, 14)} | ${pad(`avg REX ${avgRex.toFixed(1)}%`, 14)} | ${pad(`avg IFI ${avgIfi.toFixed(1)}%`, 14)} | ${pad(`avg IFID ${avgIfid.toFixed(1)}%`, 14)}`;
     lines.push(hasCombined ? `${aggBase} | ${pad(`avg Combined ${avgCombined.toFixed(1)}%`, 14)}` : aggBase);
     if (EXCLUDE_SYMBOLS && EXCLUDE_SYMBOLS.size > 0) {
       const filtered = rows.filter((r) => !EXCLUDE_SYMBOLS.has(r.symbol));
@@ -938,9 +1069,11 @@ function formatTable(rows, dateStr) {
         const avgCaeF = filtered.reduce((s, r) => s + (r.raw.cae.signals > 0 ? (r.raw.cae.correct / r.raw.cae.signals) * 100 : 0), 0) / nf;
         const avgRexF = filtered.reduce((s, r) => s + (r.raw.rex?.signals > 0 ? (r.raw.rex.correct / r.raw.rex.signals) * 100 : 0), 0) / nf;
         const avgIfiF = filtered.reduce((s, r) => s + (r.raw.ifi?.signals > 0 ? (r.raw.ifi.correct / r.raw.ifi.signals) * 100 : 0), 0) / nf;
+        const ifidRowsF = filtered.filter((r) => r.raw.ifid?.signals > 0);
+        const avgIfidF = ifidRowsF.length > 0 ? ifidRowsF.reduce((s, r) => s + (r.raw.ifid.correct / r.raw.ifid.signals) * 100, 0) / ifidRowsF.length : 0;
         const avgCombinedF = hasCombined ? filtered.reduce((s, r) => s + (r.raw.combined?.signals > 0 ? (r.raw.combined.correct / r.raw.combined.signals) * 100 : 0), 0) / nf : 0;
         lines.push(sep);
-        const aggF = `${pad(`AGGREGATE (${nf} excl)`, wSym)} | ${pad("-", 7)} | ${pad(`avg LTP ${avgLtpF.toFixed(1)}%`, 14)} | ${pad(`avg MII ${avgMiiF.toFixed(1)}%`, 14)} | ${pad(`avg VPT ${avgVptF.toFixed(1)}%`, 14)} | ${pad(`avg VZP ${avgVzpF.toFixed(1)}%`, 14)} | ${pad(`avg DA ${avgDaF.toFixed(1)}%`, 14)} | ${pad(`avg OID ${avgOidF.toFixed(1)}%`, 14)} | ${pad(`avg CAE ${avgCaeF.toFixed(1)}%`, 14)} | ${pad(`avg REX ${avgRexF.toFixed(1)}%`, 14)} | ${pad(`avg IFI ${avgIfiF.toFixed(1)}%`, 14)}`;
+        const aggF = `${pad(`AGGREGATE (${nf} excl)`, wSym)} | ${pad("-", 7)} | ${pad(`avg LTP ${avgLtpF.toFixed(1)}%`, 14)} | ${pad(`avg MII ${avgMiiF.toFixed(1)}%`, 14)} | ${pad(`avg VPT ${avgVptF.toFixed(1)}%`, 14)} | ${pad(`avg VZP ${avgVzpF.toFixed(1)}%`, 14)} | ${pad(`avg DA ${avgDaF.toFixed(1)}%`, 14)} | ${pad(`avg OID ${avgOidF.toFixed(1)}%`, 14)} | ${pad(`avg CAE ${avgCaeF.toFixed(1)}%`, 14)} | ${pad(`avg REX ${avgRexF.toFixed(1)}%`, 14)} | ${pad(`avg IFI ${avgIfiF.toFixed(1)}%`, 14)} | ${pad(`avg IFID ${avgIfidF.toFixed(1)}%`, 14)}`;
         lines.push(hasCombined ? `${aggF} | ${pad(`avg Combined ${avgCombinedF.toFixed(1)}%`, 14)}` : aggF);
       }
     }
@@ -953,7 +1086,7 @@ function formatContinuationTable(rows, dateStr) {
   const pad = (s, w) => String(s).padEnd(w);
   const wSym = Math.max(20, ...rows.map((r) => r.symbol.length));
   const colW = 24;
-  const header = `${pad("Symbol", wSym)} | ${pad("Candles", 7)} | ${pad("LTP (cont)", colW)} | ${pad("MII", colW)} | ${pad("VPT", colW)} | ${pad("VZP", colW)} | ${pad("DA", colW)} | ${pad("OID", colW)} | ${pad("CAE", colW)} | ${pad("REX", colW)} | ${pad("IFI", colW)}`;
+  const header = `${pad("Symbol", wSym)} | ${pad("Candles", 7)} | ${pad("LTP (cont)", colW)} | ${pad("MII", colW)} | ${pad("VPT", colW)} | ${pad("VZP", colW)} | ${pad("DA", colW)} | ${pad("OID", colW)} | ${pad("CAE", colW)} | ${pad("REX", colW)} | ${pad("IFI", colW)} | ${pad("IFID", colW)}`;
   const sep = "-".repeat(header.length);
   const fmtBreakdown = (e) => (e?.signals > 0 ? `${e.signals}/${e.accuracy.toFixed(1)} W:${e.worked} O:${e.opposite}${e.flat > 0 ? ` F:${e.flat}` : ""}` : "0/-");
   const lines = [
@@ -964,7 +1097,7 @@ function formatContinuationTable(rows, dateStr) {
     sep,
     ...rows.map((r) => {
       const c = r.cont || {};
-      return `${pad(r.symbol, wSym)} | ${pad(r.candles, 7)} | ${pad(fmtBreakdown(c.ltp), colW)} | ${pad(fmtBreakdown(c.mii), colW)} | ${pad(fmtBreakdown(c.vpt), colW)} | ${pad(fmtBreakdown(c.vzp), colW)} | ${pad(fmtBreakdown(c.da), colW)} | ${pad(fmtBreakdown(c.oid), colW)} | ${pad(fmtBreakdown(c.cae), colW)} | ${pad(fmtBreakdown(c.rex), colW)} | ${pad(fmtBreakdown(c.ifi), colW)}`;
+      return `${pad(r.symbol, wSym)} | ${pad(r.candles, 7)} | ${pad(fmtBreakdown(c.ltp), colW)} | ${pad(fmtBreakdown(c.mii), colW)} | ${pad(fmtBreakdown(c.vpt), colW)} | ${pad(fmtBreakdown(c.vzp), colW)} | ${pad(fmtBreakdown(c.da), colW)} | ${pad(fmtBreakdown(c.oid), colW)} | ${pad(fmtBreakdown(c.cae), colW)} | ${pad(fmtBreakdown(c.rex), colW)} | ${pad(fmtBreakdown(c.ifi), colW)} | ${pad(fmtBreakdown(c.ifid), colW)}`;
     }),
   ];
   return lines.join("\n");
@@ -983,7 +1116,12 @@ async function main() {
         console.error(`  Skip ${symbol}: 404 or empty candles`);
         continue;
       }
-      const row = analyzeSymbol(symbol, state);
+      let depthSnapshots = null;
+      if (isIndexSymbol(symbol)) {
+        depthSnapshots = await fetchDepth(symbol);
+        await sleep(FETCH_DELAY_MS);
+      }
+      const row = analyzeSymbol(symbol, state, depthSnapshots);
       if (row) results.push(row);
     } catch (e) {
       console.error(`  Skip ${symbol}: ${e.message}`);

@@ -528,6 +528,66 @@ function computeIFI_VZPHFT(candles, hftByMin, wVzp = 0.6) {
   return out;
 }
 
+/** IFI+Depth: VZP OpenClose + 200-level order book depth imbalance */
+function computeIFI_VZPOpenCloseDepth(candles, depthSnapshots, wFootprint = 0.7) {
+  const eps = 1e-8;
+  const snaps = depthSnapshots || [];
+  const out = [];
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const open = c.open ?? c.close ?? 0;
+    const close = c.close ?? c.open ?? 0;
+    const mid = (open + close) / 2;
+    const delta = getDelta(c);
+    let askVol = 0, bidVol = 0;
+    const lvs = Object.values(c.levels || {});
+    if (lvs.length > 0) {
+      for (const lv of lvs) {
+        const p = lv.price ?? 0;
+        const vol = (lv.buy_vol ?? 0) + (lv.sell_vol ?? 0) || (lv.total_vol ?? 0);
+        if (vol > 0 && isFinite(p)) {
+          if (p < mid) bidVol += vol;
+          else if (p > mid) askVol += vol;
+        }
+      }
+    }
+    const tot = bidVol + askVol || eps;
+    const vzpRaw = lvs.length > 0 ? (askVol - bidVol) / tot : 0;
+    const ifiFootprint = -vzpRaw;
+
+    const openTimeMs = (c.open_time != null && c.open_time < 1e12) ? c.open_time * 1000 : (c.open_time ?? 0);
+    const candleEndMs = openTimeMs + 60000;
+    const maxDeltaMs = 60000;
+
+    let ifiDepth = 0;
+    let hasDepth = false;
+    if (snaps.length > 0) {
+      let best = null;
+      let bestDist = Infinity;
+      for (const s of snaps) {
+        const ts = s.ts ?? 0;
+        const dist = Math.abs(ts - candleEndMs);
+        if (dist <= maxDeltaMs && dist < bestDist) {
+          bestDist = dist;
+          best = s;
+        }
+      }
+      if (best) {
+        const bidQty = (best.bids || []).reduce((sum, l) => sum + (l.q ?? 0), 0);
+        const askQty = (best.asks || []).reduce((sum, l) => sum + (l.q ?? 0), 0);
+        const totQ = bidQty + askQty || eps;
+        const depthImb = (askQty - bidQty) / totQ;
+        ifiDepth = -depthImb;
+        hasDepth = true;
+      }
+    }
+
+    const ifi = hasDepth ? wFootprint * ifiFootprint + (1 - wFootprint) * ifiDepth : ifiFootprint;
+    out.push({ ifi, raw: ifi });
+  }
+  return out;
+}
+
 /** IFI variant 9: Full composite - Delta + Levels + HFT */
 function computeIFI_Full(candles, hftByMin) {
   const eps = 1e-8;
@@ -609,6 +669,8 @@ async function main() {
   await sleep(FETCH_DELAY_MS);
   const hftSeries = await fetchHft(INDEX);
   await sleep(FETCH_DELAY_MS);
+  const depthSnapshots = await fetchDepth(SYMBOL);
+  await sleep(FETCH_DELAY_MS);
 
   if (!candles?.length || candles.length < 30) {
     console.error("Insufficient candle data.");
@@ -616,9 +678,12 @@ async function main() {
   }
 
   const hftByMin = buildHftByMin(hftSeries);
-  console.error(`Loaded ${candles.length} candles, ${hftSeries.length} HFT snaps.\n`);
+  console.error(`Loaded ${candles.length} candles, ${hftSeries.length} HFT snaps, ${depthSnapshots.length} depth snaps.\n`);
 
   const variants = [
+    { name: "IFI+Depth w=0.6", fn: () => computeIFI_VZPOpenCloseDepth(candles, depthSnapshots, 0.6), lookahead: 1 },
+    { name: "IFI+Depth w=0.7", fn: () => computeIFI_VZPOpenCloseDepth(candles, depthSnapshots, 0.7), lookahead: 1 },
+    { name: "IFI+Depth w=0.8", fn: () => computeIFI_VZPOpenCloseDepth(candles, depthSnapshots, 0.8), lookahead: 1 },
     { name: "IFI VZP OpenClose", fn: () => computeIFI_VZPOpenClose(candles), lookahead: 1, step: 0.01 },
     { name: "IFI VZP OpenClose+HFT 0.7", fn: () => computeIFI_VZPOpenCloseHFT(candles, hftByMin, 0.7), lookahead: 1 },
     { name: "IFI VZP OpenClose+HFT 0.8", fn: () => computeIFI_VZPOpenCloseHFT(candles, hftByMin, 0.8), lookahead: 1 },

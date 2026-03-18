@@ -444,6 +444,80 @@ export function computeInitiatorFlow(candles) {
 
 export const IFI_THRESHOLD = 0.88;
 
+/**
+ * IFI+Depth — combines footprint zone pressure with 200-level order book depth.
+ * depthSnapshots: [{ ts, ltp, bids: [{p,q}], asks: [{p,q}] }]
+ * Aligns by time: snapshot ts closest to candle open_time + 60000.
+ * When no snapshot within ±60s, uses footprint IFI only.
+ */
+export function computeInitiatorFlowWithDepth(candles, depthSnapshots, wFootprint = 0.7) {
+  if (!candles?.length) return [];
+  const eps = 1e-8;
+  const raw = [];
+  const snaps = depthSnapshots || [];
+
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const open = c.open ?? c.close ?? 0;
+    const close = c.close ?? c.open ?? 0;
+    const mid = (open + close) / 2;
+    const delta = c.delta ?? (c.buy_vol ?? 0) - (c.sell_vol ?? 0);
+
+    let askVol = 0;
+    let bidVol = 0;
+    const lvs = Object.values(c.levels || {});
+    if (lvs.length > 0) {
+      for (const lv of lvs) {
+        const p = lv.price ?? 0;
+        const vol = (lv.buy_vol ?? 0) + (lv.sell_vol ?? 0) || (lv.total_vol ?? 0);
+        if (vol > 0 && isFinite(p)) {
+          if (p < mid) bidVol += vol;
+          else if (p > mid) askVol += vol;
+        }
+      }
+    }
+    const tot = bidVol + askVol || eps;
+    const vzpRaw = lvs.length > 0 ? (askVol - bidVol) / tot : 0;
+    const ifiFootprint = -vzpRaw;
+
+    const openTimeMs = (c.open_time != null && c.open_time < 1e12) ? c.open_time * 1000 : (c.open_time ?? 0);
+    const candleEndMs = openTimeMs + 60000;
+    const maxDeltaMs = 60000;
+
+    let ifiDepth = 0;
+    let hasDepth = false;
+    if (snaps.length > 0) {
+      let best = null;
+      let bestDist = Infinity;
+      for (const s of snaps) {
+        const ts = s.ts ?? 0;
+        const dist = Math.abs(ts - candleEndMs);
+        if (dist <= maxDeltaMs && dist < bestDist) {
+          bestDist = dist;
+          best = s;
+        }
+      }
+      if (best) {
+        const bidQty = (best.bids || []).reduce((sum, l) => sum + (l.q ?? 0), 0);
+        const askQty = (best.asks || []).reduce((sum, l) => sum + (l.q ?? 0), 0);
+        const totQ = bidQty + askQty || eps;
+        const depthImb = (askQty - bidQty) / totQ;
+        ifiDepth = -depthImb;
+        hasDepth = true;
+      }
+    }
+
+    const ifiRaw = hasDepth
+      ? wFootprint * ifiFootprint + (1 - wFootprint) * ifiDepth
+      : ifiFootprint;
+    const ifi = Math.max(-1, Math.min(1, ifiRaw));
+    raw.push({ open_time: c.open_time, chartTime: c.chartTime, ifi, ifiRaw, vzpRaw: ifiRaw });
+  }
+  return raw;
+}
+
+export const IFID_THRESHOLD = 0.85;
+
 export function computeContextEvents(candles) {
   if (!candles?.length) return [];
   const eps = 1e-8;

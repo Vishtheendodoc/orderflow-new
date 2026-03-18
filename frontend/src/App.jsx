@@ -629,7 +629,7 @@ export default function App() {
   // Ref copy of activeSymbol so WS callbacks can read it without stale closures
   const activeSymbolRef = useRef(activeSymbol);
   /* ── Feature toggles ── */
-  const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true, showHFT: false, showLTP: false, showMII: false, showVPT: false, showVZP: false, showDA: false, showOID: false, showREX: false, showIFI: false, showContextEvents: false, filterByVolume: false });
+  const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true, showHFT: false, showLTP: false, showMII: false, showVPT: false, showVZP: false, showDA: false, showOID: false, showREX: false, showIFI: false, showIFID: false, showContextEvents: false, filterByVolume: false });
   const [splitView, setSplitView] = useState(false);
   const [activeSymbol2, setActiveSymbol2] = useState(null);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -1084,7 +1084,7 @@ export default function App() {
             const s = (urlSymbol || "").toUpperCase();
             const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n));
             return idx ? (hftSeriesCache[idx] || []) : [];
-          })()} />
+          })()} apiBase={API_URL || window.location.origin} />
         </ErrorBoundary>
       </div>
     );
@@ -1231,6 +1231,7 @@ export default function App() {
                         { key: "showOID",   label: "OI-Delta Confluence (OID)", defaultVal: false },
                         { key: "showREX",   label: "Range Expansion Reversal (REX)", defaultVal: false },
                         { key: "showIFI",   label: "Initiator Flow Index (IFI)", defaultVal: false },
+                        { key: "showIFID",  label: "IFI + Depth", defaultVal: false },
                         { key: "showContextEvents", label: "Context Events (Reversal / Rally)", defaultVal: false },
                         { key: "filterByVolume",    label: "Filter arrows by volume/delta", defaultVal: false },
                       ].map(({ key, label, defaultVal }) => (
@@ -1359,7 +1360,7 @@ export default function App() {
                             const s = (activeSymbol || "").toUpperCase();
                             const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n));
                             return idx ? (hftSeriesCache[idx] || []) : [];
-                          })()} />
+                          })()} apiBase={API_URL || window.location.origin} />
                         </ErrorBoundary>
                       ) : viewMode === "heatmap" ? (
                         <div className="heatmap-view-wrap">
@@ -1407,7 +1408,7 @@ export default function App() {
                             const s = (activeSymbol2 || "").toUpperCase();
                             const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n));
                             return idx ? (hftSeriesCache[idx] || []) : [];
-                          })()} />
+                          })()} apiBase={API_URL || window.location.origin} />
                         </ErrorBoundary>
                       ) : viewMode === "heatmap" ? (
                         <div className="heatmap-view-wrap">
@@ -1460,7 +1461,7 @@ export default function App() {
                       const s = (activeSymbol || "").toUpperCase();
                       const idx = ["BANKNIFTY","FINNIFTY","MIDCPNIFTY","NIFTY"].find(n => s.includes(n));
                       return idx ? (hftSeriesCache[idx] || []) : [];
-                    })()} />
+                    })()} apiBase={API_URL || window.location.origin} />
                   </ErrorBoundary>
                 ) : viewMode === "heatmap" ? (
                   <div className="heatmap-view-wrap">
