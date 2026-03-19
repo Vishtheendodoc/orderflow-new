@@ -557,29 +557,36 @@ def _do_daily_reset():
 
     # Only wipe disk when crossing midnight — NOT on cold start (restart/redeploy)
     # On cold start we keep disk so load_all_snapshots can restore
+    # Preserve index/index-future footprint data (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY)
+    INDEX_SYMBOLS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
+
+    def _is_index_file(fname: str) -> bool:
+        upper = fname.upper()
+        return any(idx in upper for idx in INDEX_SYMBOLS)
+
     if is_midnight_crossing:
         if os.path.isdir(DEPTH_DIR):
             for fname in os.listdir(DEPTH_DIR):
-                if fname.endswith(".depth.jsonl"):
+                if fname.endswith(".depth.jsonl") and not _is_index_file(fname):
                     try:
                         os.remove(os.path.join(DEPTH_DIR, fname))
                     except Exception:
                         pass
         if os.path.isdir(HFT_DIR):
             for fname in os.listdir(HFT_DIR):
-                if fname.endswith(".hft.jsonl"):
+                if fname.endswith(".hft.jsonl") and not _is_index_file(fname):
                     try:
                         os.remove(os.path.join(HFT_DIR, fname))
                     except Exception:
                         pass
         if os.path.isdir(SNAPSHOT_DIR):
             for fname in os.listdir(SNAPSHOT_DIR):
-                if fname.endswith(".json") or fname.endswith(".jsonl"):
+                if (fname.endswith(".json") or fname.endswith(".jsonl")) and not _is_index_file(fname):
                     try:
                         os.remove(os.path.join(SNAPSHOT_DIR, fname))
                     except Exception:
                         pass
-        logger.info(f"Daily reset at IST midnight. Date: {today}. Engines + disk cleared.")
+        logger.info(f"Daily reset at IST midnight. Date: {today}. Engines + disk cleared (index data preserved).")
     else:
         logger.info(f"Cold start. Date: {today}. Engines cleared; disk preserved for restore.")
     gc.collect()
