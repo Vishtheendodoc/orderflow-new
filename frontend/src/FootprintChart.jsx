@@ -45,6 +45,9 @@ const GAP         = 2;
 const NZW  = 80; // default numbers-zone width – shadowed per-device inside component
 const PS_W     = 60;   // price scale width
 const LABEL_W  = 52;   // bottom strip label column width (chart must start here to align)
+/** Narrower chrome on mobile → more drawable footprint width (desktop unchanged). */
+const PS_W_MOBILE    = 48;
+const LABEL_W_MOBILE = 42;
 const HDR_H    = 48;
 const TIME_H   = 24;
 const BOT_H    = 68;
@@ -66,6 +69,13 @@ const fmtV = v => {
   const n = Math.abs(+v);
   if (n >= 1e6) return (+v / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
   if (n >= 1e3) return (+v / 1e3).toFixed(1).replace(/\.0$/, "") + "K";
+  return String(Math.round(+v));
+};
+/** Shorter labels when number lanes are very tight (integer K/M only). */
+const fmtVCompact = v => {
+  const n = Math.abs(+v);
+  if (n >= 1e6) return Math.round(+v / 1e6) + "M";
+  if (n >= 1e3) return Math.round(+v / 1e3) + "K";
   return String(Math.round(+v));
 };
 const fmt2  = v => (+v).toFixed(2);
@@ -325,9 +335,11 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     ? (extraRows > 0 ? (isMobile ? 68 + extraRows * 18 : 90 + extraRows * 22) : (isMobile ? 68 : 90))
     : (extraRows > 0 ? (isMobile ? 52 + extraRows * 18 : BOT_H + extraRows * 22) : (isMobile ? 52 : BOT_H));
   // eslint-disable-next-line no-shadow
-  const NZW  = isMobile ? 40 : 80;  // numbers-zone width per candle slot (20px/40px per side)
+  const NZW  = isMobile ? 50 : 80;  // numbers-zone width per candle slot (mobile ~25px/side)
   // eslint-disable-next-line no-shadow
   const RPAD = isMobile ? 12 : 30;  // padding after last candle
+  const psW    = isMobile ? PS_W_MOBILE : PS_W;
+  const labelW = isMobile ? LABEL_W_MOBILE : LABEL_W;
 
   const rootRef      = useRef(null);
   const containerRef = useRef(null);
@@ -513,7 +525,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     if (!bs.length) return { lo: 0, hi: 1 };
     const cw    = candleWRef.current;
     const slotW = cw + NZW + GAP;
-    const W     = (containerRef.current?.clientWidth || 800) - PS_W - LABEL_W;
+    const W     = (containerRef.current?.clientWidth || 800) - psW - labelW;
     const pan   = panRef.current;
     let lo = Infinity, hi = -Infinity;
     for (let i = 0; i < bs.length; i++) {
@@ -527,7 +539,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const ts  = tickRef.current || 0.5;
     const pad = Math.max(ts * 3, (hi - lo) * 0.06);
     return { lo: lo - pad, hi: hi + pad };
-  }, []);
+  }, [labelW, psW]);
 
   /** Visible price range = auto-scale base × priceScaleFactor */
   const getVisRange = useCallback(() => {
@@ -554,9 +566,9 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const cw       = candleWRef.current;
     const slotW    = cw + NZW + GAP;
     const chartW   = barsRef.current.length * slotW - GAP + RPAD;
-    const wrapW    = (containerRef.current?.clientWidth || 800) - PS_W - LABEL_W;
+    const wrapW    = (containerRef.current?.clientWidth || 800) - psW - labelW;
     return Math.max(0, chartW - wrapW);
-  }, []);
+  }, [labelW, psW]);
 
   const getCanvasH = useCallback(() => {
     const tot = containerRef.current?.clientHeight || 600;
@@ -577,7 +589,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     }
 
     const ctx = cv.getContext("2d");
-    const W   = ct.clientWidth - PS_W - LABEL_W;
+    const W   = ct.clientWidth - psW - labelW;
     const H   = getCanvasH();
     const bs     = barsRef.current;
     const cw     = candleWRef.current;
@@ -738,18 +750,35 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         const ly = p2y(lv.price, H);
         if (ly < -2 || ly > H + 2) continue;
 
-        const sellTxt = fmtV(lv.sell_vol || 0);
-        const buyTxt  = fmtV(lv.buy_vol  || 0);
+        let sellTxt = isMobile ? fmtVCompact(lv.sell_vol || 0) : fmtV(lv.sell_vol || 0);
+        let buyTxt  = isMobile ? fmtVCompact(lv.buy_vol  || 0) : fmtV(lv.buy_vol  || 0);
 
         // auto-scale font to fit within nzHalf
         let fontSize = FONT_SZ;
         ctx.font = `600 ${fontSize}px ${MONO}`;
         const maxW = nzHalf - numPad;
-        const sw = ctx.measureText(sellTxt).width;
-        const bw = ctx.measureText(buyTxt).width;
+        let sw = ctx.measureText(sellTxt).width;
+        let bw = ctx.measureText(buyTxt).width;
         if (Math.max(sw, bw) > maxW && fontSize > 7) {
           fontSize = Math.max(7, Math.floor(maxW / Math.max(sw, bw) * fontSize));
           ctx.font = `600 ${fontSize}px ${MONO}`;
+          sw = ctx.measureText(sellTxt).width;
+          bw = ctx.measureText(buyTxt).width;
+        }
+        /* Still too wide at min font → compact K/M (desktop) or shorter strings again (mobile) */
+        if (Math.max(sw, bw) > maxW) {
+          sellTxt = fmtVCompact(lv.sell_vol || 0);
+          buyTxt = fmtVCompact(lv.buy_vol || 0);
+          fontSize = FONT_SZ;
+          ctx.font = `600 ${fontSize}px ${MONO}`;
+          sw = ctx.measureText(sellTxt).width;
+          bw = ctx.measureText(buyTxt).width;
+          while (Math.max(sw, bw) > maxW && fontSize > 7) {
+            fontSize = Math.max(7, Math.floor(maxW / Math.max(sw, bw) * fontSize));
+            ctx.font = `600 ${fontSize}px ${MONO}`;
+            sw = ctx.measureText(sellTxt).width;
+            bw = ctx.measureText(buyTxt).width;
+          }
         }
 
         const isImb  = lv.highBuy || lv.highSell;
@@ -874,11 +903,15 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           if (cumVA >= vaTarget) break;
         }
 
-        const VP_W  = Math.min(isMobile ? 36 : 68, W * 0.12);
+        const VP_W = isMobile
+          ? Math.min(24, W * 0.06)
+          : Math.min(68, W * 0.12);
+        const VP_INSET = isMobile ? 6 : 0;
+        const vpRight = W - VP_INSET;
         const barH  = Math.max(1, pxPerTick - 0.5);
 
         ctx.save();
-        /* histogram bars — right-aligned, semi-transparent overlay (whole visible range) */
+        /* histogram bars — inset from canvas right on mobile so buy-column text isn’t covered */
         for (const [p, vol] of profile) {
           const y = p2y(p, H);
           if (y < -2 || y > H + 2) continue;
@@ -886,7 +919,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           ctx.fillStyle = (p === vpoc) ? "rgba(255,193,7,0.88)"
             : vaSet.has(p)             ? "rgba(100,149,237,0.50)"
                                        : "rgba(100,149,237,0.16)";
-          ctx.fillRect(W - barW, y - barH / 2, barW, Math.max(1, barH));
+          ctx.fillRect(vpRight - barW, y - barH / 2, barW, Math.max(1, barH));
         }
 
         /* VAH / VAL: per IST session; prior sessions extend to chart right edge (visible under today) */
@@ -1226,7 +1259,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     _drawTime();
     _drawBot();
   }, [dpr, getCanvasH, getVisRange, getVisPMin, p2y, getMaxPan, hoverBar, hoverPrice,
-      showVWAP, showVP, showLTP, showMII, showVPT, showVZP, showDA, showOID, showREX, showIFI, showIFID, showContextEvents, filterByVolume, isMobile]);
+      showVWAP, showVP, showLTP, showMII, showVPT, showVZP, showDA, showOID, showREX, showIFI, showIFID, showContextEvents, filterByVolume, isMobile, labelW, psW]);
 
   /* ── price scale: TradingView-style levels + hover price at crosshair ── */
   const PS_LABEL_MIN_PX = 40;
@@ -1296,7 +1329,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     if (!bs.length) return;
     const slotW  = cw + NZW + GAP;
     const nzH    = Math.floor(NZW / 2);
-    const W = (containerRef.current?.clientWidth || 800) - PS_W - LABEL_W;
+    const W = (containerRef.current?.clientWidth || 800) - psW - labelW;
     const minGap = 60;
     const step = Math.max(1, Math.ceil(minGap / slotW));
     for (let k = 0; k < bs.length; k += step) {
@@ -1323,13 +1356,13 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         pointer-events:none;opacity:0.92;`;
       el.appendChild(rule);
     }
-  }, []);
+  }, [labelW, psW, NZW]);
 
   /* ── bottom strip: same width as chart (W), aligned with candles ── */
   const _drawBot = useCallback(() => {
     const cv = botCanvasRef.current, ct = containerRef.current;
     if (!cv || !ct) return;
-    const W   = ct.clientWidth - PS_W - LABEL_W;
+    const W   = ct.clientWidth - psW - labelW;
     const H   = BOT_H_EFF;
     const bs  = barsRef.current;
     const cw  = candleWRef.current;
@@ -1485,7 +1518,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         ctx.fillText(short, midX, rowYs[numRows - 1]);
       }
     }
-  }, [dpr, hoverBar, showOI, showLTP, showMII, showVPT, showVZP, showDA, showOID, showREX, showIFI, showIFID, showContextEvents, numBotRows]);
+  }, [dpr, hoverBar, showOI, showLTP, showMII, showVPT, showVZP, showDA, showOID, showREX, showIFI, showIFID, showContextEvents, numBotRows, labelW, psW, NZW, BOT_H_EFF]);
 
   const scheduleDraw = useCallback(() => {
     if (rafId.current) cancelAnimationFrame(rafId.current);
@@ -1497,7 +1530,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const bs = barsRef.current;
     if (!bs.length || !containerRef.current) return;
     userZoomedW.current = false; // allow auto-fit again
-    const wrapW = (containerRef.current.clientWidth || 800) - PS_W - LABEL_W;
+    const wrapW = (containerRef.current.clientWidth || 800) - psW - labelW;
     const slotBase = NZW + GAP;
     const w = (wrapW + GAP - RPAD) / bs.length - slotBase;
     candleWRef.current = Math.round(Math.max(W_MIN, Math.min(W_MAX, w)));
@@ -1505,7 +1538,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     priceOffRef.current   = 0;
     followLatest.current  = true;
     scheduleDraw();
-  }, [scheduleDraw]);
+  }, [scheduleDraw, labelW, psW, NZW, RPAD]);
 
   /* reset user zoom flag when chart instrument/timeframe changes (new chart → re-fit) */
   useEffect(() => { userZoomedW.current = false; }, [symbol, timeFrameMinutes]);
@@ -1514,13 +1547,13 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   useEffect(() => {
     if (!bars.length || !containerRef.current) return;
     if (!userZoomedW.current) {
-      const wrapW = (containerRef.current.clientWidth || 800) - PS_W - LABEL_W;
+      const wrapW = (containerRef.current.clientWidth || 800) - psW - labelW;
       const slotBase = NZW + GAP;
       const w = (wrapW + GAP - RPAD) / bars.length - slotBase;
       candleWRef.current = Math.round(Math.max(W_MIN, Math.min(W_MAX, w)));
     }
     scheduleDraw();
-  }, [bars, scheduleDraw]);
+  }, [bars, scheduleDraw, labelW, psW, NZW, RPAD]);
 
   useEffect(() => {
     const el = containerRef.current; if (!el) return;
@@ -2002,7 +2035,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       <div ref={containerRef} style={{ display: "flex", flex: 1, flexDirection: "column", overflow: "hidden", minHeight: 0 }}>
 
         {/* canvas + price scale (marginLeft so chart aligns with bottom strip values) */}
-        <div style={{ display: "flex", flex: 1, overflow: "hidden", minHeight: 0, marginLeft: LABEL_W }}>
+        <div style={{ display: "flex", flex: 1, overflow: "hidden", minHeight: 0, marginLeft: labelW }}>
           <div style={{ flex: 1, overflow: "hidden", position: "relative", cursor: "crosshair",
                         touchAction: "none" /* prevent browser scroll/zoom intercepting chart gestures */ }}>
             <canvas ref={canvasRef} style={{ display: "block", touchAction: "none" }} />
@@ -2010,7 +2043,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
           {/* price scale */}
           <div ref={psRef} style={{
-            width: PS_W, flexShrink: 0,
+            width: psW, flexShrink: 0,
             background: "#f4f5f8",
             borderLeft: `1.5px solid ${C.border}`,
             position: "relative", overflow: "hidden",
@@ -2043,7 +2076,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           height: TIME_H_EFF, background: "#f4f5f8",
           borderTop: `1.5px solid ${C.border}`,
           position: "relative", overflow: "hidden",
-          flexShrink: 0, marginLeft: LABEL_W, marginRight: PS_W,
+          flexShrink: 0, marginLeft: labelW, marginRight: psW,
           touchAction: "none",
           cursor: "ew-resize",
         }} />
@@ -2059,7 +2092,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         }}>
           {/* static left labels */}
           <div style={{
-            width: 52, flexShrink: 0,
+            width: labelW, flexShrink: 0,
             display: "flex", flexDirection: "column",
             justifyContent: "space-around",
             padding: "4px 5px",
