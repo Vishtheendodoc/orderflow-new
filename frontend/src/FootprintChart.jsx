@@ -55,8 +55,11 @@ const ROW_MIN  = 16;   // minimum px per row when computing level cap (fewer row
 const ROW_PREF = 18;   // preferred
 const ROW_MAX  = 28;
 const RPAD = 30;  // space after last candle (shadowed inside component for mobile)
-const MAX_LEVELS_DISPLAY = 26;  // max rows; capped by floor(chartH/ROW_MIN) for auto-adjust
-const MAX_LEVELS_FALLBACK = 16; // when chart height unknown, keep view readable
+/** Upper bound aligned with backend MAX_LEVELS_PER_CANDLE (display merge target). */
+const MAX_FOOTPRINT_DATA_LEVELS = 150;
+const MIN_FOOTPRINT_DISPLAY_ROWS = 8;
+/** Min vertical gap between footprint number rows (font + padding) in px. */
+const FOOTPRINT_ROW_PAD_PX = 6;
 /* ─── helpers ─── */
 /* Only >= 1000 use K; 100–999 show as full number */
 const fmtV = v => {
@@ -158,13 +161,10 @@ function istDayIndexRanges(bars) {
 const snapTick = (v, tick) => Math.round(v / tick) * tick;
 
 /* ─── processCandles ───
- * maxLevelsCap: optional; max rows per candle (for high-priced / higher TF). Uses floor(chartH/ROW_MIN) when passed.
+ * Full native levels per bar (no row cap). Viewport bucketing happens at draw time.
  */
-function processCandles(candles, maxLevelsCap) {
+function processCandles(candles) {
   if (!candles?.length) return { bars: [], priceMin: 0, priceMax: 1, priceRange: 1, tickSize: 0.5 };
-  const cap = maxLevelsCap != null && maxLevelsCap > 0
-    ? Math.max(12, Math.min(MAX_LEVELS_DISPLAY, maxLevelsCap))
-    : MAX_LEVELS_FALLBACK;
 
   // detect tick size
   let tickSize = 0.5;
@@ -209,40 +209,6 @@ function processCandles(candles, maxLevelsCap) {
   });
 
   const priceRange = pMax - pMin;
-  const maxLevels = Math.max(0, ...bars.map(b => b.levels.length));
-
-  if (maxLevels > cap && priceRange > 0) {
-    const bucketStep = Math.max(tickSize, priceRange / cap);
-    bars.forEach(bar => {
-      const lvs = bar.levels;
-      if (lvs.length <= cap) return;
-      const buckets = new Map();
-      lvs.forEach(lv => {
-        const p = lv.price;
-        const bi = Math.min(cap - 1, Math.floor((p - pMin) / bucketStep));
-        if (!buckets.has(bi)) buckets.set(bi, { priceSum: 0, priceCount: 0, buy_vol: 0, sell_vol: 0 });
-        const b = buckets.get(bi);
-        b.buy_vol += lv.buy_vol ?? 0;
-        b.sell_vol += lv.sell_vol ?? 0;
-        b.priceSum += p;
-        b.priceCount += 1;
-      });
-      const merged = Array.from(buckets.entries())
-        .sort((a, b) => (b[1].priceSum / b[1].priceCount) - (a[1].priceSum / a[1].priceCount))
-        .map(([, b]) => ({ price: b.priceCount ? b.priceSum / b.priceCount : 0, buy_vol: b.buy_vol, sell_vol: b.sell_vol }));
-      const tBuy = merged.reduce((s, l) => s + (l.buy_vol || 0), 0);
-      const tSell = merged.reduce((s, l) => s + (l.sell_vol || 0), 0);
-      const avgB = merged.length ? tBuy / merged.length : 0;
-      const avgS = merged.length ? tSell / merged.length : 0;
-      const maxV = merged.reduce((m, l) => Math.max(m, (l.buy_vol || 0) + (l.sell_vol || 0)), 1);
-      bar.levels = merged.map(lv => ({
-        ...lv,
-        highBuy:  avgB > 0 && (lv.buy_vol || 0) >= avgB * 2 && (lv.buy_vol || 0) > (lv.sell_vol || 0),
-        highSell: avgS > 0 && (lv.sell_vol || 0) >= avgS * 2 && (lv.sell_vol || 0) > (lv.buy_vol || 0),
-        volRatio: ((lv.buy_vol || 0) + (lv.sell_vol || 0)) / maxV,
-      }));
-    });
-  }
 
   bars.forEach(b => {
     const tBuy  = b.levels.reduce((s, l) => s + (l.buy_vol || 0), 0);
@@ -254,6 +220,72 @@ function processCandles(candles, maxLevelsCap) {
   });
 
   return { bars, priceMin: pMin, priceMax: pMax, priceRange, tickSize };
+}
+
+/** Recompute imbalance / volRatio after merging footprint levels. */
+function reapplyLevelStats(levels) {
+  if (!levels?.length) return [];
+  const tBuy  = levels.reduce((s, l) => s + (l.buy_vol  || 0), 0);
+  const tSell = levels.reduce((s, l) => s + (l.sell_vol || 0), 0);
+  const avgB  = levels.length ? tBuy  / levels.length : 0;
+  const avgS  = levels.length ? tSell / levels.length : 0;
+  const maxV  = levels.reduce((m, l) => Math.max(m, (l.buy_vol || 0) + (l.sell_vol || 0)), 1);
+  return levels.map(lv => ({
+    ...lv,
+    highBuy:  avgB > 0 && (lv.buy_vol  || 0) >= avgB * 2 && (lv.buy_vol  || 0) > (lv.sell_vol || 0),
+    highSell: avgS > 0 && (lv.sell_vol || 0) >= avgS * 2 && (lv.sell_vol || 0) > (lv.buy_vol || 0),
+    volRatio: ((lv.buy_vol || 0) + (lv.sell_vol || 0)) / maxV,
+  }));
+}
+
+/**
+ * Merge levels for the current viewport so vertical spacing in px stays >= minRowPx,
+ * and row count stays <= targetCap (resize + vertical zoom via vr).
+ */
+function bucketLevelsForViewport(rawLevels, ts, vr, H, fontSz) {
+  if (!rawLevels?.length || ts <= 0 || vr <= 0 || H <= 0) {
+    return reapplyLevelStats(rawLevels || []);
+  }
+  const minRowPx = Math.max(12, fontSz + FOOTPRINT_ROW_PAD_PX);
+  const targetCap = Math.max(
+    MIN_FOOTPRINT_DISPLAY_ROWS,
+    Math.min(MAX_FOOTPRINT_DATA_LEVELS, Math.floor(H / minRowPx)),
+  );
+  const minPriceStep = (minRowPx * vr) / H;
+  const sorted = [...rawLevels]
+    .filter(l => l.price != null && isFinite(l.price))
+    .sort((a, b) => b.price - a.price);
+  if (!sorted.length) return [];
+  const lo = Math.min(...sorted.map(l => l.price));
+  const hi = Math.max(...sorted.map(l => l.price));
+  const span = Math.max(hi - lo, ts);
+  let bucketStep = Math.max(ts, minPriceStep, span / targetCap);
+  let merged;
+  for (let guard = 0; guard < 14; guard++) {
+    const buckets = new Map();
+    for (const lv of sorted) {
+      const rp = snapTick(lv.price, bucketStep);
+      const key = rp.toFixed(6);
+      if (!buckets.has(key)) {
+        buckets.set(key, { buy_vol: 0, sell_vol: 0, n: 0, sumP: 0 });
+      }
+      const b = buckets.get(key);
+      b.buy_vol += lv.buy_vol ?? 0;
+      b.sell_vol += lv.sell_vol ?? 0;
+      b.n += 1;
+      b.sumP += lv.price;
+    }
+    merged = Array.from(buckets.values())
+      .map((bk) => ({
+        price: bk.n ? bk.sumP / bk.n : snapTick(lo, bucketStep),
+        buy_vol: bk.buy_vol,
+        sell_vol: bk.sell_vol,
+      }))
+      .sort((a, b) => b.price - a.price);
+    if (merged.length <= targetCap) break;
+    bucketStep *= 1.2;
+  }
+  return reapplyLevelStats(merged);
 }
 
 import { computeLTP, computeMII, computeVPT, computeVZP, computeContextEvents, computeDA, computeOID, computeRangeExpansion, computeInitiatorFlow, computeInitiatorFlowWithDepth, REX_LOOKBACK, REX_MULT, IFI_THRESHOLD, IFID_THRESHOLD, SIGNAL_THRESHOLD, LTP_THRESHOLD, VZP_THRESHOLD, DA_THRESHOLD, OID_THRESHOLD, OID_CONTRARIAN } from "./utils/orderflowIndicators";
@@ -339,17 +371,12 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   const [isFS,      setIsFS    ] = useState(false);
   const [showLines, setShowLines] = useState(false);
   const [isFollowingLatest, setIsFollowingLatest] = useState(true);
-  const [chartAreaHeight, setChartAreaHeight] = useState(0);
   const showLinesRef = useRef(false);
   useEffect(() => { showLinesRef.current = showLines; }, [showLines]);
   useEffect(() => { followLatest.current = isFollowingLatest; }, [isFollowingLatest]);
 
-  const maxLevelsCap = chartAreaHeight > 0
-    ? Math.max(12, Math.min(MAX_LEVELS_DISPLAY, Math.floor(chartAreaHeight / ROW_MIN)))
-    : MAX_LEVELS_FALLBACK;
-
   const { bars, priceMin, priceMax, priceRange, tickSize } =
-    useMemo(() => processCandles(candles, maxLevelsCap), [candles, maxLevelsCap]);
+    useMemo(() => processCandles(candles), [candles]);
 
   const ltpSeries = useMemo(
     () => (showLTP ? computeLTP(candles, hftSeries, symbol) : []),
@@ -579,36 +606,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       ? Math.max(8,  Math.min(12, Math.floor(LEVEL_H * 0.62)))
       : Math.max(10, Math.min(14, Math.floor(LEVEL_H * 0.72)));
 
-    /**
-     * Dynamic aggregation: when zoomed out (pxPerTick < ROW_MIN), bucket price levels
-     * into coarser ticks so numbers don't overlap and volumes aggregate to price.
-     */
-    const getDisplayLevels = (levels) => {
-      if (pxPerTick >= ROW_MIN || ts <= 0 || !levels.length) return levels;
-      const factor  = Math.ceil(ROW_MIN / pxPerTick);
-      const coarseT = ts * factor;
-      const buckets = new Map();
-      for (const lv of levels) {
-        const rounded = snapTick(lv.price, coarseT);
-        const key = rounded.toFixed(6);
-        if (!buckets.has(key)) buckets.set(key, { price: rounded, buy_vol: 0, sell_vol: 0 });
-        const bk = buckets.get(key);
-        bk.buy_vol  += lv.buy_vol  || 0;
-        bk.sell_vol += lv.sell_vol || 0;
-      }
-      const merged = Array.from(buckets.values()).sort((a, b) => b.price - a.price);
-      const tBuy  = merged.reduce((s, l) => s + l.buy_vol,  0);
-      const tSell = merged.reduce((s, l) => s + l.sell_vol, 0);
-      const avgB  = merged.length ? tBuy  / merged.length : 0;
-      const avgS  = merged.length ? tSell / merged.length : 0;
-      const maxV  = merged.reduce((m, l) => Math.max(m, l.buy_vol + l.sell_vol), 1);
-      return merged.map(lv => ({
-        ...lv,
-        highBuy:  avgB > 0 && lv.buy_vol  >= avgB * 2 && lv.buy_vol  > lv.sell_vol,
-        highSell: avgS > 0 && lv.sell_vol >= avgS * 2 && lv.sell_vol > lv.buy_vol,
-        volRatio: (lv.buy_vol + lv.sell_vol) / maxV,
-      }));
-    };
+    /** Footprint LOD: bucket raw levels to canvas + zoom (vr) so labels don't overlap. */
+    const getDisplayLevels = (levels) => bucketLevelsForViewport(levels, ts, vr, H, FONT_SZ);
 
     /* imbalance lines collection (for Lines toggle only) */
     const buyLinePrices  = new Set();
@@ -1514,12 +1513,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
   useEffect(() => {
     const el = containerRef.current; if (!el) return;
-    const updateHeight = () => {
-      const tot = el.clientHeight || 0;
-      const h = Math.max(100, tot - TIME_H_EFF - BOT_H_EFF);
-      setChartAreaHeight((prev) => (prev !== h ? h : prev));
-      scheduleDraw();
-    };
+    const updateHeight = () => { scheduleDraw(); };
     updateHeight();
     const ro = new ResizeObserver(updateHeight);
     ro.observe(el);
