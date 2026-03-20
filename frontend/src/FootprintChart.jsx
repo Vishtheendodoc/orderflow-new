@@ -317,7 +317,7 @@ function bucketLevelsForViewport(rawLevels, ts, vr, H, fontSz) {
 }
 
 import { computeLTP, computeMII, computeVPT, computeVZP, computeContextEvents, computeDA, computeOID, computeRangeExpansion, computeInitiatorFlow, computeInitiatorFlowWithDepth, REX_LOOKBACK, REX_MULT, IFI_THRESHOLD, IFID_THRESHOLD, SIGNAL_THRESHOLD, LTP_THRESHOLD, VZP_THRESHOLD, DA_THRESHOLD, OID_THRESHOLD, OID_CONTRARIAN } from "./utils/orderflowIndicators";
-import { computeLatestDayIndicatorStats } from "./utils/indicatorDayStats";
+import { computeLatestDayIndicatorStats, getLatestISTDayBounds } from "./utils/indicatorDayStats";
 
 function _median(arr) {
   if (!arr?.length) return 0;
@@ -585,8 +585,19 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   useEffect(() => {
     if (!bars.length) return;
     const last = bars[bars.length - 1];
-    const prev = bars.length > 1 ? bars[bars.length - 2] : null;
-    setHdrData({ last, chg: prev ? ((last.close - prev.close) / prev.close) * 100 : 0 });
+    const bounds = getLatestISTDayBounds(bars);
+    let prevDayClose = null;
+    if (bounds && bounds.start > 0) {
+      const pb = bars[bounds.start - 1];
+      const pc = pb.close ?? pb.open;
+      if (pc != null && isFinite(pc)) prevDayClose = pc;
+    }
+    const lc = last.close ?? last.open ?? 0;
+    const chg =
+      prevDayClose != null && prevDayClose !== 0 && isFinite(lc)
+        ? ((lc - prevDayClose) / prevDayClose) * 100
+        : 0;
+    setHdrData({ last, chg });
   }, [bars]);
 
   /* ── price helpers ── */
@@ -2138,7 +2149,10 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           <span style={{ fontFamily: MONO, fontSize: 9, color: C.textDim, whiteSpace: "nowrap" }}>{timeFrameMinutes}m</span>
           <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.buy, display: "inline-block", flexShrink: 0, animation: "fp-pulse 1.6s ease-in-out infinite" }} />
           <span style={{ fontFamily: MONO, fontSize: isMobile ? 10 : 11, fontWeight: 700, color: C.textDark, whiteSpace: "nowrap" }}>{fmt2(last.close ?? 0)}</span>
-          <span style={{ fontFamily: MONO, fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 4, color: "#fff", background: chg >= 0 ? C.buy : C.sell, flexShrink: 0 }}>
+          <span
+            title="Change vs previous IST session close"
+            style={{ fontFamily: MONO, fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 4, color: "#fff", background: chg >= 0 ? C.buy : C.sell, flexShrink: 0 }}
+          >
             {chg >= 0 ? "+" : ""}{chg.toFixed(2)}%
           </span>
 
