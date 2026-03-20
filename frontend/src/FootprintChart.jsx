@@ -317,6 +317,7 @@ function bucketLevelsForViewport(rawLevels, ts, vr, H, fontSz) {
 }
 
 import { computeLTP, computeMII, computeVPT, computeVZP, computeContextEvents, computeDA, computeOID, computeRangeExpansion, computeInitiatorFlow, computeInitiatorFlowWithDepth, REX_LOOKBACK, REX_MULT, IFI_THRESHOLD, IFID_THRESHOLD, SIGNAL_THRESHOLD, LTP_THRESHOLD, VZP_THRESHOLD, DA_THRESHOLD, OID_THRESHOLD, OID_CONTRARIAN } from "./utils/orderflowIndicators";
+import { computeLatestDayIndicatorStats } from "./utils/indicatorDayStats";
 
 function _median(arr) {
   if (!arr?.length) return 0;
@@ -359,6 +360,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   const psW    = isMobile ? PS_W_MOBILE : PS_W;
   const labelW = isMobile ? LABEL_W_MOBILE : LABEL_W;
   const [overviewMode, setOverviewMode] = useState(false);
+  const [showIndDayStats, setShowIndDayStats] = useState(false);
   const overviewModeRef = useRef(false);
   useEffect(() => { overviewModeRef.current = overviewMode; }, [overviewMode]);
 
@@ -507,6 +509,35 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     () => (showIFID && candles?.length ? computeInitiatorFlowWithDepth(candles, depthSnapshots, 0.7) : []),
     [showIFID, candles, depthSnapshots]
   );
+
+  /* Latest IST session in memory: threshold crossings + next-bar hit rate (render-time). */
+  const indicatorDayStats = useMemo(() => {
+    if (!bars.length) return null;
+    const pack = {};
+    if (showLTP && ltpSeries.length === bars.length) pack.ltpArr = ltpSeries;
+    if (showMII && miiSeries.length === bars.length) pack.miiArr = miiSeries;
+    if (showVPT && vptSeries.length === bars.length) pack.vptArr = vptSeries;
+    if (showVZP && vzpSeries.length === bars.length) pack.vzpArr = vzpSeries;
+    if (showDA && daSeries.length === bars.length) pack.daArr = daSeries;
+    if (showOID && oidSeries.length === bars.length) pack.oidArr = oidSeries;
+    if (showREX && rexSeries.length === bars.length) pack.rexArr = rexSeries;
+    if (showIFI && ifiSeries.length === bars.length) pack.ifiArr = ifiSeries;
+    if (showIFID && ifidSeries.length === bars.length) pack.ifidArr = ifidSeries;
+    if (showContextEvents && contextEventsSeries.length === bars.length) pack.ctxArr = contextEventsSeries;
+    return computeLatestDayIndicatorStats(bars, pack);
+  }, [
+    bars,
+    showLTP, ltpSeries,
+    showMII, miiSeries,
+    showVPT, vptSeries,
+    showVZP, vzpSeries,
+    showDA, daSeries,
+    showOID, oidSeries,
+    showREX, rexSeries,
+    showIFI, ifiSeries,
+    showIFID, ifidSeries,
+    showContextEvents, contextEventsSeries,
+  ]);
 
   const barsRef     = useRef(bars);
   const ltpSeriesRef = useRef(ltpSeries);
@@ -2140,6 +2171,19 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
               color: overviewMode ? C.buy : C.textMid,
             }}
           >{isMobile ? "⊟" : "Day"}</button>
+          <button
+            type="button"
+            onClick={() => setShowIndDayStats((v) => !v)}
+            title="Indicator stats for latest IST session in loaded data (counts + next-bar hit %)"
+            style={{
+              ...btnStyle,
+              padding: isMobile ? "3px 7px" : "2px 8px",
+              minWidth: isMobile ? 36 : undefined,
+              background: showIndDayStats ? "rgba(15,23,42,0.08)" : "none",
+              borderColor: showIndDayStats ? C.axisText : C.border,
+              color: showIndDayStats ? C.axisText : C.textMid,
+            }}
+          >{isMobile ? "Σ" : "Stats"}</button>
           <button onClick={toggleFS} title="Fullscreen"
             style={{ ...btnStyle, fontSize: isMobile ? 15 : 13, padding: isMobile ? "2px 7px" : "2px 7px", minWidth: isMobile ? 36 : undefined }}
           >{isFS ? "⊠" : "⛶"}</button>
@@ -2149,6 +2193,55 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
             style={{ ...btnStyle, fontSize: isMobile ? 14 : 12, padding: isMobile ? "2px 7px" : "2px 7px", minWidth: isMobile ? 36 : undefined }}
           >⧉</button>
         </div>
+
+        {showIndDayStats && indicatorDayStats && (
+          <div style={{
+            padding: isMobile ? "6px 8px" : "8px 14px 10px",
+            fontSize: isMobile ? 9 : 10,
+            color: C.axisText,
+            background: C.botStripBg,
+            borderTop: `1px solid ${C.botRowLine}`,
+            maxHeight: isMobile ? 180 : 240,
+            overflow: "auto",
+            flexShrink: 0,
+          }}>
+            <div style={{ fontWeight: 800, marginBottom: 6, fontFamily: SANS }}>
+              Indicators — latest IST session {indicatorDayStats.dateKey} ({indicatorDayStats.barsInDay} bars)
+            </div>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: MONO, fontSize: isMobile ? 9 : 10 }}>
+              <thead>
+                <tr style={{ textAlign: "left", color: C.axisMuted, borderBottom: `1px solid ${C.botRowLine}` }}>
+                  <th style={{ padding: "2px 8px 4px 0" }}>ID</th>
+                  <th style={{ padding: "2px 8px" }}>Signals</th>
+                  <th style={{ padding: "2px 8px" }}>Scored</th>
+                  <th style={{ padding: "2px 0 2px 8px" }}>Hit%</th>
+                </tr>
+              </thead>
+              <tbody>
+                {indicatorDayStats.indicators.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} style={{ padding: 8, color: C.axisMuted, fontFamily: SANS }}>
+                      Enable indicators in Features and/or no threshold crossings on this session.
+                    </td>
+                  </tr>
+                ) : indicatorDayStats.indicators.map((r) => (
+                  <tr key={r.label} style={{ borderBottom: `1px solid ${C.border}` }}>
+                    <td style={{ padding: "5px 8px 5px 0", fontWeight: 700 }}>{r.label}</td>
+                    <td style={{ padding: "5px 8px" }}>{r.fires}</td>
+                    <td style={{ padding: "5px 8px" }}>{r.scored}</td>
+                    <td style={{ padding: "5px 0 5px 8px", fontWeight: r.hitRate != null && r.hitRate >= 55 ? 700 : 400 }}>
+                      {r.hitRate != null ? `${r.hitRate}%` : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div style={{ marginTop: 8, color: C.axisMuted, fontSize: isMobile ? 8 : 9, lineHeight: 1.4, fontFamily: SANS }}>
+              Hit% = same-day next bar only: win if close moved in the direction implied by the signal.
+              Uses only data already on the chart (not a full backtest). Tune thresholds in orderflowIndicators.js.
+            </div>
+          </div>
+        )}
 
         {/* Row 2: hover info (desktop only — touch devices don't hover) */}
         {!isMobile && (hoverBar || hoverPrice != null) && (
