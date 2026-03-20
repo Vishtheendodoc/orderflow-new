@@ -624,6 +624,20 @@ def _ist_midnight_ms() -> int:
     return int(midnight.timestamp() * 1000)
 
 
+def _ist_midnight_ms_days_ago(days: int) -> int:
+    """Start of calendar day in IST, `days` days before today (0 = today midnight)."""
+    now = datetime.now(IST)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    midnight -= timedelta(days=days)
+    return int(midnight.timestamp() * 1000)
+
+
+def _is_index_fut_symbol(symbol: str) -> bool:
+    """Index / index futures — disk preserved at midnight; include multi-day history in state."""
+    u = (symbol or "").upper()
+    return any(k in u for k in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"))
+
+
 # Retry queue for candle writes that failed due to disk being unavailable.
 # Flushed by _disk_retry_task every 30s when disk becomes available.
 _failed_disk_writes: list[tuple[str, dict]] = []
@@ -715,24 +729,26 @@ async def build_full_state(symbol: str, engine) -> dict:
     Deduplicates by open_time so history+live merge never produces double candles.
     """
     today_start = _ist_midnight_ms()
+    # Index futures: include yesterday + today (disk preserved at midnight)
+    hist_start = _ist_midnight_ms_days_ago(1) if _is_index_fut_symbol(symbol) else today_start
     by_time: dict[int, dict] = {}
 
     # 1. Seed with all today's lite candles (guaranteed complete, no early-session gaps)
     for c in engine.day_candles:
         ot = c.get("open_time", 0)
-        if ot >= today_start:
+        if ot >= hist_start:
             by_time[ot] = c
 
     # 2. Override with disk candles (include levels for footprint chart)
     for c in load_history_from_disk(symbol, limit=MAX_CANDLES_PER_SYMBOL):
-        if c.get("open_time", 0) >= today_start and c.get("closed", True):
+        if c.get("open_time", 0) >= hist_start and c.get("closed", True):
             by_time[c["open_time"]] = c  # disk version has levels — prefer over lite
 
     # 3. Override with most-recent in-RAM candles (full levels, most accurate)
     for c in engine.candles:
         ct = c.to_dict()
         ot = ct.get("open_time", 0)
-        if ot >= today_start:
+        if ot >= hist_start:
             by_time[ot] = ct
 
     # 4. Dhan intraday fallback when we have insufficient candles (e.g. after refresh, market open)
@@ -775,7 +791,7 @@ async def build_full_state(symbol: str, engine) -> dict:
                         ts = timestamps[i]
                         unix_sec = ts / 1000 if ts >= 1e12 else ts
                         open_time = int((unix_sec + IST_OFFSET_SEC) * 1000)
-                        if open_time >= today_start and open_time not in by_time:
+                        if open_time >= hist_start and open_time not in by_time:
                             by_time[open_time] = {
                                 "open_time": open_time,
                                 "open": float(opens[i]) if i < len(opens) else 0,
@@ -870,15 +886,14 @@ def load_all_snapshots():
         if symbol not in engines:
             continue
         try:
+            hist_start = _ist_midnight_ms_days_ago(1) if _is_index_fut_symbol(symbol) else today_start
             all_today = [
                 c for c in load_history_from_disk(symbol)
-                if c.get("closed", True) and c.get("open_time", 0) >= today_start
+                if c.get("closed", True) and c.get("open_time", 0) >= hist_start
             ]
 
-            # Compact JSONL to today-only candles on startup.
-            # Prevents multi-day accumulation (Render restarts during the day don't trigger
-            # midnight reset, so old days pile up and cause load_history_from_disk to skip
-            # early-today candles when the file grows large).
+            # Compact JSONL on startup: index futures keep yesterday+today (disk preserved);
+            # others keep today-only to limit file growth.
             jsonl_path = os.path.join(SNAPSHOT_DIR, f"{symbol}.jsonl")
             if os.path.exists(jsonl_path) and all_today:
                 tmp_path = jsonl_path + ".compact.tmp"
@@ -2534,7 +2549,8 @@ async def get_hft_scanner(symbol: str, conviction: str = ""):
 
 @app.get("/api/index_candles/{index}")
 async def get_index_candles(index: str):
-    """Return today's 1m index candles (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY) from Dhan intraday.
+    """Return 1m index candles (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY) from Dhan intraday.
+    Spans previous session + today so charts show yesterday after midnight / on Monday.
     Used by HFT chart for price display — index spot, not futures.
     Response: { candles: [{open_time, open, high, low, close, ...}] }
     """
@@ -2546,8 +2562,9 @@ async def get_index_candles(index: str):
     if not security_id:
         return JSONResponse({"error": f"No security ID for {idx}"}, status_code=400)
 
-    today = _ist_date_str()
-    from_date = f"{today} 09:15:00"
+    today = datetime.now(IST).date()
+    y = today - timedelta(days=1)
+    from_date = f"{y} 09:15:00"
     to_date = f"{today} 15:30:00"
 
     data = await fetch_intraday_ohlcv(

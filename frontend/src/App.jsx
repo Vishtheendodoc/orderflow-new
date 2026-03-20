@@ -769,10 +769,12 @@ export default function App() {
             const next = { ...prev };
             for (const [sym, d] of entries) {
               const existing = next[sym];
-              // Merge: if we already have more candles than the lite batch (which sends only 1-2),
-              // keep history intact and update only the matching candles.
-              // No historyLoadedRef check needed — candle count comparison is sufficient.
-              if (existing?.candles?.length > (d.candles?.length ?? 0)) {
+              // Merge when full history was loaded OR we have more candles than the lite batch.
+              // Without historyLoadedRef, equal lengths (e.g. 2 vs 2) replaced state and dropped history — live ticks appeared only after refresh.
+              const shouldMerge =
+                (historyLoadedRef.current.has(sym) && (existing?.candles?.length ?? 0) > 0) ||
+                (existing?.candles?.length > (d.candles?.length ?? 0));
+              if (shouldMerge) {
                 const newByTime = {};
                 (d.candles || []).forEach((c) => { newByTime[c.open_time] = c; });
                 const merged = (existing.candles || []).map((c) => newByTime[c.open_time] ? { ...c, ...newByTime[c.open_time] } : c);
