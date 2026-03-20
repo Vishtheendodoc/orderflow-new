@@ -66,6 +66,9 @@ const MAX_FOOTPRINT_DATA_LEVELS = 150;
 const MIN_FOOTPRINT_DISPLAY_ROWS = 8;
 /** Min vertical gap between footprint number rows (font + padding) in px. */
 const FOOTPRINT_ROW_PAD_PX = 6;
+/** Fast pan buttons: step size as fraction of chart width (min FAST_PAN_MIN_PX). */
+const FAST_PAN_FRAC     = 0.55;
+const FAST_PAN_MIN_PX   = 120;
 /* ─── helpers ─── */
 /* Only >= 1000 use K; 100–999 show as full number */
 const fmtV = v => {
@@ -1582,6 +1585,19 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     }
   }, [fitChart, NZW]);
 
+  /** direction +1 = older bars (increase pan), -1 = newer bars (decrease pan). */
+  const panChartFast = useCallback((direction) => {
+    const ct = containerRef.current;
+    if (!ct) return;
+    followLatest.current = false;
+    setIsFollowingLatest(false);
+    const wrapW = ct.clientWidth - psW - labelW;
+    const step  = Math.max(FAST_PAN_MIN_PX, Math.round(wrapW * FAST_PAN_FRAC));
+    const maxP  = getMaxPan();
+    panRef.current = Math.max(0, Math.min(maxP, panRef.current + direction * step));
+    scheduleDraw();
+  }, [getMaxPan, scheduleDraw, psW, labelW]);
+
   /* reset user zoom + day overview when chart instrument/timeframe changes */
   useEffect(() => {
     userZoomedW.current = false;
@@ -2138,6 +2154,51 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         <div style={{ display: "flex", flex: 1, overflow: "hidden", minHeight: 0, marginLeft: labelW }}>
           <div style={{ flex: 1, overflow: "hidden", position: "relative", cursor: "crosshair",
                         touchAction: "none" /* prevent browser scroll/zoom intercepting chart gestures */ }}>
+            {/* Left-edge fast pan (older / newer); pointer-events only on buttons */}
+            <div
+              style={{
+                position: "absolute", left: 0, top: 0, bottom: 0, width: isMobile ? 42 : 38,
+                display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "flex-start",
+                zIndex: 6, pointerEvents: "none",
+              }}
+            >
+              <div
+                style={{
+                  pointerEvents: "auto",
+                  display: "flex", flexDirection: "column",
+                  gap: isMobile ? 10 : 8,
+                  padding: `${isMobile ? 10 : 8}px ${isMobile ? 6 : 5}px 10px 4px`,
+                  borderRadius: "0 10px 10px 0",
+                  background: "linear-gradient(to right, rgba(255,255,255,0.94) 0%, rgba(255,255,255,0.72) 55%, rgba(255,255,255,0) 100%)",
+                  boxShadow: "1px 0 8px rgba(0,0,0,0.04)",
+                }}
+              >
+                <button
+                  type="button"
+                  title="Older bars (fast pan)"
+                  onClick={() => panChartFast(1)}
+                  style={{
+                    ...btnStyle,
+                    fontSize: isMobile ? 14 : 12,
+                    padding: isMobile ? "6px 8px" : "4px 8px",
+                    minWidth: isMobile ? 40 : 36,
+                    lineHeight: 1,
+                  }}
+                >◀</button>
+                <button
+                  type="button"
+                  title="Newer bars (fast pan)"
+                  onClick={() => panChartFast(-1)}
+                  style={{
+                    ...btnStyle,
+                    fontSize: isMobile ? 14 : 12,
+                    padding: isMobile ? "6px 8px" : "4px 8px",
+                    minWidth: isMobile ? 40 : 36,
+                    lineHeight: 1,
+                  }}
+                >▶</button>
+              </div>
+            </div>
             <canvas ref={canvasRef} style={{ display: "block", touchAction: "none" }} />
           </div>
 
