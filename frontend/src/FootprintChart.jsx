@@ -889,44 +889,55 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           ctx.fillRect(W - barW, y - barH / 2, barW, Math.max(1, barH));
         }
 
-        /* VAH / VAL: one pair per IST session, drawn only across that day’s candles */
+        /* VAH / VAL: per IST session; prior sessions extend to chart right edge (visible under today) */
         const dayRanges = istDayIndexRanges(bs);
+        const lastDi = dayRanges.length - 1;
         for (let di = 0; di < dayRanges.length; di++) {
           const [a, b] = dayRanges[di];
           const slice = bs.slice(a, b + 1);
           const va = computeProfileValueArea(slice);
           if (!va || va.vah == null || va.val == null) continue;
 
+          const isPriorSession = di < lastDi;
           let x0 = a * slotW - pan;
           let x1 = b * slotW - pan + slotW - GAP;
-          x0 = Math.max(0, Math.min(W, x0));
-          x1 = Math.max(0, Math.min(W, x1));
+          if (isPriorSession) {
+            /* Carry prior VAH/VAL horizontally through current session */
+            x0 = Math.max(0, Math.min(W, x0));
+            x1 = W;
+          } else {
+            x0 = Math.max(0, Math.min(W, x0));
+            x1 = Math.max(0, Math.min(W, x1));
+          }
           if (x1 - x0 < 2) continue;
 
           const vahY = Math.round(p2y(va.vah, H)) + 0.5;
           const valY = Math.round(p2y(va.val, H)) + 0.5;
 
-          ctx.strokeStyle = "rgba(100,149,237,0.82)";
-          ctx.lineWidth = 1;
+          const lineAlpha = isPriorSession ? "0.78" : "0.92";
+          ctx.strokeStyle = `rgba(65,105,180,${lineAlpha})`;
+          ctx.lineWidth = 2.25;
           ctx.setLineDash([5, 3]);
           ctx.beginPath(); ctx.moveTo(x0, vahY); ctx.lineTo(x1, vahY); ctx.stroke();
           ctx.setLineDash([4, 4]);
           ctx.beginPath(); ctx.moveTo(x0, valY); ctx.lineTo(x1, valY); ctx.stroke();
           ctx.setLineDash([]);
+          ctx.lineWidth = 1;
 
-          const lx = x0 + 4;
-          const segW = x1 - x0;
+          const segStart = a * slotW - pan;
+          const lx = Math.max(0, Math.min(W - 40, segStart + 4));
+          const segW = (b * slotW - pan + slotW - GAP) - segStart;
           const dayTag = toISTDate(bs[a].open_time);
-          ctx.font = `700 7px ${MONO}`;
+          ctx.font = `800 8px ${MONO}`;
           ctx.textBaseline = "middle";
           ctx.textAlign = "left";
           if (segW > 44 && vahY >= 10 && vahY <= H - 10) {
-            ctx.fillStyle = "rgba(100,149,237,0.95)";
-            ctx.fillText(di === dayRanges.length - 1 ? "VAH" : `VAH ${dayTag}`, lx, vahY - 8);
+            ctx.fillStyle = isPriorSession ? "rgba(65,105,180,0.92)" : "rgba(40,80,150,0.98)";
+            ctx.fillText(di === lastDi ? "VAH" : `VAH ${dayTag}`, lx, vahY - 8);
           }
           if (segW > 44 && valY >= 10 && valY <= H - 10) {
-            ctx.fillStyle = "rgba(100,149,237,0.95)";
-            ctx.fillText(di === dayRanges.length - 1 ? "VAL" : `VAL ${dayTag}`, lx, valY + 8);
+            ctx.fillStyle = isPriorSession ? "rgba(65,105,180,0.92)" : "rgba(40,80,150,0.98)";
+            ctx.fillText(di === lastDi ? "VAL" : `VAL ${dayTag}`, lx, valY + 8);
           }
         }
 
