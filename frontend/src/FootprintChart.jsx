@@ -35,8 +35,17 @@ const C = {
   textDark: "#1a2035",
   textMid:  "#6870a0",
   textDim:  "#a8b0c8",
+  /** Price axis + time axis + bottom strip (readability) */
+  axisText:    "#1e293b",
+  axisMuted:   "#475569",
+  axisTick:    "#64748b",
+  botStripBg:  "#f1f5f9",
+  botRowLine:  "#cbd5e1",
+  botVol:      "#475569",
+  botArrowUp:  "#047857",
+  botArrowDn:  "#b91c1c",
   curBg:    "rgba(155,125,255,0.07)",
-  daySep:   "rgba(90, 96, 130, 0.72)",  // IST session boundary (between calendar days)
+  daySep:   "rgba(71, 85, 105, 0.75)",  // IST session boundary (between calendar days)
 };
 
 const MONO = "'JetBrains Mono','Fira Mono','Consolas',monospace";
@@ -69,6 +78,9 @@ const FOOTPRINT_ROW_PAD_PX = 6;
 /** Fast pan buttons: step size as fraction of chart width (min FAST_PAN_MIN_PX). */
 const FAST_PAN_FRAC     = 0.55;
 const FAST_PAN_MIN_PX   = 120;
+const FP_FASTPAN_LS_KEY = "orderflow_fp_fastpan";
+const FP_FASTPAN_NX0    = 0.02;
+const FP_FASTPAN_NY0    = 0.72;
 /* ─── helpers ─── */
 /* Only >= 1000 use K; 100–999 show as full number */
 const fmtV = v => {
@@ -398,6 +410,27 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   const showLinesRef = useRef(false);
   useEffect(() => { showLinesRef.current = showLines; }, [showLines]);
   useEffect(() => { followLatest.current = isFollowingLatest; }, [isFollowingLatest]);
+
+  /* Fast-pan cluster position (normalized 0–1 inside plot minus cluster size); persisted. */
+  const [fastPanNorm, setFastPanNorm] = useState(() => {
+    if (typeof window === "undefined") return { nx: FP_FASTPAN_NX0, ny: FP_FASTPAN_NY0 };
+    try {
+      const raw = localStorage.getItem(FP_FASTPAN_LS_KEY);
+      if (raw) {
+        const j = JSON.parse(raw);
+        if (typeof j.nx === "number" && typeof j.ny === "number")
+          return {
+            nx: Math.min(1, Math.max(0, j.nx)),
+            ny: Math.min(1, Math.max(0, j.ny)),
+          };
+      }
+    } catch { /* ignore */ }
+    return { nx: FP_FASTPAN_NX0, ny: FP_FASTPAN_NY0 };
+  });
+  const [plotWH, setPlotWH] = useState({ w: 0, h: 0 });
+  const chartPlotRef = useRef(null);
+  const fastPanClusterRef = useRef(null);
+  const fastPanDragRef = useRef(null);
 
   const { bars, priceMin, priceMax, priceRange, tickSize } =
     useMemo(() => processCandles(candles), [candles]);
@@ -1309,10 +1342,10 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       el.className = "fp-tick";
       el.style.cssText = `
         position:absolute;right:0;top:${py}px;transform:translateY(-50%);
-        width:100%;display:flex;align-items:center;padding:0 4px;pointer-events:none;`;
+        width:100%;display:flex;align-items:center;padding:0 5px;pointer-events:none;`;
       el.innerHTML = `
-        <div style="width:4px;height:1px;background:#c8cdd8;margin-right:3px;flex-shrink:0"></div>
-        <span style="font-family:${MONO};font-size:9px;color:#6870a0;white-space:nowrap;letter-spacing:-.01em">${fmtP(p)}</span>`;
+        <div style="width:5px;height:2px;background:${C.axisTick};margin-right:4px;flex-shrink:0;border-radius:1px"></div>
+        <span style="font-family:${MONO};font-size:10px;font-weight:600;color:${C.axisText};white-space:nowrap;letter-spacing:-.015em">${fmtP(p)}</span>`;
       psEl.appendChild(el);
     }
 
@@ -1327,8 +1360,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           width:100%;display:flex;align-items:center;padding:0 4px;pointer-events:none;
           z-index:10;`;
         el.innerHTML = `
-          <div style="width:6px;height:1px;background:rgba(100,120,180,0.9);margin-right:2px;flex-shrink:0"></div>
-          <span style="font-family:${MONO};font-size:10px;font-weight:700;color:#4a5568;white-space:nowrap;background:rgba(255,255,255,0.95);padding:1px 4px;border-radius:2px;box-shadow:0 0 0 1px rgba(100,120,180,0.4)">${fmtP(crosshairPrice)}</span>`;
+          <div style="width:7px;height:2px;background:${C.axisText};margin-right:3px;flex-shrink:0;border-radius:1px"></div>
+          <span style="font-family:${MONO};font-size:11px;font-weight:700;color:${C.axisText};white-space:nowrap;background:#fff;padding:2px 5px;border-radius:3px;box-shadow:0 0 0 1.5px ${C.axisTick},0 1px 4px rgba(15,23,42,0.12)">${fmtP(crosshairPrice)}</span>`;
         psEl.appendChild(el);
       }
     }
@@ -1364,7 +1397,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       lbl.style.cssText = `
         position:absolute;left:${left}px;top:0;bottom:0;
         display:flex;align-items:center;transform:translateX(-50%);pointer-events:none;
-        font-family:${MONO};font-size:9px;color:${C.textDim};white-space:nowrap;`;
+        font-family:${MONO};font-size:10px;font-weight:600;color:${C.axisText};white-space:nowrap;
+        text-shadow:0 0 0 #fff,0 1px 2px rgba(255,255,255,0.9);`;
       lbl.textContent = showDate ? `${toISTDate(bs[i].open_time)} ${toIST(bs[i].open_time, false)}` : toIST(bs[i].open_time, false);
       el.appendChild(lbl);
     }
@@ -1375,8 +1409,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       const rule = document.createElement("div");
       rule.style.cssText = `
         position:absolute;left:${xSep}px;top:0;bottom:0;width:0;
-        border-left:1px dashed ${C.daySep};transform:translateX(-50%);
-        pointer-events:none;opacity:0.92;`;
+        border-left:1.5px dashed ${C.daySep};transform:translateX(-50%);
+        pointer-events:none;opacity:1;`;
       el.appendChild(rule);
     }
   }, [labelW, psW, nzwLayout]);
@@ -1398,13 +1432,13 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const ctx = cv.getContext("2d");
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = "#fff";
+    ctx.fillStyle = C.botStripBg;
     ctx.fillRect(0, 0, W, H);
 
     const numRows = numBotRows;
     const ROW_H   = Math.floor(H / numRows);
     /* row dividers */
-    ctx.strokeStyle = C.border; ctx.lineWidth = 0.5;
+    ctx.strokeStyle = C.botRowLine; ctx.lineWidth = 1;
     for (let r = 1; r < numRows; r++) {
       ctx.beginPath(); ctx.moveTo(0, ROW_H * r); ctx.lineTo(W, ROW_H * r); ctx.stroke();
     }
@@ -1420,7 +1454,9 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const ifiArr = ifiSeriesRef.current;
     const ifidArr = ifidSeriesRef.current;
     const ctxEventsArr = contextEventsSeriesRef.current;
-    ctx.font = `600 9.5px ${MONO}`;
+    const botFontPx = isMobile ? 9.5 : 10.5;
+    const botArrowH = isMobile ? 12 : 13;
+    ctx.font = `700 ${botFontPx}px ${MONO}`;
     ctx.textBaseline = "middle";
 
     const slotW  = cw + nzwLayout + GAP;
@@ -1428,7 +1464,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
     ctx.save();
     ctx.strokeStyle = C.daySep;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = 1.25;
     ctx.setLineDash([3, 4]);
     for (let i = 1; i < bs.length; i++) {
       if (!isFirstBarOfDayIST(bs, i)) continue;
@@ -1471,7 +1507,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       ctx.fillText(fmtV(delta), midX, rowYs[0]);
       ctx.fillStyle = cvd >= 0 ? C.buy : C.sell;
       ctx.fillText(fmtV(cvd),   midX, rowYs[1]);
-      ctx.fillStyle = C.textMid;
+      ctx.fillStyle = C.botVol;
       ctx.fillText(fmtV(vol),   midX, rowYs[2]);
       if (showOI) {
         ctx.fillStyle = oiChange >= 0 ? C.buy : C.sell;
@@ -1516,32 +1552,62 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       }
       if (showREX && rexArr[i] != null) {
         const rex = rexArr[i].rex;
-        ctx.fillStyle = rex > 0 ? "#059669" : rex < 0 ? "#dc2626" : C.textDim;
         const rexRowIdx = showIFI || showIFID || showContextEvents ? baseIdx + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0) + (showDA ? 1 : 0) + (showOID ? 1 : 0) : numRows - 1;
-        ctx.fillText(rex !== 0 ? (rex > 0 ? "↑" : "↓") : "—", midX, rowYs[rexRowIdx]);
+        const prevF = ctx.font;
+        ctx.font = `900 ${botArrowH}px ${MONO}`;
+        if (rex === 0) {
+          ctx.font = prevF;
+          ctx.fillStyle = C.axisMuted;
+          ctx.fillText("—", midX, rowYs[rexRowIdx]);
+        } else {
+          ctx.fillStyle = rex > 0 ? C.botArrowUp : C.botArrowDn;
+          ctx.fillText(rex > 0 ? "\u25B2" : "\u25BC", midX, rowYs[rexRowIdx]);
+          ctx.font = prevF;
+        }
       }
       if (showIFI && ifiArr[i] != null) {
         const ifi = ifiArr[i].ifi ?? ifiArr[i].ifiRaw ?? 0;
         const hasIfiSig = Math.abs(ifi) > IFI_THRESHOLD;
-        ctx.fillStyle = hasIfiSig ? (ifi > 0 ? "#059669" : "#dc2626") : C.textDim;
         const ifiRowIdx = showIFID || showContextEvents ? baseIdx + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0) + (showDA ? 1 : 0) + (showOID ? 1 : 0) + (showREX ? 1 : 0) : numRows - 1;
-        ctx.fillText(hasIfiSig ? (ifi > 0 ? "↑" : "↓") : "—", midX, rowYs[ifiRowIdx]);
+        const prevF = ctx.font;
+        ctx.font = `900 ${botArrowH}px ${MONO}`;
+        if (!hasIfiSig) {
+          ctx.font = prevF;
+          ctx.fillStyle = C.axisMuted;
+          ctx.fillText("—", midX, rowYs[ifiRowIdx]);
+        } else {
+          ctx.fillStyle = ifi > 0 ? C.botArrowUp : C.botArrowDn;
+          ctx.fillText(ifi > 0 ? "\u25B2" : "\u25BC", midX, rowYs[ifiRowIdx]);
+          ctx.font = prevF;
+        }
       }
       if (showIFID && ifidArr[i] != null) {
         const ifid = ifidArr[i].ifi ?? ifidArr[i].ifiRaw ?? 0;
         const hasIfidSig = Math.abs(ifid) > IFID_THRESHOLD;
-        ctx.fillStyle = hasIfidSig ? (ifid > 0 ? "#059669" : "#dc2626") : C.textDim;
         const ifidRowIdx = showContextEvents ? baseIdx + (showLTP ? 1 : 0) + (showMII ? 1 : 0) + (showVPT ? 1 : 0) + (showVZP ? 1 : 0) + (showDA ? 1 : 0) + (showOID ? 1 : 0) + (showREX ? 1 : 0) + (showIFI ? 1 : 0) : numRows - 1;
-        ctx.fillText(hasIfidSig ? (ifid > 0 ? "↑" : "↓") : "—", midX, rowYs[ifidRowIdx]);
+        const prevF = ctx.font;
+        ctx.font = `900 ${botArrowH}px ${MONO}`;
+        if (!hasIfidSig) {
+          ctx.font = prevF;
+          ctx.fillStyle = C.axisMuted;
+          ctx.fillText("—", midX, rowYs[ifidRowIdx]);
+        } else {
+          ctx.fillStyle = ifid > 0 ? C.botArrowUp : C.botArrowDn;
+          ctx.fillText(ifid > 0 ? "\u25B2" : "\u25BC", midX, rowYs[ifidRowIdx]);
+          ctx.font = prevF;
+        }
       }
       if (showContextEvents && ctxEventsArr[i]?.event != null) {
         const ev = ctxEventsArr[i].event;
-        const short = ev === "REVERSAL_TOP" ? "Rev↑" : ev === "RALLY_END" ? "REnd" : ev === "RALLY_START" ? "RStart" : "Rev↓";
-        ctx.fillStyle = ev === "REVERSAL_TOP" || ev === "RALLY_END" ? "#c62828" : "#2e7d32";
+        const short = ev === "REVERSAL_TOP" ? "Rev\u25B2" : ev === "RALLY_END" ? "REnd" : ev === "RALLY_START" ? "RStart" : "Rev\u25BC";
+        const prevF = ctx.font;
+        ctx.font = `800 ${isMobile ? 9.5 : 10.5}px ${MONO}`;
+        ctx.fillStyle = ev === "REVERSAL_TOP" || ev === "RALLY_END" ? "#991b1b" : "#166534";
         ctx.fillText(short, midX, rowYs[numRows - 1]);
+        ctx.font = prevF;
       }
     }
-  }, [dpr, hoverBar, showOI, showLTP, showMII, showVPT, showVZP, showDA, showOID, showREX, showIFI, showIFID, showContextEvents, numBotRows, labelW, psW, NZW, BOT_H_EFF, nzwLayout]);
+  }, [dpr, hoverBar, showOI, showLTP, showMII, showVPT, showVZP, showDA, showOID, showREX, showIFI, showIFID, showContextEvents, numBotRows, labelW, psW, NZW, BOT_H_EFF, nzwLayout, isMobile]);
 
   const scheduleDraw = useCallback(() => {
     if (rafId.current) cancelAnimationFrame(rafId.current);
@@ -1597,6 +1663,81 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     panRef.current = Math.max(0, Math.min(maxP, panRef.current + direction * step));
     scheduleDraw();
   }, [getMaxPan, scheduleDraw, psW, labelW]);
+
+  useEffect(() => {
+    const el = chartPlotRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      setPlotWH({ w: el.clientWidth, h: el.clientHeight });
+    });
+    ro.observe(el);
+    setPlotWH({ w: el.clientWidth, h: el.clientHeight });
+    return () => ro.disconnect();
+  }, [bars.length]);
+
+  const onFastPanDragStart = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const plot = chartPlotRef.current;
+    const cluster = fastPanClusterRef.current;
+    if (!plot || !cluster) return;
+    const pr = plot.getBoundingClientRect();
+    const cr = cluster.getBoundingClientRect();
+    fastPanDragRef.current = {
+      pointerId: e.pointerId,
+      plotL: pr.left,
+      plotT: pr.top,
+      plotW: pr.width,
+      plotH: pr.height,
+      cw: cr.width,
+      ch: cr.height,
+      grabX: e.clientX - cr.left,
+      grabY: e.clientY - cr.top,
+    };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }, []);
+
+  const onFastPanDragMove = useCallback((e) => {
+    const d = fastPanDragRef.current;
+    if (!d || e.pointerId !== d.pointerId) return;
+    e.preventDefault();
+    let left = e.clientX - d.plotL - d.grabX;
+    let top = e.clientY - d.plotT - d.grabY;
+    const maxL = Math.max(0, d.plotW - d.cw);
+    const maxT = Math.max(0, d.plotH - d.ch);
+    left = Math.max(0, Math.min(maxL, left));
+    top = Math.max(0, Math.min(maxT, top));
+    const nx = maxL > 1e-6 ? left / maxL : 0;
+    const ny = maxT > 1e-6 ? top / maxT : 0;
+    setFastPanNorm({ nx, ny });
+  }, []);
+
+  const onFastPanDragEnd = useCallback((e) => {
+    const d = fastPanDragRef.current;
+    if (!d || e.pointerId !== d.pointerId) return;
+    fastPanDragRef.current = null;
+    try {
+      e.currentTarget.releasePointerCapture?.(e.pointerId);
+    } catch { /* ignore */ }
+    const plot = chartPlotRef.current;
+    const cluster = fastPanClusterRef.current;
+    if (plot && cluster) {
+      const pr = plot.getBoundingClientRect();
+      const cr = cluster.getBoundingClientRect();
+      const left = cr.left - pr.left;
+      const top = cr.top - pr.top;
+      const maxL = Math.max(1e-6, pr.width - cr.width);
+      const maxT = Math.max(1e-6, pr.height - cr.height);
+      const payload = {
+        nx: Math.min(1, Math.max(0, left / maxL)),
+        ny: Math.min(1, Math.max(0, top / maxT)),
+      };
+      setFastPanNorm(payload);
+      try {
+        localStorage.setItem(FP_FASTPAN_LS_KEY, JSON.stringify(payload));
+      } catch { /* ignore */ }
+    }
+  }, []);
 
   /* reset user zoom + day overview when chart instrument/timeframe changes */
   useEffect(() => {
@@ -1926,6 +2067,13 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   const last = hdrData?.last ?? bars[bars.length - 1];
   const chg  = hdrData?.chg  ?? 0;
 
+  const fpEstW = isMobile ? 52 : 48;
+  const fpEstH = isMobile ? 128 : 118;
+  const fpMaxL = Math.max(0, plotWH.w - fpEstW);
+  const fpMaxT = Math.max(0, plotWH.h - fpEstH);
+  const fastPanLeft = Math.round(fastPanNorm.nx * fpMaxL);
+  const fastPanTop  = Math.round(fastPanNorm.ny * fpMaxT);
+
   /* ════════════════ RENDER ════════════════ */
   return (
     <div ref={rootRef} style={{
@@ -2152,52 +2300,73 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
         {/* canvas + price scale (marginLeft so chart aligns with bottom strip values) */}
         <div style={{ display: "flex", flex: 1, overflow: "hidden", minHeight: 0, marginLeft: labelW }}>
-          <div style={{ flex: 1, overflow: "hidden", position: "relative", cursor: "crosshair",
+          <div ref={chartPlotRef} style={{ flex: 1, overflow: "hidden", position: "relative", cursor: "crosshair",
                         touchAction: "none" /* prevent browser scroll/zoom intercepting chart gestures */ }}>
-            {/* Left-edge fast pan (older / newer); pointer-events only on buttons */}
+            {/* Draggable fast-pan cluster (position saved in localStorage) */}
             <div
+              ref={fastPanClusterRef}
               style={{
-                position: "absolute", left: 0, top: 0, bottom: 0, width: isMobile ? 42 : 38,
-                display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "flex-start",
-                zIndex: 6, pointerEvents: "none",
+                position: "absolute",
+                left: fastPanLeft,
+                top: fastPanTop,
+                zIndex: 6,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "stretch",
+                gap: isMobile ? 6 : 5,
+                padding: isMobile ? 6 : 5,
+                borderRadius: 10,
+                background: "radial-gradient(ellipse 120% 100% at 50% 50%, rgba(255,255,255,0.96) 0%, rgba(255,255,255,0.82) 55%, rgba(255,255,255,0.5) 100%)",
+                boxShadow: "0 1px 10px rgba(0,0,0,0.08)",
+                border: `1px solid ${C.border}`,
               }}
             >
-              <div
+              <button
+                type="button"
+                title="Drag to reposition (position is saved)"
+                onPointerDown={onFastPanDragStart}
+                onPointerMove={onFastPanDragMove}
+                onPointerUp={onFastPanDragEnd}
+                onPointerCancel={onFastPanDragEnd}
                 style={{
-                  pointerEvents: "auto",
-                  display: "flex", flexDirection: "column",
-                  gap: isMobile ? 10 : 8,
-                  padding: `${isMobile ? 10 : 8}px ${isMobile ? 6 : 5}px 10px 4px`,
-                  borderRadius: "0 10px 10px 0",
-                  background: "linear-gradient(to right, rgba(255,255,255,0.94) 0%, rgba(255,255,255,0.72) 55%, rgba(255,255,255,0) 100%)",
-                  boxShadow: "1px 0 8px rgba(0,0,0,0.04)",
+                  cursor: "grab",
+                  touchAction: "none",
+                  border: "none",
+                  background: "rgba(240,242,248,0.95)",
+                  color: C.textDim,
+                  fontSize: isMobile ? 12 : 11,
+                  lineHeight: 1,
+                  padding: "4px 0",
+                  borderRadius: 4,
+                  fontFamily: SANS,
+                  fontWeight: 600,
+                  letterSpacing: "0.12em",
                 }}
-              >
-                <button
-                  type="button"
-                  title="Older bars (fast pan)"
-                  onClick={() => panChartFast(1)}
-                  style={{
-                    ...btnStyle,
-                    fontSize: isMobile ? 14 : 12,
-                    padding: isMobile ? "6px 8px" : "4px 8px",
-                    minWidth: isMobile ? 40 : 36,
-                    lineHeight: 1,
-                  }}
-                >◀</button>
-                <button
-                  type="button"
-                  title="Newer bars (fast pan)"
-                  onClick={() => panChartFast(-1)}
-                  style={{
-                    ...btnStyle,
-                    fontSize: isMobile ? 14 : 12,
-                    padding: isMobile ? "6px 8px" : "4px 8px",
-                    minWidth: isMobile ? 40 : 36,
-                    lineHeight: 1,
-                  }}
-                >▶</button>
-              </div>
+              >⋮⋮</button>
+              <button
+                type="button"
+                title="Newer bars (fast pan)"
+                onClick={(e) => { e.stopPropagation(); panChartFast(-1); }}
+                style={{
+                  ...btnStyle,
+                  fontSize: isMobile ? 14 : 12,
+                  padding: isMobile ? "6px 8px" : "4px 8px",
+                  minWidth: isMobile ? 40 : 36,
+                  lineHeight: 1,
+                }}
+              >◀</button>
+              <button
+                type="button"
+                title="Older bars (fast pan)"
+                onClick={(e) => { e.stopPropagation(); panChartFast(1); }}
+                style={{
+                  ...btnStyle,
+                  fontSize: isMobile ? 14 : 12,
+                  padding: isMobile ? "6px 8px" : "4px 8px",
+                  minWidth: isMobile ? 40 : 36,
+                  lineHeight: 1,
+                }}
+              >▶</button>
             </div>
             <canvas ref={canvasRef} style={{ display: "block", touchAction: "none" }} />
           </div>
@@ -2205,16 +2374,16 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           {/* price scale */}
           <div ref={psRef} style={{
             width: psW, flexShrink: 0,
-            background: "#f4f5f8",
-            borderLeft: `1.5px solid ${C.border}`,
+            background: "#eef2f6",
+            borderLeft: `1.5px solid ${C.botRowLine}`,
             position: "relative", overflow: "hidden",
             cursor: "ns-resize",
             touchAction: "none",
           }}>
             <div style={{
               position: "absolute", top: 0, left: 0, right: 0, textAlign: "center",
-              fontFamily: MONO, fontSize: 8, color: "#c0c8d8", padding: "2px 0",
-              background: "linear-gradient(to bottom,#f4f5f8,transparent)",
+              fontFamily: MONO, fontSize: 8, fontWeight: 600, color: C.axisMuted, padding: "2px 0",
+              background: "linear-gradient(to bottom,#eef2f6,transparent)",
               pointerEvents: "none", zIndex: 5,
             }}>↓ zoom out · ↑ zoom in</div>
 
@@ -2234,8 +2403,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
         {/* time axis (align with chart) */}
         <div ref={timeRef} style={{
-          height: TIME_H_EFF, background: "#f4f5f8",
-          borderTop: `1.5px solid ${C.border}`,
+          height: TIME_H_EFF, background: "#eef2f6",
+          borderTop: `1.5px solid ${C.botRowLine}`,
           position: "relative", overflow: "hidden",
           flexShrink: 0, marginLeft: labelW, marginRight: psW,
           touchAction: "none",
@@ -2244,8 +2413,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
         {/* ── BOTTOM STRIP ── */}
         <div style={{
-          height: BOT_H_EFF, background: "#fff",
-          borderTop: `1.5px solid ${C.border}`,
+          height: BOT_H_EFF, background: C.botStripBg,
+          borderTop: `1.5px solid ${C.botRowLine}`,
           flexShrink: 0, overflow: "hidden",
           position: "relative",
           boxShadow: "0 -1px 6px rgba(0,0,0,0.04)",
@@ -2257,28 +2426,28 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
             display: "flex", flexDirection: "column",
             justifyContent: "space-around",
             padding: "4px 5px",
-            borderRight: `1px solid ${C.border}`,
-            background: "#fff",
+            borderRight: `1px solid ${C.botRowLine}`,
+            background: C.botStripBg,
             zIndex: 2,
           }}>
             {[
-              { label: "\u0394", title: "Tick delta", color: C.textDim },
-              { label: "CVD",    color: C.textDim },
-              { label: "VOL",    color: C.textDim },
-              ...(showOI ? [{ label: "OI", color: C.textDim }] : []),
-              ...(showLTP ? [{ label: "LTP", color: C.textDim }] : []),
-              ...(showMII ? [{ label: "MII", color: C.textDim }] : []),
-              ...(showVPT ? [{ label: "VPT", color: C.textDim }] : []),
-              ...(showVZP ? [{ label: "VZP", color: C.textDim }] : []),
-              ...(showDA ? [{ label: "DA", color: C.textDim }] : []),
-              ...(showOID ? [{ label: "OID", color: C.textDim }] : []),
-              ...(showREX ? [{ label: "REX", color: C.textDim }] : []),
-              ...(showIFI ? [{ label: "IFI", color: C.textDim }] : []),
-              ...(showIFID ? [{ label: "IFID", color: C.textDim }] : []),
-              ...(showContextEvents ? [{ label: "CAE", color: C.textDim }] : []),
+              { label: "\u0394", title: "Tick delta", color: C.axisText },
+              { label: "CVD",    color: C.axisText },
+              { label: "VOL",    color: C.axisText },
+              ...(showOI ? [{ label: "OI", color: C.axisText }] : []),
+              ...(showLTP ? [{ label: "LTP", color: C.axisText }] : []),
+              ...(showMII ? [{ label: "MII", color: C.axisText }] : []),
+              ...(showVPT ? [{ label: "VPT", color: C.axisText }] : []),
+              ...(showVZP ? [{ label: "VZP", color: C.axisText }] : []),
+              ...(showDA ? [{ label: "DA", color: C.axisText }] : []),
+              ...(showOID ? [{ label: "OID", color: C.axisText }] : []),
+              ...(showREX ? [{ label: "REX", color: C.axisText }] : []),
+              ...(showIFI ? [{ label: "IFI", color: C.axisText }] : []),
+              ...(showIFID ? [{ label: "IFID", color: C.axisText }] : []),
+              ...(showContextEvents ? [{ label: "CAE", color: C.axisText }] : []),
             ].map(({ label, color, title }, idx) => (
               <span key={`${label}-${idx}`} title={title || undefined} style={{
-                fontSize: 8, color, fontWeight: 700,
+                fontSize: isMobile ? 8 : 9, color, fontWeight: 800,
                 letterSpacing: ".04em", fontFamily: MONO,
                 display: "flex", alignItems: "center", flex: 1,
               }}>{label}</span>
