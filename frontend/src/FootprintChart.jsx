@@ -36,6 +36,7 @@ const C = {
   textMid:  "#6870a0",
   textDim:  "#a8b0c8",
   curBg:    "rgba(155,125,255,0.07)",
+  daySep:   "rgba(90, 96, 130, 0.72)",  // IST session boundary (between calendar days)
 };
 
 const MONO = "'JetBrains Mono','Fira Mono','Consolas',monospace";
@@ -105,6 +106,53 @@ const isFirstBarOfDayIST = (bars, i) => {
   const b = toISTDate(bars[i - 1].open_time);
   return a !== b;
 };
+
+/** Volume-at-price → VPOC + 70% value area (VAH, VAL) for a slice of footprint bars. */
+function computeProfileValueArea(bars) {
+  if (!bars?.length) return null;
+  const profile = new Map();
+  for (const b of bars) {
+    for (const lv of Object.values(b.levels || {})) {
+      const vol = (lv.buy_vol || 0) + (lv.sell_vol || 0);
+      if (vol > 0) profile.set(lv.price, (profile.get(lv.price) || 0) + vol);
+    }
+  }
+  if (profile.size === 0) return null;
+  let vpoc = 0, maxVol = 0;
+  for (const [p, v] of profile) {
+    if (v > maxVol) { maxVol = v; vpoc = p; }
+  }
+  const totalVol = [...profile.values()].reduce((s, v) => s + v, 0);
+  if (totalVol <= 0) return null;
+  const vaTarget = totalVol * 0.70;
+  const byVolDesc = [...profile.entries()].sort((a, b) => b[1] - a[1]);
+  const vaSet = new Set();
+  let cumVA = 0;
+  for (const [p, v] of byVolDesc) {
+    vaSet.add(p); cumVA += v;
+    if (cumVA >= vaTarget) break;
+  }
+  const vaPrices = [...vaSet].sort((a, b) => a - b);
+  return {
+    vpoc,
+    vah: vaPrices[vaPrices.length - 1],
+    val: vaPrices[0],
+  };
+}
+
+/** Inclusive [start, end] indices, one range per IST calendar day. */
+function istDayIndexRanges(bars) {
+  if (!bars?.length) return [];
+  const ranges = [];
+  let s = 0;
+  for (let i = 1; i <= bars.length; i++) {
+    if (i === bars.length || toISTDate(bars[i].open_time) !== toISTDate(bars[i - 1].open_time)) {
+      ranges.push([s, i - 1]);
+      s = i;
+    }
+  }
+  return ranges;
+}
 
 /* round to nearest tick */
 const snapTick = (v, tick) => Math.round(v / tick) * tick;
@@ -655,6 +703,24 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       ctx.fill(); ctx.stroke();
     }
 
+    /* ── PASS 3.5: vertical session separators at IST day boundaries (in gutter between candles) ── */
+    ctx.save();
+    ctx.strokeStyle = C.daySep;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 4]);
+    for (let i = 1; i < bs.length; i++) {
+      if (!isFirstBarOfDayIST(bs, i)) continue;
+      const xSep = i * slotW - pan - GAP / 2;
+      if (xSep < -2 || xSep > W + 2) continue;
+      const x = Math.round(xSep) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, H);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.restore();
+
     /* ── PASS 4: sell RIGHT of sell-zone (left of candle), buy LEFT of buy-zone (right of candle) ── */
     ctx.textBaseline = "middle";
     const numPad = 2; // gap between number text and candle edge
@@ -743,9 +809,10 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       }
     }
 
-    /* ── PASS 5: Session VWAP line ── */
+    /* ── PASS 5: Session VWAP (resets each IST day; no line across overnight gap) ── */
     if (showVWAP && bs.length > 0) {
       let cumPV = 0, cumV = 0;
+      let labelY = null;
       ctx.save();
       ctx.strokeStyle = "#f39c12";
       ctx.lineWidth   = 1.5;
@@ -754,6 +821,11 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       ctx.beginPath();
       let wStarted = false;
       for (let i = 0; i < bs.length; i++) {
+        if (isFirstBarOfDayIST(bs, i)) {
+          cumPV = 0;
+          cumV = 0;
+          wStarted = false;
+        }
         const b   = bs[i];
         const vol = (b.buy_vol || 0) + (b.sell_vol || 0);
         const tp  = ((b.high || b.close || 0) + (b.low || b.close || 0) + (b.close || 0)) / 3;
@@ -765,18 +837,15 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         const y    = p2y(vwap, H);
         if (!wStarted) { ctx.moveTo(midX, y); wStarted = true; }
         else ctx.lineTo(midX, y);
+        labelY = y;
       }
       ctx.stroke();
-      /* VWAP label */
-      if (cumV > 0) {
-        const finalY = p2y(cumPV / cumV, H);
-        if (finalY >= 4 && finalY <= H - 4) {
-          ctx.fillStyle = "#f39c12";
-          ctx.font = `700 8px ${MONO}`;
-          ctx.textAlign = "left";
-          ctx.textBaseline = "middle";
-          ctx.fillText("VWAP", 4, finalY - 8);
-        }
+      if (cumV > 0 && labelY != null && labelY >= 4 && labelY <= H - 4) {
+        ctx.fillStyle = "#f39c12";
+        ctx.font = `700 8px ${MONO}`;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText("VWAP", 4, labelY - 8);
       }
       ctx.restore();
     }
@@ -792,11 +861,10 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         }
       }
       if (profile.size > 0) {
-        /* VPOC */
+        /* VPOC + value-area set for full-chart histogram tint only */
         let vpoc = 0, maxVol = 0;
         for (const [p, v] of profile) { if (v > maxVol) { maxVol = v; vpoc = p; } }
 
-        /* Value Area (70%) — add highest-volume levels until 70% of total volume reached */
         const totalVol  = [...profile.values()].reduce((s, v) => s + v, 0);
         const vaTarget  = totalVol * 0.70;
         const byVolDesc = [...profile.entries()].sort((a, b) => b[1] - a[1]);
@@ -806,15 +874,12 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           vaSet.add(p); cumVA += v;
           if (cumVA >= vaTarget) break;
         }
-        const vaPrices = [...vaSet].sort((a, b) => a - b);
-        const vah = vaPrices[vaPrices.length - 1];
-        const val = vaPrices[0];
 
         const VP_W  = Math.min(isMobile ? 36 : 68, W * 0.12);
         const barH  = Math.max(1, pxPerTick - 0.5);
 
         ctx.save();
-        /* histogram bars — right-aligned, semi-transparent overlay */
+        /* histogram bars — right-aligned, semi-transparent overlay (whole visible range) */
         for (const [p, vol] of profile) {
           const y = p2y(p, H);
           if (y < -2 || y > H + 2) continue;
@@ -825,34 +890,46 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           ctx.fillRect(W - barW, y - barH / 2, barW, Math.max(1, barH));
         }
 
-        const vpocY = Math.round(p2y(vpoc, H)) + 0.5;
-        const vahY  = Math.round(p2y(vah,  H)) + 0.5;
-        const valY  = Math.round(p2y(val,  H)) + 0.5;
+        /* VAH / VAL: one pair per IST session, drawn only across that day’s candles */
+        const dayRanges = istDayIndexRanges(bs);
+        for (let di = 0; di < dayRanges.length; di++) {
+          const [a, b] = dayRanges[di];
+          const slice = bs.slice(a, b + 1);
+          const va = computeProfileValueArea(slice);
+          if (!va || va.vah == null || va.val == null) continue;
 
-        /* VPOC line */
-        ctx.strokeStyle = "rgba(255,193,7,0.85)";
-        ctx.lineWidth = 1; ctx.setLineDash([5, 3]);
-        ctx.beginPath(); ctx.moveTo(0, vpocY); ctx.lineTo(W, vpocY); ctx.stroke();
+          let x0 = a * slotW - pan;
+          let x1 = b * slotW - pan + slotW - GAP;
+          x0 = Math.max(0, Math.min(W, x0));
+          x1 = Math.max(0, Math.min(W, x1));
+          if (x1 - x0 < 2) continue;
 
-        /* VAH line */
-        ctx.strokeStyle = "rgba(100,149,237,0.75)";
-        ctx.setLineDash([4, 3]);
-        ctx.beginPath(); ctx.moveTo(0, vahY); ctx.lineTo(W, vahY); ctx.stroke();
+          const vahY = Math.round(p2y(va.vah, H)) + 0.5;
+          const valY = Math.round(p2y(va.val, H)) + 0.5;
 
-        /* VAL line */
-        ctx.beginPath(); ctx.moveTo(0, valY); ctx.lineTo(W, valY); ctx.stroke();
+          ctx.strokeStyle = "rgba(100,149,237,0.82)";
+          ctx.lineWidth = 1;
+          ctx.setLineDash([5, 3]);
+          ctx.beginPath(); ctx.moveTo(x0, vahY); ctx.lineTo(x1, vahY); ctx.stroke();
+          ctx.setLineDash([4, 4]);
+          ctx.beginPath(); ctx.moveTo(x0, valY); ctx.lineTo(x1, valY); ctx.stroke();
+          ctx.setLineDash([]);
 
-        ctx.setLineDash([]);
-        ctx.font = `700 8px ${MONO}`;
-        ctx.textBaseline = "middle";
-        ctx.textAlign = "left";
-
-        ctx.fillStyle = "rgba(255,193,7,0.95)";
-        ctx.fillText("VPOC", 4, vpocY - 6);
-
-        ctx.fillStyle = "rgba(100,149,237,0.90)";
-        ctx.fillText("VAH",  4, vahY  - 6);
-        ctx.fillText("VAL",  4, valY  + 9);
+          const lx = x0 + 4;
+          const segW = x1 - x0;
+          const dayTag = toISTDate(bs[a].open_time);
+          ctx.font = `700 7px ${MONO}`;
+          ctx.textBaseline = "middle";
+          ctx.textAlign = "left";
+          if (segW > 44 && vahY >= 10 && vahY <= H - 10) {
+            ctx.fillStyle = "rgba(100,149,237,0.95)";
+            ctx.fillText(di === dayRanges.length - 1 ? "VAH" : `VAH ${dayTag}`, lx, vahY - 8);
+          }
+          if (segW > 44 && valY >= 10 && valY <= H - 10) {
+            ctx.fillStyle = "rgba(100,149,237,0.95)";
+            ctx.fillText(di === dayRanges.length - 1 ? "VAL" : `VAL ${dayTag}`, lx, valY + 8);
+          }
+        }
 
         ctx.restore();
       }
@@ -1225,6 +1302,17 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       lbl.textContent = showDate ? `${toISTDate(bs[i].open_time)} ${toIST(bs[i].open_time, false)}` : toIST(bs[i].open_time, false);
       el.appendChild(lbl);
     }
+    for (let i = 1; i < bs.length; i++) {
+      if (!isFirstBarOfDayIST(bs, i)) continue;
+      const xSep = i * slotW - pan - GAP / 2;
+      if (xSep < 0 || xSep > W) continue;
+      const rule = document.createElement("div");
+      rule.style.cssText = `
+        position:absolute;left:${xSep}px;top:0;bottom:0;width:0;
+        border-left:1px dashed ${C.daySep};transform:translateX(-50%);
+        pointer-events:none;opacity:0.92;`;
+      el.appendChild(rule);
+    }
   }, []);
 
   /* ── bottom strip: same width as chart (W), aligned with candles ── */
@@ -1271,6 +1359,24 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
     const slotW  = cw + NZW + GAP;
     const nzHBot = Math.floor(NZW / 2);
+
+    ctx.save();
+    ctx.strokeStyle = C.daySep;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 4]);
+    for (let i = 1; i < bs.length; i++) {
+      if (!isFirstBarOfDayIST(bs, i)) continue;
+      const xSep = i * slotW - pan - GAP / 2;
+      if (xSep < -2 || xSep > W + 2) continue;
+      const x = Math.round(xSep) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, H);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.restore();
+
     for (let i = 0; i < bs.length; i++) {
       const b  = bs[i];
       const x  = i * slotW - pan;

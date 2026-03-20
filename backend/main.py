@@ -406,25 +406,23 @@ class OrderFlowEngine:
             all_candles = all_candles[-limit:]
         candle_dicts = [c.to_dict() for c in all_candles]
 
-        # Running CVD — start from (total CVD − sum of selected candles) so the final
-        # value matches self.cvd exactly.
-        selected_delta = sum(cd["delta"] for cd in candle_dicts)
-        running = self.cvd - selected_delta
+        cvd_map = _session_cvd_map_from_engine(self)
         for cd in candle_dicts:
-            running += cd["delta"]
-            cd["cvd"] = running
+            cd["cvd"] = cvd_map.get(cd["open_time"], float(cd.get("delta", 0)))
 
         if self.current_candle:
             live = self.current_candle.to_dict()
-            live["cvd"] = running + live["delta"]
+            live["cvd"] = cvd_map.get(live["open_time"], float(live.get("delta", 0)))
             candle_dicts.append(live)
+
+        ticker_cvd = float(candle_dicts[-1]["cvd"]) if candle_dicts else float(self.cvd)
 
         return {
             "symbol": self.symbol,
             "ltp": self.last_ltp,
             "bid": self.last_bid,
             "ask": self.last_ask,
-            "cvd": self.cvd,
+            "cvd": ticker_cvd,
             "tick_count": self.tick_count,
             "candles": candle_dicts,
         }
@@ -444,25 +442,50 @@ class OrderFlowEngine:
         all_candles = list(self.candles)[-1:] if self.candles else []  # last closed only
         candle_dicts = [c.to_dict_lite() for c in all_candles]
 
-        running = self.cvd - sum(cd["delta"] for cd in candle_dicts)
+        cvd_map = _session_cvd_map_from_engine(self)
         for cd in candle_dicts:
-            running += cd["delta"]
-            cd["cvd"] = running
+            cd["cvd"] = cvd_map.get(cd["open_time"], float(cd.get("delta", 0)))
 
         if self.current_candle:
             live = self.current_candle.to_dict_lite()
-            live["cvd"] = running + live["delta"]
+            live["cvd"] = cvd_map.get(live["open_time"], float(live.get("delta", 0)))
             candle_dicts.append(live)
+
+        ticker_cvd = float(candle_dicts[-1]["cvd"]) if candle_dicts else float(self.cvd)
 
         return {
             "symbol":     self.symbol,
             "ltp":        self.last_ltp,
             "bid":        self.last_bid,
             "ask":        self.last_ask,
-            "cvd":        self.cvd,
+            "cvd":        ticker_cvd,
             "tick_count": self.tick_count,
             "candles":    candle_dicts,
         }
+
+
+def _session_cvd_map_from_engine(engine: OrderFlowEngine) -> dict:
+    """Per-bar session cumulative delta (IST day boundaries). Used for lite/partial get_state."""
+    by_t: dict[int, dict] = {}
+    for cd in engine.day_candles:
+        by_t[cd["open_time"]] = cd
+    for c in engine.candles:
+        by_t[c.open_time] = c.to_dict()
+    if engine.current_candle:
+        cc = engine.current_candle
+        by_t[cc.open_time] = cc.to_dict()
+    ordered = sorted(by_t.values(), key=lambda x: x["open_time"])
+    running = 0.0
+    prev_d: Optional[str] = None
+    out: dict[int, float] = {}
+    for cd in ordered:
+        dkey = _ist_date_str_from_ms(int(cd["open_time"]))
+        if dkey != prev_d:
+            running = 0.0
+        prev_d = dkey
+        running += float(cd.get("delta", cd.get("buy_vol", 0) - cd.get("sell_vol", 0)))
+        out[int(cd["open_time"])] = running
+    return out
 
 
 # ─────────────────────────────────────────────
@@ -632,6 +655,24 @@ def _ist_midnight_ms_days_ago(days: int) -> int:
     return int(midnight.timestamp() * 1000)
 
 
+def _ist_previous_session_midnight_ms() -> int:
+    """IST midnight marking the start of the *previous equity session day* (Mon–Fri).
+    Walks back from calendar yesterday, skipping Sat/Sun, so Monday lines up with Friday
+    instead of Sunday. Does not know NSE holidays — rare bad range on long weekends.
+    """
+    now = datetime.now(IST).date()
+    d = now - timedelta(days=1)
+    while d.weekday() >= 5:  # 5=Sat, 6=Sun
+        d -= timedelta(days=1)
+    midnight = datetime(d.year, d.month, d.day, 0, 0, 0, 0, IST)
+    return int(midnight.timestamp() * 1000)
+
+
+def _ist_date_str_from_ms(ms: int) -> str:
+    """IST calendar date YYYY-MM-DD for candle open_time (ms), aligned with chart."""
+    return datetime.fromtimestamp(ms / 1000.0, tz=IST).strftime("%Y-%m-%d")
+
+
 def _is_index_fut_symbol(symbol: str) -> bool:
     """Index / index futures — disk preserved at midnight; include multi-day history in state."""
     u = (symbol or "").upper()
@@ -729,8 +770,8 @@ async def build_full_state(symbol: str, engine) -> dict:
     Deduplicates by open_time so history+live merge never produces double candles.
     """
     today_start = _ist_midnight_ms()
-    # Index futures: include yesterday + today (disk preserved at midnight)
-    hist_start = _ist_midnight_ms_days_ago(1) if _is_index_fut_symbol(symbol) else today_start
+    # Index futures: previous session + today (weekend-aware; disk preserved at midnight)
+    hist_start = _ist_previous_session_midnight_ms() if _is_index_fut_symbol(symbol) else today_start
     by_time: dict[int, dict] = {}
 
     # 1. Seed with all today's lite candles (guaranteed complete, no early-session gaps)
@@ -807,25 +848,35 @@ async def build_full_state(symbol: str, engine) -> dict:
 
     candle_dicts = sorted(by_time.values(), key=lambda x: x["open_time"])
 
-    # Build running CVD from full history
+    # Session CVD — cumulative delta within each IST calendar day (resets at day boundary)
+    prev_d: Optional[str] = None
     running = 0.0
     for cd in candle_dicts:
-        running += cd.get("delta", cd.get("buy_vol", 0) - cd.get("sell_vol", 0))
+        d = _ist_date_str_from_ms(int(cd["open_time"]))
+        if d != prev_d:
+            running = 0.0
+        prev_d = d
+        running += float(cd.get("delta", cd.get("buy_vol", 0) - cd.get("sell_vol", 0)))
         cd["cvd"] = running
 
+    ticker_cvd = running
     if engine.current_candle:
         live = engine.current_candle.to_dict()
         ot = live.get("open_time")
         if ot is not None and ot not in by_time:
-            live["cvd"] = running + live.get("delta", 0)
+            ld = _ist_date_str_from_ms(int(ot))
+            if ld != prev_d:
+                running = 0.0
+            live["cvd"] = running + float(live.get("delta", 0))
             candle_dicts.append(live)
+            ticker_cvd = float(live["cvd"])
 
     return {
         "symbol": symbol,
         "ltp": engine.last_ltp,
         "bid": engine.last_bid,
         "ask": engine.last_ask,
-        "cvd": engine.cvd,
+        "cvd": ticker_cvd,
         "tick_count": engine.tick_count,
         "candles": candle_dicts,
     }
@@ -886,7 +937,7 @@ def load_all_snapshots():
         if symbol not in engines:
             continue
         try:
-            hist_start = _ist_midnight_ms_days_ago(1) if _is_index_fut_symbol(symbol) else today_start
+            hist_start = _ist_previous_session_midnight_ms() if _is_index_fut_symbol(symbol) else today_start
             all_today = [
                 c for c in load_history_from_disk(symbol)
                 if c.get("closed", True) and c.get("open_time", 0) >= hist_start
@@ -2564,6 +2615,8 @@ async def get_index_candles(index: str):
 
     today = datetime.now(IST).date()
     y = today - timedelta(days=1)
+    while y.weekday() >= 5:
+        y -= timedelta(days=1)
     from_date = f"{y} 09:15:00"
     to_date = f"{today} 15:30:00"
 

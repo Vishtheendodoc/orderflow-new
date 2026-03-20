@@ -22,6 +22,15 @@ const fmtVol = (v) => {
 const toMs   = (t) => (t != null && t < 1e12 ? t * 1000 : t);
 const _pad   = (n) => String(n).padStart(2, "0");
 
+/** IST calendar day YYYY-MM-DD for Dhan IST-epoch ms. */
+const istDateKeyMs = (ms) => {
+  const d = new Date(toMs(ms));
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
+
 /**
  * Dhan LTT timestamps are IST-epoch (their zero = IST midnight Jan 1 1970).
  * Reading them directly as UTC therefore surfaces the correct IST wall-clock digits.
@@ -222,9 +231,16 @@ export default function OrderflowChart({ candles, symbol, features = {}, isIndex
     const numRows = showOI ? 4 : 3;
     const ROW_H   = H / numRows;
 
-    /* Running CVD per bar */
+    /* Session CVD per bar (resets each IST day) */
     let runCvd = 0;
-    const cvdArr = merged.map((c) => { runCvd += c.delta ?? 0; return runCvd; });
+    let prevDay = null;
+    const cvdArr = merged.map((c) => {
+      const day = istDateKeyMs(toMs(c.open_time));
+      if (prevDay != null && day !== prevDay) runCvd = 0;
+      prevDay = day;
+      runCvd += c.delta ?? 0;
+      return runCvd;
+    });
 
     const range = ts.getVisibleLogicalRange();
     const iFrom = range ? Math.max(0, Math.floor(range.from)) : 0;

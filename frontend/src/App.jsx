@@ -39,6 +39,31 @@ function toMs(t) {
   return t < 1e12 ? t * 1000 : t;
 }
 
+/** IST calendar date YYYY-MM-DD for Dhan IST-epoch ms (use UTC field getters). */
+function istDateKeyMs(ms) {
+  const d = new Date(toMs(ms));
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** Mutate sorted candles: cvd = cumulative delta within each IST day (session CVD). */
+function assignSessionCvd(candles) {
+  if (!candles?.length) return candles;
+  const sorted = [...candles].sort((a, b) => toMs(a.open_time) - toMs(b.open_time));
+  let running = 0;
+  let prevDay = null;
+  sorted.forEach((c) => {
+    const day = istDateKeyMs(c.open_time);
+    if (prevDay != null && day !== prevDay) running = 0;
+    prevDay = day;
+    running += c.delta ?? (c.buy_vol ?? 0) - (c.sell_vol ?? 0);
+    c.cvd = running;
+  });
+  return sorted;
+}
+
 /**
  * Market open offsets from midnight IST (Dhan timestamps are IST-epoch).
  * NSE / BSE equity & F&O : 9:15 AM
@@ -75,8 +100,7 @@ function aggregateCandles(candles, targetMinutes, openOffsetMs = DEFAULT_MARKET_
     if (!groups[bucket]) groups[bucket] = [];
     groups[bucket].push(c);
   });
-  let runningCvd = 0;
-  return Object.entries(groups)
+  const out = Object.entries(groups)
     .sort((a, b) => Number(a[0]) - Number(b[0]))
     .map(([bucket, arr]) => {
       arr.sort((a, b) => toMs(a.open_time) - toMs(b.open_time));
@@ -108,8 +132,6 @@ function aggregateCandles(candles, targetMinutes, openOffsetMs = DEFAULT_MARKET_
         });
       });
       merged.delta = merged.buy_vol - merged.sell_vol;
-      runningCvd += merged.delta;
-      merged.cvd = runningCvd;
       merged.initiative = merged.delta > 0 ? "buy" : merged.delta < 0 ? "sell" : null;
       // OI: use closing OI of the last 1m candle in this bucket;
       // oi_change: sum of per-minute changes = net OI change over the whole period
@@ -117,6 +139,8 @@ function aggregateCandles(candles, targetMinutes, openOffsetMs = DEFAULT_MARKET_
       merged.oi_change = arr.reduce((sum, c) => sum + (c.oi_change ?? 0), 0);
       return merged;
     });
+  assignSessionCvd(out);
+  return out;
 }
 
 function getDeltaColor(delta, maxAbs) {
@@ -787,14 +811,17 @@ export default function App() {
                 const byTime = new Map();
                 merged.forEach((c) => byTime.set(c.open_time, c));
                 const deduped = [...byTime.values()].sort((a, b) => a.open_time - b.open_time);
-                let runningCvd = 0;
-                deduped.forEach((c) => {
-                  runningCvd += c.delta ?? (c.buy_vol ?? 0) - (c.sell_vol ?? 0);
-                  c.cvd = runningCvd;
-                });
-                next[sym] = { ...d, candles: deduped };
+                assignSessionCvd(deduped);
+                const topCvd = deduped.length ? deduped[deduped.length - 1].cvd : d.cvd;
+                next[sym] = { ...d, cvd: topCvd, candles: deduped };
               } else {
-                next[sym] = d;
+                if (d.candles?.length) {
+                  assignSessionCvd(d.candles);
+                  const topCvd = d.candles[d.candles.length - 1].cvd;
+                  next[sym] = { ...d, cvd: topCvd };
+                } else {
+                  next[sym] = d;
+                }
               }
             }
             return next;
@@ -831,12 +858,14 @@ export default function App() {
               const byTime = new Map();
               merged.forEach((c) => byTime.set(c.open_time, c));
               const deduped = [...byTime.values()].sort((a, b) => a.open_time - b.open_time);
-              let runningCvd = 0;
-              deduped.forEach((c) => {
-                runningCvd += c.delta ?? (c.buy_vol ?? 0) - (c.sell_vol ?? 0);
-                c.cvd = runningCvd;
-              });
-              return { ...prev, [d.symbol]: { ...d, candles: deduped } };
+              assignSessionCvd(deduped);
+              const topCvd = deduped.length ? deduped[deduped.length - 1].cvd : d.cvd;
+              return { ...prev, [d.symbol]: { ...d, cvd: topCvd, candles: deduped } };
+            }
+            if (d.candles?.length) {
+              assignSessionCvd(d.candles);
+              const topCvd = d.candles[d.candles.length - 1].cvd;
+              return { ...prev, [d.symbol]: { ...d, cvd: topCvd } };
             }
             return { ...prev, [d.symbol]: d };
           });
@@ -854,12 +883,9 @@ export default function App() {
             const byTime = new Map();
             d.candles.forEach((c) => byTime.set(c.open_time, c));
             const deduped = [...byTime.values()].sort((a, b) => a.open_time - b.open_time);
-            let runningCvd = 0;
-            deduped.forEach((c) => {
-              runningCvd += c.delta ?? (c.buy_vol ?? 0) - (c.sell_vol ?? 0);
-              c.cvd = runningCvd;
-            });
+            assignSessionCvd(deduped);
             d.candles = deduped;
+            d.cvd = deduped.length ? deduped[deduped.length - 1].cvd : d.cvd;
           }
           historyLoadedRef.current.add(d.symbol);
           knownSymbolsRef.current.add(d.symbol);
@@ -967,12 +993,9 @@ export default function App() {
           const byTime = new Map();
           merged.forEach((c) => byTime.set(c.open_time, c));
           const deduped = [...byTime.values()].sort((a, b) => a.open_time - b.open_time);
-          let runningCvd = 0;
-          deduped.forEach((c) => {
-            runningCvd += c.delta ?? (c.buy_vol ?? 0) - (c.sell_vol ?? 0);
-            c.cvd = runningCvd;
-          });
-          return { ...prev, [d.symbol]: { ...existing, ltp: d.ltp, bid: d.bid, ask: d.ask, cvd: d.cvd, candles: deduped } };
+          assignSessionCvd(deduped);
+          const topCvd = deduped.length ? deduped[deduped.length - 1].cvd : d.cvd;
+          return { ...prev, [d.symbol]: { ...existing, ltp: d.ltp, bid: d.bid, ask: d.ask, cvd: topCvd, candles: deduped } };
         });
       } catch (_) {}
     };
