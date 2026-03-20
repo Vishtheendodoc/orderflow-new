@@ -53,6 +53,9 @@ const TIME_H   = 24;
 const BOT_H    = 68;
 const W_MIN    = 8;    // minimum candle width (pinch can go this tight)
 const W_MAX    = 180;
+/** Candle width at or above this exits day-overview mode and restores footprint lanes. */
+const PRINTS_RESTORE_CW_MOBILE  = 14;
+const PRINTS_RESTORE_CW_DESKTOP = 24;
 const BODY_HALF = 3;   // body is 6px wide total
 const ROW_MIN  = 16;   // minimum px per row when computing level cap (fewer rows = more space each)
 const ROW_PREF = 18;   // preferred
@@ -340,6 +343,12 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   const RPAD = isMobile ? 12 : 30;  // padding after last candle
   const psW    = isMobile ? PS_W_MOBILE : PS_W;
   const labelW = isMobile ? LABEL_W_MOBILE : LABEL_W;
+  const [overviewMode, setOverviewMode] = useState(false);
+  const overviewModeRef = useRef(false);
+  useEffect(() => { overviewModeRef.current = overviewMode; }, [overviewMode]);
+
+  /** Lane width for layout: 0 in day-overview (candles only), else full NZW. */
+  const nzwLayout = overviewMode ? 0 : NZW;
 
   const rootRef      = useRef(null);
   const containerRef = useRef(null);
@@ -349,7 +358,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
   const botCanvasRef = useRef(null);
 
   /* chart state */
-  const candleWRef   = useRef(isMobile ? 14 : 32);
+  const candleWRef   = useRef(isMobile ? 11 : 32);
   const priceScaleRef = useRef(1.0); // 1.0 = auto-fit visible candles; >1 = zoomed out; <1 = zoomed in
   const priceOffRef  = useRef(0);
   const panRef       = useRef(0);
@@ -524,7 +533,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const bs = barsRef.current;
     if (!bs.length) return { lo: 0, hi: 1 };
     const cw    = candleWRef.current;
-    const slotW = cw + NZW + GAP;
+    const slotW = cw + nzwLayout + GAP;
     const W     = (containerRef.current?.clientWidth || 800) - psW - labelW;
     const pan   = panRef.current;
     let lo = Infinity, hi = -Infinity;
@@ -539,7 +548,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const ts  = tickRef.current || 0.5;
     const pad = Math.max(ts * 3, (hi - lo) * 0.06);
     return { lo: lo - pad, hi: hi + pad };
-  }, [labelW, psW]);
+  }, [labelW, psW, nzwLayout]);
 
   /** Visible price range = auto-scale base × priceScaleFactor */
   const getVisRange = useCallback(() => {
@@ -564,11 +573,11 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
   const getMaxPan = useCallback(() => {
     const cw       = candleWRef.current;
-    const slotW    = cw + NZW + GAP;
+    const slotW    = cw + nzwLayout + GAP;
     const chartW   = barsRef.current.length * slotW - GAP + RPAD;
     const wrapW    = (containerRef.current?.clientWidth || 800) - psW - labelW;
     return Math.max(0, chartW - wrapW);
-  }, [labelW, psW]);
+  }, [labelW, psW, nzwLayout, RPAD]);
 
   const getCanvasH = useCallback(() => {
     const tot = containerRef.current?.clientHeight || 600;
@@ -593,8 +602,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const H   = getCanvasH();
     const bs     = barsRef.current;
     const cw     = candleWRef.current;
-    const slotW  = cw + NZW + GAP;
-    const nzHalf = Math.floor(NZW / 2); // sell zone LEFT of candle, buy zone RIGHT
+    const slotW  = cw + nzwLayout + GAP;
+    const nzHalf = Math.floor(nzwLayout / 2); // sell zone LEFT of candle, buy zone RIGHT (0 in overview)
     const pan    = panRef.current;
     const ts     = tickRef.current;
 
@@ -625,38 +634,47 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const buyLinePrices  = new Set();
     const sellLinePrices = new Set();
 
-    /* ── PASS 1: row backgrounds (no grid lines) ── */
+    /* ── PASS 1: row backgrounds (no grid lines); skipped in day overview (candles only) ── */
     ctx.font = `600 ${FONT_SZ}px ${MONO}`;
     ctx.textBaseline = "middle";
 
-    for (let i = 0; i < bs.length; i++) {
-      const b = bs[i];
-      const x = i * slotW - pan;
-      if (x + cw + NZW < 0 || x > W) continue;
+    if (!overviewMode) {
+      for (let i = 0; i < bs.length; i++) {
+        const b = bs[i];
+        const x = i * slotW - pan;
+        if (x + cw + nzwLayout < 0 || x > W) continue;
 
-      const bull = (b.close ?? b.open ?? 0) >= (b.open ?? b.close ?? 0);
+        /* current candle tint */
+        if (i === bs.length - 1) {
+          ctx.fillStyle = C.curBg;
+          ctx.fillRect(x, 0, slotW - GAP, H);
+        }
 
-      /* current candle tint */
-      if (i === bs.length - 1) {
-        ctx.fillStyle = C.curBg;
-        ctx.fillRect(x, 0, slotW - GAP, H);
+        ctx.save();
+        const cx0 = x + nzHalf;
+        ctx.beginPath(); ctx.rect(cx0, 0, cw, H); ctx.clip();
+
+        for (const lv of getDisplayLevels(b.levels)) {
+          const ly   = p2y(lv.price, H);
+          const rowY = ly - LEVEL_H / 2;
+          if (rowY > H || rowY + LEVEL_H < 0) continue;
+
+          if (showLinesRef.current) {
+            if (lv.highBuy) buyLinePrices.add(lv.price);
+            if (lv.highSell) sellLinePrices.add(lv.price);
+          }
+        }
+        ctx.restore();
       }
-
-      ctx.save();
-      const cx0 = x + nzHalf;
-      ctx.beginPath(); ctx.rect(cx0, 0, cw, H); ctx.clip();
-
-      for (const lv of getDisplayLevels(b.levels)) {
-        const ly   = p2y(lv.price, H);
-        const rowY = ly - LEVEL_H / 2;
-        if (rowY > H || rowY + LEVEL_H < 0) continue;
-
-        if (showLinesRef.current) {
-          if (lv.highBuy) buyLinePrices.add(lv.price);
-          if (lv.highSell) sellLinePrices.add(lv.price);
+    } else {
+      const i = bs.length - 1;
+      if (i >= 0) {
+        const x = i * slotW - pan;
+        if (x + slotW >= -2 && x <= W + 2) {
+          ctx.fillStyle = C.curBg;
+          ctx.fillRect(x, 0, slotW - GAP, H);
         }
       }
-      ctx.restore();
     }
 
     /* ── PASS 2: imbalance lines ── */
@@ -732,77 +750,79 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     ctx.setLineDash([]);
     ctx.restore();
 
-    /* ── PASS 4: sell RIGHT of sell-zone (left of candle), buy LEFT of buy-zone (right of candle) ── */
-    ctx.textBaseline = "middle";
-    const numPad = 2; // gap between number text and candle edge
+    /* ── PASS 4: bid/ask prints (hidden in day overview) ── */
+    if (!overviewMode) {
+      ctx.textBaseline = "middle";
+      const numPad = 2; // gap between number text and candle edge
 
-    for (let i = 0; i < bs.length; i++) {
-      const b  = bs[i];
-      const x  = i * slotW - pan;
-      const cx = x + nzHalf;
-      if (x + slotW < 0 || x > W) continue;
+      for (let i = 0; i < bs.length; i++) {
+        const b  = bs[i];
+        const x  = i * slotW - pan;
+        const cx = x + nzHalf;
+        if (x + slotW < 0 || x > W) continue;
 
-      ctx.save();
-      // clip to full slot (sell zone + candle + buy zone)
-      ctx.beginPath(); ctx.rect(x, 0, slotW - GAP, H); ctx.clip();
+        ctx.save();
+        // clip to full slot (sell zone + candle + buy zone)
+        ctx.beginPath(); ctx.rect(x, 0, slotW - GAP, H); ctx.clip();
 
-      for (const lv of getDisplayLevels(b.levels)) {
-        const ly = p2y(lv.price, H);
-        if (ly < -2 || ly > H + 2) continue;
+        for (const lv of getDisplayLevels(b.levels)) {
+          const ly = p2y(lv.price, H);
+          if (ly < -2 || ly > H + 2) continue;
 
-        let sellTxt = isMobile ? fmtVCompact(lv.sell_vol || 0) : fmtV(lv.sell_vol || 0);
-        let buyTxt  = isMobile ? fmtVCompact(lv.buy_vol  || 0) : fmtV(lv.buy_vol  || 0);
+          let sellTxt = isMobile ? fmtVCompact(lv.sell_vol || 0) : fmtV(lv.sell_vol || 0);
+          let buyTxt  = isMobile ? fmtVCompact(lv.buy_vol  || 0) : fmtV(lv.buy_vol  || 0);
 
-        // auto-scale font to fit within nzHalf
-        let fontSize = FONT_SZ;
-        ctx.font = `600 ${fontSize}px ${MONO}`;
-        const maxW = nzHalf - numPad;
-        let sw = ctx.measureText(sellTxt).width;
-        let bw = ctx.measureText(buyTxt).width;
-        if (Math.max(sw, bw) > maxW && fontSize > 7) {
-          fontSize = Math.max(7, Math.floor(maxW / Math.max(sw, bw) * fontSize));
+          // auto-scale font to fit within nzHalf
+          let fontSize = FONT_SZ;
           ctx.font = `600 ${fontSize}px ${MONO}`;
-          sw = ctx.measureText(sellTxt).width;
-          bw = ctx.measureText(buyTxt).width;
-        }
-        /* Still too wide at min font → compact K/M (desktop) or shorter strings again (mobile) */
-        if (Math.max(sw, bw) > maxW) {
-          sellTxt = fmtVCompact(lv.sell_vol || 0);
-          buyTxt = fmtVCompact(lv.buy_vol || 0);
-          fontSize = FONT_SZ;
-          ctx.font = `600 ${fontSize}px ${MONO}`;
-          sw = ctx.measureText(sellTxt).width;
-          bw = ctx.measureText(buyTxt).width;
-          while (Math.max(sw, bw) > maxW && fontSize > 7) {
+          const maxW = nzHalf - numPad;
+          let sw = ctx.measureText(sellTxt).width;
+          let bw = ctx.measureText(buyTxt).width;
+          if (Math.max(sw, bw) > maxW && fontSize > 7) {
             fontSize = Math.max(7, Math.floor(maxW / Math.max(sw, bw) * fontSize));
             ctx.font = `600 ${fontSize}px ${MONO}`;
             sw = ctx.measureText(sellTxt).width;
             bw = ctx.measureText(buyTxt).width;
           }
+          /* Still too wide at min font → compact K/M (desktop) or shorter strings again (mobile) */
+          if (Math.max(sw, bw) > maxW) {
+            sellTxt = fmtVCompact(lv.sell_vol || 0);
+            buyTxt = fmtVCompact(lv.buy_vol || 0);
+            fontSize = FONT_SZ;
+            ctx.font = `600 ${fontSize}px ${MONO}`;
+            sw = ctx.measureText(sellTxt).width;
+            bw = ctx.measureText(buyTxt).width;
+            while (Math.max(sw, bw) > maxW && fontSize > 7) {
+              fontSize = Math.max(7, Math.floor(maxW / Math.max(sw, bw) * fontSize));
+              ctx.font = `600 ${fontSize}px ${MONO}`;
+              sw = ctx.measureText(sellTxt).width;
+              bw = ctx.measureText(buyTxt).width;
+            }
+          }
+
+          const isImb  = lv.highBuy || lv.highSell;
+          const boxH   = fontSize + 2;
+
+          // sell: right-aligned, flush against left edge of candle body
+          ctx.fillStyle = lv.highSell ? C.sell : C.sellMid;
+          ctx.textAlign = "right";
+          ctx.fillText(sellTxt, cx - numPad, ly);
+
+          // buy: left-aligned, flush against right edge of candle body
+          ctx.fillStyle = lv.highBuy ? C.buy : C.buyMid;
+          ctx.textAlign = "left";
+          ctx.fillText(buyTxt, cx + cw + numPad, ly);
+
+          if (isImb) {
+            const sellDrawX = cx - numPad - ctx.measureText(sellTxt).width;
+            const buyDrawX  = cx + cw + numPad + ctx.measureText(buyTxt).width;
+            ctx.strokeStyle = lv.highBuy ? C.buy : C.sell;
+            ctx.lineWidth = 1;
+            ctx.strokeRect(sellDrawX - 1, ly - boxH / 2, buyDrawX - sellDrawX + 2, boxH);
+          }
         }
-
-        const isImb  = lv.highBuy || lv.highSell;
-        const boxH   = fontSize + 2;
-
-        // sell: right-aligned, flush against left edge of candle body
-        ctx.fillStyle = lv.highSell ? C.sell : C.sellMid;
-        ctx.textAlign = "right";
-        ctx.fillText(sellTxt, cx - numPad, ly);
-
-        // buy: left-aligned, flush against right edge of candle body
-        ctx.fillStyle = lv.highBuy ? C.buy : C.buyMid;
-        ctx.textAlign = "left";
-        ctx.fillText(buyTxt, cx + cw + numPad, ly);
-
-        if (isImb) {
-          const sellDrawX = cx - numPad - ctx.measureText(sellTxt).width;
-          const buyDrawX  = cx + cw + numPad + ctx.measureText(buyTxt).width;
-          ctx.strokeStyle = lv.highBuy ? C.buy : C.sell;
-          ctx.lineWidth = 1;
-          ctx.strokeRect(sellDrawX - 1, ly - boxH / 2, buyDrawX - sellDrawX + 2, boxH);
-        }
+        ctx.restore();
       }
-      ctx.restore();
     }
 
     /* ── current last-price track line (always visible) ── */
@@ -1259,7 +1279,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     _drawTime();
     _drawBot();
   }, [dpr, getCanvasH, getVisRange, getVisPMin, p2y, getMaxPan, hoverBar, hoverPrice,
-      showVWAP, showVP, showLTP, showMII, showVPT, showVZP, showDA, showOID, showREX, showIFI, showIFID, showContextEvents, filterByVolume, isMobile, labelW, psW]);
+      showVWAP, showVP, showLTP, showMII, showVPT, showVZP, showDA, showOID, showREX, showIFI, showIFID, showContextEvents, filterByVolume, isMobile, labelW, psW, overviewMode, nzwLayout]);
 
   /* ── price scale: TradingView-style levels + hover price at crosshair ── */
   const PS_LABEL_MIN_PX = 40;
@@ -1327,8 +1347,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     el.innerHTML = "";
     const bs = barsRef.current, cw = candleWRef.current, pan = panRef.current;
     if (!bs.length) return;
-    const slotW  = cw + NZW + GAP;
-    const nzH    = Math.floor(NZW / 2);
+    const slotW  = cw + nzwLayout + GAP;
+    const nzH    = Math.floor(nzwLayout / 2);
     const W = (containerRef.current?.clientWidth || 800) - psW - labelW;
     const minGap = 60;
     const step = Math.max(1, Math.ceil(minGap / slotW));
@@ -1356,7 +1376,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         pointer-events:none;opacity:0.92;`;
       el.appendChild(rule);
     }
-  }, [labelW, psW, NZW]);
+  }, [labelW, psW, nzwLayout]);
 
   /* ── bottom strip: same width as chart (W), aligned with candles ── */
   const _drawBot = useCallback(() => {
@@ -1400,8 +1420,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     ctx.font = `600 9.5px ${MONO}`;
     ctx.textBaseline = "middle";
 
-    const slotW  = cw + NZW + GAP;
-    const nzHBot = Math.floor(NZW / 2);
+    const slotW  = cw + nzwLayout + GAP;
+    const nzHBot = Math.floor(nzwLayout / 2);
 
     ctx.save();
     ctx.strokeStyle = C.daySep;
@@ -1518,37 +1538,64 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         ctx.fillText(short, midX, rowYs[numRows - 1]);
       }
     }
-  }, [dpr, hoverBar, showOI, showLTP, showMII, showVPT, showVZP, showDA, showOID, showREX, showIFI, showIFID, showContextEvents, numBotRows, labelW, psW, NZW, BOT_H_EFF]);
+  }, [dpr, hoverBar, showOI, showLTP, showMII, showVPT, showVZP, showDA, showOID, showREX, showIFI, showIFID, showContextEvents, numBotRows, labelW, psW, NZW, BOT_H_EFF, nzwLayout]);
 
   const scheduleDraw = useCallback(() => {
     if (rafId.current) cancelAnimationFrame(rafId.current);
     rafId.current = requestAnimationFrame(() => { rafId.current = null; draw(); });
   }, [draw]);
 
-  /* fit: reset candle width + price scale so all candles fill screen */
-  const handleFit = useCallback(() => {
+  /* fit: laneWForSlot = NZW (footprint) or 0 (day overview). */
+  const fitChart = useCallback((laneWForSlot) => {
     const bs = barsRef.current;
     if (!bs.length || !containerRef.current) return;
-    userZoomedW.current = false; // allow auto-fit again
+    userZoomedW.current = false;
     const wrapW = (containerRef.current.clientWidth || 800) - psW - labelW;
-    const slotBase = NZW + GAP;
+    const slotBase = laneWForSlot + GAP;
     const w = (wrapW + GAP - RPAD) / bs.length - slotBase;
     candleWRef.current = Math.round(Math.max(W_MIN, Math.min(W_MAX, w)));
     priceScaleRef.current = 1.0;
     priceOffRef.current   = 0;
     followLatest.current  = true;
     scheduleDraw();
-  }, [scheduleDraw, labelW, psW, NZW, RPAD]);
+  }, [scheduleDraw, labelW, psW, RPAD]);
 
-  /* reset user zoom flag when chart instrument/timeframe changes (new chart → re-fit) */
-  useEffect(() => { userZoomedW.current = false; }, [symbol, timeFrameMinutes]);
+  const handleFit = useCallback(() => {
+    fitChart(overviewModeRef.current ? 0 : NZW);
+  }, [fitChart, NZW]);
+
+  const exitOverviewAndFit = useCallback(() => {
+    overviewModeRef.current = false;
+    setOverviewMode(false);
+    fitChart(NZW);
+  }, [fitChart, NZW]);
+
+  const toggleDayOverview = useCallback(() => {
+    if (overviewModeRef.current) {
+      overviewModeRef.current = false;
+      setOverviewMode(false);
+      fitChart(NZW);
+    } else {
+      overviewModeRef.current = true;
+      setOverviewMode(true);
+      fitChart(0);
+    }
+  }, [fitChart, NZW]);
+
+  /* reset user zoom + day overview when chart instrument/timeframe changes */
+  useEffect(() => {
+    userZoomedW.current = false;
+    overviewModeRef.current = false;
+    setOverviewMode(false);
+  }, [symbol, timeFrameMinutes]);
 
   /* initial fit on data change; skips candle-width reset if user has manually zoomed */
   useEffect(() => {
     if (!bars.length || !containerRef.current) return;
     if (!userZoomedW.current) {
       const wrapW = (containerRef.current.clientWidth || 800) - psW - labelW;
-      const slotBase = NZW + GAP;
+      const lane = overviewModeRef.current ? 0 : NZW;
+      const slotBase = lane + GAP;
       const w = (wrapW + GAP - RPAD) / bars.length - slotBase;
       candleWRef.current = Math.round(Math.max(W_MIN, Math.min(W_MAX, w)));
     }
@@ -1600,10 +1647,17 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         const [a, b] = [...pts.values()];
         const dist   = Math.hypot(b.x - a.x, b.y - a.y);
         if (pinchDist0.current > 0) {
-          userZoomedW.current = true;
-          candleWRef.current = Math.max(W_MIN, Math.min(W_MAX,
+          const newW = Math.max(W_MIN, Math.min(W_MAX,
             pinchCW0.current * (dist / pinchDist0.current)));
-          scheduleDraw();
+          const th = typeof window !== "undefined" && window.innerWidth <= 768
+            ? PRINTS_RESTORE_CW_MOBILE : PRINTS_RESTORE_CW_DESKTOP;
+          if (overviewModeRef.current && newW >= th) {
+            exitOverviewAndFit();
+          } else {
+            userZoomedW.current = true;
+            candleWRef.current = newW;
+            scheduleDraw();
+          }
         }
         return;
       }
@@ -1626,7 +1680,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       const rect  = cv.getBoundingClientRect();
       const mx    = e.clientX - rect.left + panRef.current;
       const my    = e.clientY - rect.top;
-      const slotW = candleWRef.current + NZW + GAP;
+      const lane  = overviewModeRef.current ? 0 : NZW;
+      const slotW = candleWRef.current + lane + GAP;
       const idx   = Math.floor(mx / slotW);
       const bs    = barsRef.current;
       setHoverBar(idx >= 0 && idx < bs.length ? bs[idx] : null);
@@ -1664,7 +1719,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       cv.removeEventListener("pointercancel", onUp);
       cv.removeEventListener("pointerleave",  onLeave);
     };
-  }, [getMaxPan, getCanvasH, getVisRange, getVisPMin, scheduleDraw]);
+  }, [getMaxPan, getCanvasH, getVisRange, getVisPMin, scheduleDraw, NZW, exitOverviewAndFit]);
 
   /* canvas wheel */
   useEffect(() => {
@@ -1672,8 +1727,17 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const onWheel = e => {
       e.preventDefault();
       if (e.ctrlKey || e.metaKey) {
-        userZoomedW.current = true;
-        candleWRef.current = Math.max(W_MIN, Math.min(W_MAX, candleWRef.current + (e.deltaY > 0 ? -5 : 5)));
+        const prev = candleWRef.current;
+        const next = Math.max(W_MIN, Math.min(W_MAX, prev + (e.deltaY > 0 ? -5 : 5)));
+        const th = typeof window !== "undefined" && window.innerWidth <= 768
+          ? PRINTS_RESTORE_CW_MOBILE : PRINTS_RESTORE_CW_DESKTOP;
+        if (e.deltaY < 0 && overviewModeRef.current && next >= th) {
+          exitOverviewAndFit();
+        } else {
+          userZoomedW.current = true;
+          candleWRef.current = next;
+          scheduleDraw();
+        }
       } else if (e.shiftKey) {
         // shift+scroll on chart = price scale (down=zoom out/shrink, up=zoom in/expand)
         const f = e.deltaY > 0 ? 1.1 : 1 / 1.1;
@@ -1686,7 +1750,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, [getMaxPan, scheduleDraw]);
+  }, [getMaxPan, scheduleDraw, exitOverviewAndFit]);
 
   /* price scale: scroll down = zoom out (shrink rows); drag down = zoom out (TradingView style) */
   useEffect(() => {
@@ -1694,8 +1758,16 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     const onWheel = e => {
       e.preventDefault();
       if (e.shiftKey) {
-        userZoomedW.current = true;
-        candleWRef.current = Math.max(W_MIN, Math.min(W_MAX, candleWRef.current + (e.deltaY > 0 ? -4 : 4)));
+        const prev = candleWRef.current;
+        const next = Math.max(W_MIN, Math.min(W_MAX, prev + (e.deltaY > 0 ? -4 : 4)));
+        const th = typeof window !== "undefined" && window.innerWidth <= 768
+          ? PRINTS_RESTORE_CW_MOBILE : PRINTS_RESTORE_CW_DESKTOP;
+        if (e.deltaY < 0 && overviewModeRef.current && next >= th) {
+          exitOverviewAndFit();
+        } else {
+          userZoomedW.current = true;
+          candleWRef.current = next;
+        }
       } else {
         // scroll down = zoom out (prices shrink, more range visible)
         const f = e.deltaY > 0 ? 1.1 : 1 / 1.1;
@@ -1726,7 +1798,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       psEl.removeEventListener("pointerup",    onUp);
       psEl.removeEventListener("pointerleave", onLeave);
     };
-  }, [scheduleDraw]);
+  }, [scheduleDraw, exitOverviewAndFit]);
 
   /* time axis: scroll wheel OR horizontal drag adjusts candle width (horizontal zoom) */
   useEffect(() => {
@@ -1735,10 +1807,18 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
     const onWheel = e => {
       e.preventDefault();
-      userZoomedW.current = true;
-      candleWRef.current = Math.max(W_MIN, Math.min(W_MAX,
-        candleWRef.current + (e.deltaY > 0 ? -1 : 1)));
-      scheduleDraw();
+      const prev = candleWRef.current;
+      const next = Math.max(W_MIN, Math.min(W_MAX,
+        prev + (e.deltaY > 0 ? -1 : 1)));
+      const th = typeof window !== "undefined" && window.innerWidth <= 768
+        ? PRINTS_RESTORE_CW_MOBILE : PRINTS_RESTORE_CW_DESKTOP;
+      if (e.deltaY < 0 && overviewModeRef.current && next >= th) {
+        exitOverviewAndFit();
+      } else {
+        userZoomedW.current = true;
+        candleWRef.current = next;
+        scheduleDraw();
+      }
     };
     const onDown = e => {
       dragStartX  = e.clientX;
@@ -1749,9 +1829,17 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       if (dragStartX === null) return;
       // drag right → wider candles; drag left → narrower candles
       const dx = e.clientX - dragStartX;
-      userZoomedW.current = true;
-      candleWRef.current = Math.max(W_MIN, Math.min(W_MAX, dragStartCW + dx * 0.15));
-      scheduleDraw();
+      const next = Math.max(W_MIN, Math.min(W_MAX, dragStartCW + dx * 0.15));
+      const thI = typeof window !== "undefined" && window.innerWidth <= 768
+        ? PRINTS_RESTORE_CW_MOBILE : PRINTS_RESTORE_CW_DESKTOP;
+      if (dx > 0 && overviewModeRef.current && next >= thI) {
+        exitOverviewAndFit();
+        dragStartX = null;
+      } else {
+        userZoomedW.current = true;
+        candleWRef.current = next;
+        scheduleDraw();
+      }
     };
     const onUp = () => { dragStartX = null; };
 
@@ -1767,7 +1855,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       el.removeEventListener("pointerup",    onUp);
       el.removeEventListener("pointercancel", onUp);
     };
-  }, [scheduleDraw]);
+  }, [scheduleDraw, exitOverviewAndFit]);
 
   /* fullscreen — native where supported, CSS overlay fallback for iOS Safari */
   const toggleFS = useCallback(() => {
@@ -1876,6 +1964,18 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           <button onClick={handleFit} title="Fit all candles [A]"
             style={{ ...btnStyle, padding: isMobile ? "3px 7px" : "2px 8px", minWidth: isMobile ? 36 : undefined }}
           >{isMobile ? "⊡" : "Fit"}</button>
+          <button
+            onClick={toggleDayOverview}
+            title="Day overview — hide prints, fit all bars (zoom in to restore)"
+            style={{
+              ...btnStyle,
+              padding: isMobile ? "3px 7px" : "2px 8px",
+              minWidth: isMobile ? 36 : undefined,
+              background: overviewMode ? "rgba(56,142,60,0.12)" : "none",
+              borderColor: overviewMode ? C.buy : C.border,
+              color: overviewMode ? C.buy : C.textMid,
+            }}
+          >{isMobile ? "⊟" : "Day"}</button>
           <button onClick={toggleFS} title="Fullscreen"
             style={{ ...btnStyle, fontSize: isMobile ? 15 : 13, padding: isMobile ? "2px 7px" : "2px 7px", minWidth: isMobile ? 36 : undefined }}
           >{isFS ? "⊠" : "⛶"}</button>
@@ -2101,7 +2201,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
             zIndex: 2,
           }}>
             {[
-              { label: "TICK Δ", color: C.textDim },
+              { label: "\u0394", title: "Tick delta", color: C.textDim },
               { label: "CVD",    color: C.textDim },
               { label: "VOL",    color: C.textDim },
               ...(showOI ? [{ label: "OI", color: C.textDim }] : []),
@@ -2115,8 +2215,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
               ...(showIFI ? [{ label: "IFI", color: C.textDim }] : []),
               ...(showIFID ? [{ label: "IFID", color: C.textDim }] : []),
               ...(showContextEvents ? [{ label: "CAE", color: C.textDim }] : []),
-            ].map(({ label, color }) => (
-              <span key={label} style={{
+            ].map(({ label, color, title }, idx) => (
+              <span key={`${label}-${idx}`} title={title || undefined} style={{
                 fontSize: 8, color, fontWeight: 700,
                 letterSpacing: ".04em", fontFamily: MONO,
                 display: "flex", alignItems: "center", flex: 1,
