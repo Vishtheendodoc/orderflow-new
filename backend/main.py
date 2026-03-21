@@ -71,6 +71,8 @@ CANDLE_OPTIONS = [60, 300, 600, 900, 1800, 2700, 3600, 7200]  # seconds: 1,5,10,
 
 # Memory bounds — MCX trades 9AM-11:55PM IST (~895 min); NSE 9:15AM-3:30PM (~375 min)
 MAX_CANDLES_PER_SYMBOL = int(os.getenv("MAX_CANDLES_PER_SYMBOL", "900"))  # MCX trades ~895 min/day; must cover full session
+# Index futures: keep all days on disk; higher limit for multi-day history (~30 session days)
+MAX_CANDLES_INDEX_FUT = int(os.getenv("MAX_CANDLES_INDEX_FUT", "12000"))
 # Candles kept in RAM per engine; closed candles are also written to disk immediately.
 # Full history is loaded from disk on client request — so RAM usage stays flat.
 MAX_CANDLES_IN_MEMORY = int(os.getenv("MAX_CANDLES_IN_MEMORY", "100"))  # keep enough in RAM to cover disk-unavailability window at startup
@@ -668,6 +670,15 @@ def _ist_previous_session_midnight_ms() -> int:
     return int(midnight.timestamp() * 1000)
 
 
+def _hist_start_for_symbol(symbol: str) -> int:
+    """History start (ms) for build_full_state and load_all_snapshots.
+    Index futures: 0 = keep all days on disk. Others: today only."""
+    if _is_index_fut_symbol(symbol):
+        return 0
+    return _ist_midnight_ms()
+</think>TodoWrite
+
+
 def _ist_date_str_from_ms(ms: int) -> str:
     """IST calendar date YYYY-MM-DD for candle open_time (ms), aligned with chart."""
     return datetime.fromtimestamp(ms / 1000.0, tz=IST).strftime("%Y-%m-%d")
@@ -769,9 +780,7 @@ async def build_full_state(symbol: str, engine) -> dict:
 
     Deduplicates by open_time so history+live merge never produces double candles.
     """
-    today_start = _ist_midnight_ms()
-    # Index futures: previous session + today (weekend-aware; disk preserved at midnight)
-    hist_start = _ist_previous_session_midnight_ms() if _is_index_fut_symbol(symbol) else today_start
+    hist_start = _hist_start_for_symbol(symbol)
     by_time: dict[int, dict] = {}
 
     # 1. Seed with all today's lite candles (guaranteed complete, no early-session gaps)
@@ -781,7 +790,8 @@ async def build_full_state(symbol: str, engine) -> dict:
             by_time[ot] = c
 
     # 2. Override with disk candles (include levels for footprint chart)
-    for c in load_history_from_disk(symbol, limit=MAX_CANDLES_PER_SYMBOL):
+    disk_limit = MAX_CANDLES_INDEX_FUT if _is_index_fut_symbol(symbol) else MAX_CANDLES_PER_SYMBOL
+    for c in load_history_from_disk(symbol, limit=disk_limit):
         if c.get("open_time", 0) >= hist_start and c.get("closed", True):
             by_time[c["open_time"]] = c  # disk version has levels — prefer over lite
 
@@ -937,14 +947,14 @@ def load_all_snapshots():
         if symbol not in engines:
             continue
         try:
-            hist_start = _ist_previous_session_midnight_ms() if _is_index_fut_symbol(symbol) else today_start
+            hist_start = _hist_start_for_symbol(symbol)
+            disk_limit = MAX_CANDLES_INDEX_FUT if _is_index_fut_symbol(symbol) else MAX_CANDLES_PER_SYMBOL
             all_today = [
-                c for c in load_history_from_disk(symbol)
+                c for c in load_history_from_disk(symbol, limit=disk_limit)
                 if c.get("closed", True) and c.get("open_time", 0) >= hist_start
             ]
 
-            # Compact JSONL on startup: index futures keep yesterday+today (disk preserved);
-            # others keep today-only to limit file growth.
+            # Compact JSONL on startup: index futures keep all days; others keep today-only to limit file growth.
             jsonl_path = os.path.join(SNAPSHOT_DIR, f"{symbol}.jsonl")
             if os.path.exists(jsonl_path) and all_today:
                 tmp_path = jsonl_path + ".compact.tmp"
