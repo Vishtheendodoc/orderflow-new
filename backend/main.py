@@ -71,7 +71,7 @@ CANDLE_OPTIONS = [60, 300, 600, 900, 1800, 2700, 3600, 7200]  # seconds: 1,5,10,
 
 # Memory bounds — MCX trades 9AM-11:55PM IST (~895 min); NSE 9:15AM-3:30PM (~375 min)
 MAX_CANDLES_PER_SYMBOL = int(os.getenv("MAX_CANDLES_PER_SYMBOL", "900"))  # MCX trades ~895 min/day; must cover full session
-# Index futures: keep all days on disk; higher limit for multi-day history (~30 session days)
+# Indices + index futures: keep all days on disk; higher limit for multi-day history (~30 session days)
 MAX_CANDLES_INDEX_FUT = int(os.getenv("MAX_CANDLES_INDEX_FUT", "12000"))
 # Candles kept in RAM per engine; closed candles are also written to disk immediately.
 # Full history is loaded from disk on client request — so RAM usage stays flat.
@@ -582,8 +582,8 @@ def _do_daily_reset():
 
     # Only wipe disk when crossing midnight — NOT on cold start (restart/redeploy)
     # On cold start we keep disk so load_all_snapshots can restore
-    # Preserve index/index-future footprint data (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY)
-    INDEX_SYMBOLS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")
+    # Preserve index + index-future footprint data (spot: NIFTY, BANKNIFTY; futures: NIFTY MAR FUT, etc.)
+    INDEX_SYMBOLS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
 
     def _is_index_file(fname: str) -> bool:
         upper = fname.upper()
@@ -672,21 +672,21 @@ def _ist_previous_session_midnight_ms() -> int:
 
 def _hist_start_for_symbol(symbol: str) -> int:
     """History start (ms) for build_full_state and load_all_snapshots.
-    Index futures: 0 = keep all days on disk. Others: today only."""
-    if _is_index_fut_symbol(symbol):
+    Indices (spot NIFTY, BANKNIFTY, etc.) + index futures: 0 = keep all days. Others: today only."""
+    if _is_index_or_index_fut(symbol):
         return 0
     return _ist_midnight_ms()
+
+
+def _is_index_or_index_fut(symbol: str) -> bool:
+    """Spot indices (NIFTY, BANKNIFTY, etc.) and index futures — retain all days on disk."""
+    u = (symbol or "").upper()
+    return any(k in u for k in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"))
 
 
 def _ist_date_str_from_ms(ms: int) -> str:
     """IST calendar date YYYY-MM-DD for candle open_time (ms), aligned with chart."""
     return datetime.fromtimestamp(ms / 1000.0, tz=IST).strftime("%Y-%m-%d")
-
-
-def _is_index_fut_symbol(symbol: str) -> bool:
-    """Index / index futures — disk preserved at midnight; include multi-day history in state."""
-    u = (symbol or "").upper()
-    return any(k in u for k in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"))
 
 
 # Retry queue for candle writes that failed due to disk being unavailable.
@@ -789,7 +789,7 @@ async def build_full_state(symbol: str, engine) -> dict:
             by_time[ot] = c
 
     # 2. Override with disk candles (include levels for footprint chart)
-    disk_limit = MAX_CANDLES_INDEX_FUT if _is_index_fut_symbol(symbol) else MAX_CANDLES_PER_SYMBOL
+    disk_limit = MAX_CANDLES_INDEX_FUT if _is_index_or_index_fut(symbol) else MAX_CANDLES_PER_SYMBOL
     for c in load_history_from_disk(symbol, limit=disk_limit):
         if c.get("open_time", 0) >= hist_start and c.get("closed", True):
             by_time[c["open_time"]] = c  # disk version has levels — prefer over lite
@@ -947,7 +947,7 @@ def load_all_snapshots():
             continue
         try:
             hist_start = _hist_start_for_symbol(symbol)
-            disk_limit = MAX_CANDLES_INDEX_FUT if _is_index_fut_symbol(symbol) else MAX_CANDLES_PER_SYMBOL
+            disk_limit = MAX_CANDLES_INDEX_FUT if _is_index_or_index_fut(symbol) else MAX_CANDLES_PER_SYMBOL
             all_today = [
                 c for c in load_history_from_disk(symbol, limit=disk_limit)
                 if c.get("closed", True) and c.get("open_time", 0) >= hist_start
