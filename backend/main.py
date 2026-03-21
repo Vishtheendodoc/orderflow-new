@@ -524,13 +524,15 @@ SENTIMENT_MAX_HISTORY = 200
 expiry_list_cache: Dict[str, list] = {}
 
 # ── Index live feed (IDX_I) for HFT chart ──────────────────────────────────────
-# Index symbols (NIFTY, BANKNIFTY, etc.) subscribed to Dhan WebSocket for tick-by-tick.
+# Index symbols (NSE + BSE) subscribed to Dhan WebSocket for tick-by-tick.
 # Per https://dhanhq.co/docs/v2/live-market-feed/
 INDEX_LIVE_SYMBOLS = [
     ("NIFTY", "13"),
     ("BANKNIFTY", "25"),
     ("FINNIFTY", "27"),
     ("MIDCPNIFTY", "442"),
+    ("SENSEX", "51"),   # BSE
+    ("BANKEX", "69"),   # BSE
 ]
 
 # ── HFT Scanner ───────────────────────────────────────────────────────────────
@@ -582,8 +584,8 @@ def _do_daily_reset():
 
     # Only wipe disk when crossing midnight — NOT on cold start (restart/redeploy)
     # On cold start we keep disk so load_all_snapshots can restore
-    # Preserve index + index-future footprint data (spot: NIFTY, BANKNIFTY; futures: NIFTY MAR FUT, etc.)
-    INDEX_SYMBOLS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")
+    # Preserve index + index-future footprint data (NSE: NIFTY, BANKNIFTY; BSE: SENSEX, BANKEX, SENSEX50)
+    INDEX_SYMBOLS = ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50")
 
     def _is_index_file(fname: str) -> bool:
         upper = fname.upper()
@@ -679,9 +681,9 @@ def _hist_start_for_symbol(symbol: str) -> int:
 
 
 def _is_index_or_index_fut(symbol: str) -> bool:
-    """Spot indices (NIFTY, BANKNIFTY, etc.) and index futures — retain all days on disk."""
+    """Spot indices and index futures (NSE + BSE) — retain all days on disk."""
     u = (symbol or "").upper()
-    return any(k in u for k in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"))
+    return any(k in u for k in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX", "SENSEX50"))
 
 
 def _ist_date_str_from_ms(ms: int) -> str:
@@ -806,7 +808,7 @@ async def build_full_state(symbol: str, engine) -> dict:
     if len(by_time) < DHAN_INTRADAY_FALLBACK_MIN:
         info = subscribed_symbols.get(symbol, {})
         exchange_segment = info.get("exchange_segment", "NSE_FNO")
-        if exchange_segment == "IDX_I":
+        if exchange_segment in ("IDX_I", "BSE_IDX"):
             pass  # index: live feed + disk only
         else:
             security_id = info.get("security_id") or getattr(engine, "security_id", None)
@@ -3199,13 +3201,18 @@ async def update_settings(payload: dict):
 
 
 def _resolve_exchange_segment(payload: dict) -> str:
-    """Resolve Dhan exchange_segment from payload. Dhan v2: NSE_FO, MCX_COMM, etc."""
+    """Resolve Dhan exchange_segment from payload. Dhan v2: NSE_FO, MCX_COMM, BSE_IDX, etc."""
     seg = payload.get("exchange_segment") or payload.get("segment", "")
     exch = (payload.get("exchange") or "").upper()
-    if seg and seg not in ("M", "D", ""):
+    instr = (payload.get("instrument") or "").upper()
+    if seg and seg not in ("M", "D", "I", ""):
         return str(seg)
     if exch == "MCX":
         return "MCX_COMM"
+    if exch == "BSE" and (seg == "I" or instr == "INDEX"):
+        return "BSE_IDX"
+    if exch == "BSE":
+        return "BSE_FNO"
     return "NSE_FO"
 
 
@@ -3365,6 +3372,8 @@ async def startup():
                     seg_name = None
                     if exch == "MCX":
                         seg_name = "MCX_COMM"
+                    elif exch == "BSE" and ("FUT" in instr or "FUTIDX" in instr):
+                        seg_name = "BSE_FNO"
                     elif exch == "NSE" and (
                         "FUT" in instr or "FUTIDX" in instr or "FUTSTK" in instr
                         or row.get("segment", "").upper() == "D"
@@ -3377,6 +3386,8 @@ async def startup():
                     entry = (symbol, security_id, seg_name)
                     if seg_name == "NSE_FNO" and any(kw in symbol for kw in INDEX_KEYWORDS):
                         priority_0.append(entry)
+                    elif seg_name == "BSE_FNO":
+                        priority_0.append(entry)  # BSE index futures (SENSEX, BANKEX, SENSEX50)
                     elif seg_name == "NSE_FNO":
                         priority_1.append(entry)
                     else:
@@ -3395,7 +3406,7 @@ async def startup():
 
             logger.info(
                 f"Auto-subscribed all {count} instruments from CSV "
-                f"({len(priority_0)} index futures, {len(priority_1)} NSE stock futures, "
+                f"({len(priority_0)} index/BSE futures, {len(priority_1)} NSE stock futures, "
                 f"{len(priority_2)} MCX). Each engine holds ≤{MAX_CANDLES_IN_MEMORY} candles in RAM; "
                 f"full history is read from disk on demand."
             )
@@ -3403,15 +3414,14 @@ async def startup():
             logger.error(f"Auto-subscribe failed: {e}")
 
     def _init_index_subscriptions():
-        """Subscribe to index live feed (IDX_I) for HFT chart tick-by-tick data."""
+        """Subscribe to index live feed: IDX_I (NSE), BSE_IDX (BSE SENSEX/BANKEX)."""
+        BSE_INDICES = ("SENSEX", "BANKEX")
         for symbol, security_id in INDEX_LIVE_SYMBOLS:
-            subscribed_symbols[symbol] = {
-                "security_id": security_id,
-                "exchange_segment": "IDX_I",
-            }
+            seg = "BSE_IDX" if symbol in BSE_INDICES else "IDX_I"
+            subscribed_symbols[symbol] = {"security_id": security_id, "exchange_segment": seg}
             if symbol not in engines:
                 engines[symbol] = OrderFlowEngine(symbol, security_id)
-        logger.info(f"Index live feed: subscribed {[s for s, _ in INDEX_LIVE_SYMBOLS]} (IDX_I)")
+        logger.info(f"Index live feed: subscribed {[s for s, _ in INDEX_LIVE_SYMBOLS]}")
 
     _init_index_subscriptions()
     auto_subscribe_from_csv()

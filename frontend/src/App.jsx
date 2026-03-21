@@ -356,7 +356,7 @@ function getExpiryLabel(symbol) {
 }
 
 const EXPIRY_ORDER = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
-const POPULAR_INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"];
+const POPULAR_INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"];
 
 function SubscribePanel({ onSubscribe, activeSymbols }) {
   const [allInstruments, setAllInstruments] = useState([]);
