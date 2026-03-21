@@ -676,7 +676,6 @@ def _hist_start_for_symbol(symbol: str) -> int:
     if _is_index_fut_symbol(symbol):
         return 0
     return _ist_midnight_ms()
-</think>TodoWrite
 
 
 def _ist_date_str_from_ms(ms: int) -> str:
@@ -2249,6 +2248,41 @@ def disk_info():
         "total_size_kb": round(total_bytes / 1024, 1),
         "files": files,
     }
+
+
+@app.get("/api/disk/dates")
+def disk_dates():
+    """Report date range per symbol (first/last candle IST date). Use to verify e.g. 19th March data."""
+    if not os.path.isdir(SNAPSHOT_DIR):
+        return {"mounted": False, "path": SNAPSHOT_DIR, "symbols": []}
+    symbols = []
+    for fname in sorted(os.listdir(SNAPSHOT_DIR)):
+        if not fname.endswith(".jsonl") or fname.endswith(".depth.jsonl"):
+            continue
+        symbol = fname.replace(".jsonl", "")
+        fpath = os.path.join(SNAPSHOT_DIR, fname)
+        first_date = last_date = None
+        count = 0
+        try:
+            with open(fpath) as fh:
+                for ln in fh:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    c = _loads(ln)
+                    ot = c.get("open_time")
+                    if ot is None:
+                        continue
+                    count += 1
+                    d = _ist_date_str_from_ms(int(ot))
+                    if first_date is None:
+                        first_date = d
+                    last_date = d
+        except Exception:
+            pass
+        if first_date and last_date:
+            symbols.append({"symbol": symbol, "first_date": first_date, "last_date": last_date, "candles": count})
+    return {"mounted": True, "path": SNAPSHOT_DIR, "symbols": symbols}
 
 
 @app.get("/api/settings")
