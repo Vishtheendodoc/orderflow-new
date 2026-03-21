@@ -187,6 +187,9 @@ function resolveIdx(symbol) {
   if (s.includes("FINNIFTY"))   return "FINNIFTY";
   if (s.includes("MIDCPNIFTY")) return "MIDCPNIFTY";
   if (s.includes("NIFTY"))      return "NIFTY";
+  if (s.includes("BANKEX"))     return "BANKEX";
+  if (s.includes("SENSEX50"))   return "SENSEX50";  // before SENSEX
+  if (s.includes("SENSEX"))     return "SENSEX";
   return s;
 }
 

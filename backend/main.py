@@ -114,22 +114,28 @@ HFT_PE_VOL_MIN      = int(os.getenv("HFT_PE_VOL_MIN", "100000"))          # min 
 HFT_MFI_OVERBOUGHT  = float(os.getenv("HFT_MFI_OVERBOUGHT", "75"))        # MFI overbought (tuned 2026-03)
 HFT_MFI_OVERSOLD    = float(os.getenv("HFT_MFI_OVERSOLD", "25"))         # MFI oversold (tuned 2026-03)
 # Per-index HFT defaults (from calibration). Env overrides: HFT_OI_CHG_PCT_NIFTY, etc.
+# BSE SENSEX/BANKEX use default params (not yet calibrated).
 _HFT_DEFAULTS = {
     "NIFTY":      {"oi_chg_pct": 3.0, "ltp_stable": 1.6, "ce_vol": 100_000, "pe_vol": 100_000},
     "BANKNIFTY":  {"oi_chg_pct": 3.0, "ltp_stable": 1.0, "ce_vol": 62_742,  "pe_vol": 114_525},
     "FINNIFTY":   {"oi_chg_pct": 3.0, "ltp_stable": 1.0, "ce_vol": 1_000,   "pe_vol": 5_000},
     "MIDCPNIFTY": {"oi_chg_pct": 3.0, "ltp_stable": 1.0, "ce_vol": 10_800,  "pe_vol": 14_040},
+    "SENSEX":     {"oi_chg_pct": 3.0, "ltp_stable": 1.0, "ce_vol": 50_000,  "pe_vol": 50_000},
+    "BANKEX":     {"oi_chg_pct": 3.0, "ltp_stable": 1.0, "ce_vol": 50_000,  "pe_vol": 50_000},
 }
-# Underlying security IDs (NSE index) used for options chain
+# Underlying security IDs — NSE (IDX_I) + BSE (BSE_FNO)
 UNDERLYING_IDS = {
-    "NIFTY":      "13",
-    "BANKNIFTY":  "25",
-    "FINNIFTY":   "27",
-    "MIDCPNIFTY": "442",
+    "NIFTY": "13", "BANKNIFTY": "25", "FINNIFTY": "27", "MIDCPNIFTY": "442",
+    "SENSEX": "51", "BANKEX": "69",
 }
-# F&O lot sizes (shares per lot) — update when SEBI revises
+# Underlying segment per Dhan API — NSE index options IDX_I, BSE index options BSE_FNO
+UNDERLYING_SEG_MAP = {
+    "SENSEX": "BSE_FNO", "BANKEX": "BSE_FNO",
+}
+# F&O lot sizes — NSE + BSE (update when SEBI/BSE revises)
 LOT_SIZES = {
     "NIFTY": 25, "BANKNIFTY": 15, "FINNIFTY": 40, "MIDCPNIFTY": 75,
+    "SENSEX": 10, "BANKEX": 15,
 }
 
 # ─────────────────────────────────────────────
@@ -1420,7 +1426,7 @@ async def depth_poller_task():
 # Rate limit: 1 unique request per 3 seconds
 # ─────────────────────────────────────────────
 
-# UnderlyingSeg for index options — "IDX_I" per Dhan annexure
+# UnderlyingSeg for index options — IDX_I (NSE), BSE_FNO (BSE indices)
 UNDERLYING_SEG = "IDX_I"
 
 def _find_gex_flip(strikes: list, spot: float) -> Optional[float]:
@@ -1666,7 +1672,7 @@ async def _fetch_gex_once(index_name: str, underlying_scrip: str, expiry: str) -
                     },
                     json={
                         "UnderlyingScrip": int(underlying_scrip),  # must be int
-                        "UnderlyingSeg":   UNDERLYING_SEG,          # "IDX_I" for indices
+                        "UnderlyingSeg":   UNDERLYING_SEG_MAP.get(index_name, UNDERLYING_SEG),
                         "Expiry":          expiry,                  # "YYYY-MM-DD"
                     },
                 )
@@ -2330,9 +2336,9 @@ def get_heatmap(symbol: str, n: int = 300):
 
 
 def _resolve_index(symbol: str) -> Optional[str]:
-    """Return canonical index name. Check longer names first (BANKNIFTY before NIFTY)."""
+    """Return canonical index name. Check longer names first (BANKNIFTY before NIFTY, BANKEX before SENSEX)."""
     s = symbol.upper()
-    for idx_name in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTY"):
+    for idx_name in ("BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTY", "BANKEX", "SENSEX50", "SENSEX"):
         if idx_name in s:
             return idx_name
     return None
@@ -2345,6 +2351,7 @@ async def _fetch_expiry_list(index_name: str) -> list:
     uid = UNDERLYING_IDS.get(index_name, "")
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
+            seg = UNDERLYING_SEG_MAP.get(index_name, UNDERLYING_SEG)
             resp = await client.post(
                 f"{DHAN_API_BASE}/optionchain/expirylist",
                 headers={
@@ -2353,7 +2360,7 @@ async def _fetch_expiry_list(index_name: str) -> list:
                     "Content-Type": "application/json",
                     "Accept":       "application/json",
                 },
-                json={"UnderlyingScrip": int(uid), "UnderlyingSeg": UNDERLYING_SEG},
+                json={"UnderlyingScrip": int(uid), "UnderlyingSeg": seg},
             )
             if not resp.is_success:
                 logger.warning(f"Expiry list {resp.status_code} [{index_name}]: {resp.text[:200]}")
@@ -2666,9 +2673,11 @@ async def get_index_candles(index: str):
     from_date = f"{y} 09:15:00"
     to_date = f"{today} 15:30:00"
 
+    # NSE indices: IDX_I; BSE SENSEX/BANKEX: BSE_IDX
+    candle_seg = "BSE_IDX" if idx in UNDERLYING_SEG_MAP else "IDX_I"
     data = await fetch_intraday_ohlcv(
         security_id=security_id,
-        exchange_segment="IDX_I",
+        exchange_segment=candle_seg,
         instrument="INDEX",
         interval="1",
         from_date=from_date,

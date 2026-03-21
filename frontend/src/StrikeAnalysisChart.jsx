@@ -16,6 +16,9 @@ function resolveIdx(symbol) {
   if (s.includes("FINNIFTY")) return "FINNIFTY";
   if (s.includes("MIDCPNIFTY")) return "MIDCPNIFTY";
   if (s.includes("NIFTY")) return "NIFTY";
+  if (s.includes("BANKEX")) return "BANKEX";
+  if (s.includes("SENSEX50")) return "SENSEX50";  // before SENSEX
+  if (s.includes("SENSEX")) return "SENSEX";
   return s;
 }
 
@@ -83,7 +86,7 @@ export default function StrikeAnalysisChart({ symbol, apiBase, height = 420 }) {
   if (!symbol) {
     return (
       <div className="strike-analysis" style={{ padding: 24, textAlign: "center", color: "#64748b" }}>
-        Select NIFTY or BANKNIFTY to view strike analysis
+        Select NIFTY, BANKNIFTY, SENSEX or BANKEX to view strike analysis
       </div>
     );
   }
@@ -92,7 +95,7 @@ export default function StrikeAnalysisChart({ symbol, apiBase, height = 420 }) {
   if (!idx) {
     return (
       <div className="strike-analysis" style={{ padding: 24, textAlign: "center", color: "#64748b" }}>
-        Strike analysis available for NIFTY / BANKNIFTY only
+        Strike analysis available for NIFTY, BANKNIFTY, SENSEX, BANKEX only
       </div>
     );
   }
