@@ -128,10 +128,11 @@ UNDERLYING_IDS = {
     "NIFTY": "13", "BANKNIFTY": "25", "FINNIFTY": "27", "MIDCPNIFTY": "442",
     "SENSEX": "51", "BANKEX": "69",
 }
-# Underlying segment per Dhan API — NSE index options IDX_I, BSE index options BSE_FNO
+# Underlying segment per Dhan API — NSE indices IDX_I; BSE indices try BSE_FNO then IDX_I
 UNDERLYING_SEG_MAP = {
     "SENSEX": "BSE_FNO", "BANKEX": "BSE_FNO",
 }
+BSE_INDICES = frozenset(("SENSEX", "BANKEX"))
 # F&O lot sizes — NSE + BSE (update when SEBI/BSE revises)
 LOT_SIZES = {
     "NIFTY": 25, "BANKNIFTY": 15, "FINNIFTY": 40, "MIDCPNIFTY": 75,
@@ -1659,124 +1660,113 @@ async def _fetch_gex_once(index_name: str, underlying_scrip: str, expiry: str) -
 
     Returns True on success, False on rate-limit / error (caller backs off).
     """
+    segments_to_try = [UNDERLYING_SEG_MAP.get(index_name, UNDERLYING_SEG)]
+    if index_name in BSE_INDICES:
+        segments_to_try.append(UNDERLYING_SEG)  # fallback: IDX_I for BSE
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            for attempt in range(2):  # retry once on 429
-                resp = await client.post(
-                    f"{DHAN_API_BASE}/optionchain",
-                    headers={
-                        "access-token": DHAN_TOKEN_OPTIONS,
-                        "client-id":    DHAN_CLIENT_ID,
-                        "Content-Type": "application/json",
-                        "Accept":       "application/json",
-                    },
-                    json={
-                        "UnderlyingScrip": int(underlying_scrip),  # must be int
-                        "UnderlyingSeg":   UNDERLYING_SEG_MAP.get(index_name, UNDERLYING_SEG),
-                        "Expiry":          expiry,                  # "YYYY-MM-DD"
-                    },
-                )
-                if resp.status_code == 429:
-                    if attempt == 0:
-                        logger.warning(f"Options chain 429 [{index_name}] — retrying after 10s")
-                        await asyncio.sleep(10)
+            for seg in segments_to_try:
+                for attempt in range(2):  # retry once on 429
+                    resp = await client.post(
+                        f"{DHAN_API_BASE}/optionchain",
+                        headers={
+                            "access-token": DHAN_TOKEN_OPTIONS,
+                            "client-id":    DHAN_CLIENT_ID,
+                            "Content-Type": "application/json",
+                            "Accept":       "application/json",
+                        },
+                        json={
+                            "UnderlyingScrip": int(underlying_scrip),  # must be int
+                            "UnderlyingSeg":   seg,
+                            "Expiry":          expiry,                  # "YYYY-MM-DD"
+                        },
+                    )
+                    if resp.status_code == 429:
+                        if attempt == 0:
+                            logger.warning(f"Options chain 429 [{index_name}] — retrying after 10s")
+                            await asyncio.sleep(10)
+                            continue
+                        logger.warning(f"Options chain 429 [{index_name}] — rate limited, backing off")
+                        return False
+                    break
+                if not resp.is_success:
+                    logger.warning(
+                        f"Options chain {resp.status_code} [{index_name}] seg={seg} "
+                        f"expiry={expiry} | {resp.text[:300]}"
+                    )
+                    continue  # try next segment
+                data = resp.json()
+                if data.get("status") != "success":
+                    logger.warning(f"Options chain non-success [{index_name}] seg={seg}: {data}")
+                    continue
+                chain = data.get("data", {})
+                spot  = float(chain.get("last_price", 0) or 0)
+                if spot <= 0:
+                    logger.debug(f"GEX [{index_name}]: spot missing in response")
+                    continue
+                oc = chain.get("oc", {})
+                if not oc:
+                    logger.debug(f"GEX [{index_name}]: empty oc in response")
+                    continue
+                lot_size = LOT_SIZES.get(index_name, 25)
+                results  = []
+
+                for strike_str, sides in oc.items():
+                    try:
+                        strike = float(strike_str)
+                    except ValueError:
                         continue
-                    logger.warning(f"Options chain 429 [{index_name}] — rate limited, backing off")
-                    return False
-                break
-            if not resp.is_success:   # httpx attr (not requests' .ok)
-                logger.warning(
-                    f"Options chain {resp.status_code} [{index_name}] "
-                    f"expiry={expiry} | {resp.text[:300]}"
-                )
-                return False
-            data = resp.json()
-
-        if data.get("status") != "success":
-            logger.warning(f"Options chain non-success [{index_name}]: {data}")
-            return False
-
-        chain = data.get("data", {})
-        spot  = float(chain.get("last_price", 0) or 0)
-        if spot <= 0:
-            logger.debug(f"GEX [{index_name}]: spot missing in response")
-            return False
-
-        # data.oc is a dict: {"25650.000000": {"ce": {...}, "pe": {...}}, ...}
-        oc = chain.get("oc", {})
-        if not oc:
-            logger.debug(f"GEX [{index_name}]: empty oc in response")
-            return False
-
-        lot_size = LOT_SIZES.get(index_name, 25)
-        results  = []
-
-        for strike_str, sides in oc.items():
-            try:
-                strike = float(strike_str)
-            except ValueError:
-                continue
-
-            ce = sides.get("ce", {}) or {}
-            pe = sides.get("pe", {}) or {}
-
-            call_oi    = float(ce.get("oi", 0) or 0)
-            put_oi     = float(pe.get("oi", 0) or 0)
-            prev_call_oi = float(ce.get("previous_oi", 0) or 0)
-            prev_put_oi  = float(pe.get("previous_oi", 0) or 0)
-            # Dhan provides greeks directly — use them instead of Black-Scholes
-            ce_greeks = ce.get("greeks") or {}
-            pe_greeks = pe.get("greeks") or {}
-            call_gamma = float(ce_greeks.get("gamma", 0) or 0)
-            put_gamma  = float(pe_greeks.get("gamma", 0) or 0)
-            call_theta = float(ce_greeks.get("theta", 0) or 0)
-            put_theta  = float(pe_greeks.get("theta", 0) or 0)
-
-            # Dealer GEX: long calls (+γ), short puts (−γ)
-            # GEX = gamma × OI × lot_size × spot² / 100
-            call_gex = call_gamma * call_oi * lot_size * spot ** 2 / 100
-            put_gex  = put_gamma  * put_oi  * lot_size * spot ** 2 / 100
-            net_gex  = call_gex - put_gex
-
-            results.append({
-                "strike":   strike,
-                "call_oi":  call_oi,
-                "put_oi":   put_oi,
-                "previous_call_oi": prev_call_oi,
-                "previous_put_oi":  prev_put_oi,
-                "call_oi_change":  call_oi - prev_call_oi,
-                "put_oi_change":   put_oi - prev_put_oi,
-                "call_volume":     float(ce.get("volume", 0) or 0),
-                "put_volume":      float(pe.get("volume", 0) or 0),
-                "call_iv":  float(ce.get("implied_volatility", 0) or 0),
-                "put_iv":   float(pe.get("implied_volatility", 0) or 0),
-                "call_theta": call_theta,
-                "put_theta":  put_theta,
-                "call_gex": round(call_gex, 2),
-                "put_gex":  round(put_gex, 2),
-                "net_gex":  round(net_gex, 2),
-            })
-
-        # Also accumulate HFT scanner time-series (piggybacks the same API call)
-        _compute_hft_snapshot(index_name, spot, oc)
-
-        results.sort(key=lambda x: x["strike"])
-        flip = _find_gex_flip(results, spot)
-
-        cache_key = f"{index_name}:{expiry}"
-        gex_cache[cache_key] = {
-            "computed_at":    int(time.time() * 1000),
-            "index":          index_name,
-            "spot":           spot,
-            "expiry":         expiry,
-            "lot_size":       lot_size,
-            "strikes":        results,
-            "flip_point":     flip,
-            "total_call_gex": round(sum(r["call_gex"] for r in results), 2),
-            "total_put_gex":  round(sum(r["put_gex"]  for r in results), 2),
-        }
-        logger.info(f"GEX [{index_name}:{expiry}] updated: spot={spot}, strikes={len(results)}, flip={flip}")
-        return True
+                    ce = sides.get("ce", {}) or {}
+                    pe = sides.get("pe", {}) or {}
+                    call_oi = float(ce.get("oi", 0) or 0)
+                    put_oi = float(pe.get("oi", 0) or 0)
+                    prev_call_oi = float(ce.get("previous_oi", 0) or 0)
+                    prev_put_oi = float(pe.get("previous_oi", 0) or 0)
+                    ce_greeks = ce.get("greeks") or {}
+                    pe_greeks = pe.get("greeks") or {}
+                    call_gamma = float(ce_greeks.get("gamma", 0) or 0)
+                    put_gamma = float(pe_greeks.get("gamma", 0) or 0)
+                    call_theta = float(ce_greeks.get("theta", 0) or 0)
+                    put_theta = float(pe_greeks.get("theta", 0) or 0)
+                    call_gex = call_gamma * call_oi * lot_size * spot ** 2 / 100
+                    put_gex = put_gamma * put_oi * lot_size * spot ** 2 / 100
+                    net_gex = call_gex - put_gex
+                    results.append({
+                        "strike":   strike,
+                        "call_oi":  call_oi,
+                        "put_oi":   put_oi,
+                        "previous_call_oi": prev_call_oi,
+                        "previous_put_oi":  prev_put_oi,
+                        "call_oi_change":  call_oi - prev_call_oi,
+                        "put_oi_change":   put_oi - prev_put_oi,
+                        "call_volume":     float(ce.get("volume", 0) or 0),
+                        "put_volume":      float(pe.get("volume", 0) or 0),
+                        "call_iv":  float(ce.get("implied_volatility", 0) or 0),
+                        "put_iv":   float(pe.get("implied_volatility", 0) or 0),
+                        "call_theta": call_theta,
+                        "put_theta":  put_theta,
+                        "call_gex": round(call_gex, 2),
+                        "put_gex":  round(put_gex, 2),
+                        "net_gex":  round(net_gex, 2),
+                    })
+                _compute_hft_snapshot(index_name, spot, oc)
+                results.sort(key=lambda x: x["strike"])
+                flip = _find_gex_flip(results, spot)
+                cache_key = f"{index_name}:{expiry}"
+                gex_cache[cache_key] = {
+                    "computed_at":    int(time.time() * 1000),
+                    "index":          index_name,
+                    "spot":           spot,
+                    "expiry":         expiry,
+                    "lot_size":       lot_size,
+                    "strikes":        results,
+                    "flip_point":     flip,
+                    "total_call_gex": round(sum(r["call_gex"] for r in results), 2),
+                    "total_put_gex":  round(sum(r["put_gex"]  for r in results), 2),
+                }
+                logger.info(f"GEX [{index_name}:{expiry}] seg={seg} updated: spot={spot}, strikes={len(results)}, flip={flip}")
+                return True
+        return False
 
     except Exception as e:
         logger.warning(f"Options poll error [{index_name}]: {e}")
@@ -2349,30 +2339,37 @@ async def _fetch_expiry_list(index_name: str) -> list:
     if not DHAN_TOKEN_OPTIONS:
         return []
     uid = UNDERLYING_IDS.get(index_name, "")
+    if not uid:
+        return []
+    segments_to_try = [UNDERLYING_SEG_MAP.get(index_name, UNDERLYING_SEG)]
+    if index_name in BSE_INDICES:
+        segments_to_try.append(UNDERLYING_SEG)  # fallback: try IDX_I for BSE
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            seg = UNDERLYING_SEG_MAP.get(index_name, UNDERLYING_SEG)
-            resp = await client.post(
-                f"{DHAN_API_BASE}/optionchain/expirylist",
-                headers={
-                    "access-token": DHAN_TOKEN_OPTIONS,
-                    "client-id":    DHAN_CLIENT_ID,
-                    "Content-Type": "application/json",
-                    "Accept":       "application/json",
-                },
-                json={"UnderlyingScrip": int(uid), "UnderlyingSeg": seg},
-            )
-            if not resp.is_success:
-                logger.warning(f"Expiry list {resp.status_code} [{index_name}]: {resp.text[:200]}")
-                return []
-            data = resp.json()
-        expiries = data.get("data", [])
-        if expiries:
-            expiry_list_cache[index_name] = expiries
-            logger.info(f"Expiry list [{index_name}]: {len(expiries)} dates")
-        return expiries
+            for seg in segments_to_try:
+                resp = await client.post(
+                    f"{DHAN_API_BASE}/optionchain/expirylist",
+                    headers={
+                        "access-token": DHAN_TOKEN_OPTIONS,
+                        "client-id":    DHAN_CLIENT_ID,
+                        "Content-Type": "application/json",
+                        "Accept":       "application/json",
+                    },
+                    json={"UnderlyingScrip": int(uid), "UnderlyingSeg": seg},
+                )
+                if resp.is_success:
+                    data = resp.json()
+                    expiries = data.get("data", [])
+                    if expiries:
+                        expiry_list_cache[index_name] = expiries
+                        logger.info(f"Expiry list [{index_name}] seg={seg}: {len(expiries)} dates")
+                        return expiries
+                logger.warning(
+                    f"Expiry list {resp.status_code} [{index_name}] seg={seg} uid={uid}: {resp.text[:400]}"
+                )
+            return []
     except Exception as e:
-        logger.warning(f"Expiry list error [{index_name}]: {e}")
+        logger.warning(f"Expiry list error [{index_name}]: {e}", exc_info=True)
         return []
 
 
@@ -2673,16 +2670,20 @@ async def get_index_candles(index: str):
     from_date = f"{y} 09:15:00"
     to_date = f"{today} 15:30:00"
 
-    # NSE indices: IDX_I; BSE SENSEX/BANKEX: BSE_IDX
-    candle_seg = "BSE_IDX" if idx in UNDERLYING_SEG_MAP else "IDX_I"
-    data = await fetch_intraday_ohlcv(
-        security_id=security_id,
-        exchange_segment=candle_seg,
-        instrument="INDEX",
-        interval="1",
-        from_date=from_date,
-        to_date=to_date,
-    )
+    # NSE: IDX_I. BSE: try BSE_IDX then IDX_I
+    segments = ["BSE_IDX", "IDX_I"] if idx in BSE_INDICES else ["IDX_I"]
+    data = None
+    for candle_seg in segments:
+        data = await fetch_intraday_ohlcv(
+            security_id=security_id,
+            exchange_segment=candle_seg,
+            instrument="INDEX",
+            interval="1",
+            from_date=from_date,
+            to_date=to_date,
+        )
+        if data:
+            break
     if not data:
         return JSONResponse(
             {"error": "Could not fetch index candles — check DHAN_TOKEN_OPTIONS"},

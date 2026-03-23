@@ -20,7 +20,10 @@ DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "")
 # Nifty futures security ID for historical (check Dhan instruments for exact ID)
 # 13 = NIFTY underlying for options; for FUTIDX we may need a different ID
 NIFTY_FUTIDX_SECURITY_ID = "13"  # Placeholder; verify from Dhan instruments
-UNDERLYING_IDS = {"NIFTY": "13", "BANKNIFTY": "25", "FINNIFTY": "27", "MIDCPNIFTY": "442"}
+UNDERLYING_IDS = {
+    "NIFTY": "13", "BANKNIFTY": "25", "FINNIFTY": "27", "MIDCPNIFTY": "442",
+    "SENSEX": "51", "BANKEX": "69",
+}
 
 
 async def fetch_historical_ohlcv(
@@ -200,35 +203,42 @@ async def fetch_intraday_ohlcv(
         return None
 
 
+BSE_INDICES = frozenset(("SENSEX", "BANKEX"))
+
+
 async def fetch_index_ltp(index_name: str) -> Optional[float]:
     """Fetch live index LTP from Dhan marketfeed/ltp.
-    Uses IDX_I segment. Rate limit: 1 req/sec. Returns last_price or None."""
+    NSE indices: IDX_I. BSE: try BSE_IDX then IDX_I. Rate limit: 1 req/sec."""
     if not DHAN_TOKEN_OPTIONS or not DHAN_CLIENT_ID:
         return None
     security_id = UNDERLYING_IDS.get(index_name)
     if not security_id:
         return None
+    segments = ["BSE_IDX", "IDX_I"] if index_name in BSE_INDICES else ["IDX_I"]
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"{DHAN_API_BASE}/marketfeed/ltp",
-                headers={
-                    "access-token": DHAN_TOKEN_OPTIONS,
-                    "client-id": DHAN_CLIENT_ID,
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
-                json={"IDX_I": [int(security_id)]},
-            )
-            if not resp.is_success:
-                return None
-            data = resp.json()
-            seg = data.get("data", {}).get("IDX_I", {})
-            item = seg.get(security_id, seg.get(str(security_id), {}))
-            lp = item.get("last_price")
-            return float(lp) if lp is not None else None
+            for seg_key in segments:
+                resp = await client.post(
+                    f"{DHAN_API_BASE}/marketfeed/ltp",
+                    headers={
+                        "access-token": DHAN_TOKEN_OPTIONS,
+                        "client-id": DHAN_CLIENT_ID,
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                    json={seg_key: [int(security_id)]},
+                )
+                if not resp.is_success:
+                    continue
+                data = resp.json()
+                seg = data.get("data", {}).get(seg_key, {})
+                item = seg.get(security_id, seg.get(str(security_id), {}))
+                lp = item.get("last_price")
+                if lp is not None:
+                    return float(lp)
     except Exception:
-        return None
+        pass
+    return None
 
 
 def chunk_date_range(from_date: date, to_date: date, chunk_days: int = 30) -> List[tuple]:
