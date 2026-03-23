@@ -15,10 +15,10 @@ import { useMemo, useRef, useEffect, useCallback, useState } from "react";
 
 /* ─── palette ─── */
 const C = {
-  bg:       "#f9fafc",
+  bg:       "#F8F9FA",
   bgPanel:  "#f4f5f8",
-  grid:     "#eaecf2",
-  gridTick: "#d8dce8",
+  grid:     "#E8EAED",
+  gridTick: "#E0E0E0",
   border:   "#dde1ea",
   buy:      "#00695c",   // Teal 700 – imbalance highlight (~5.9:1 on white)
   buyMid:   "#00897b",   // Teal 600 – regular volume  (~4.2:1 on white)
@@ -39,12 +39,12 @@ const C = {
   axisText:    "#1e293b",
   axisMuted:   "#475569",
   axisTick:    "#64748b",
-  botStripBg:  "#f1f5f9",
+  botStripBg:  "#F8F9FA",
   botRowLine:  "#cbd5e1",
   botVol:      "#475569",
-  botArrowUp:  "#047857",
-  botArrowDn:  "#b91c1c",
-  curBg:    "rgba(155,125,255,0.07)",
+  botArrowUp:  "#148F77",
+  botArrowDn:  "#C0392B",
+  curBg:    "#F4F4FB",
   daySep:   "rgba(71, 85, 105, 0.75)",  // IST session boundary (between calendar days)
 };
 
@@ -116,21 +116,21 @@ function lerpHex(hexA, hexB, t) {
   const bVal = Math.round(ab + (bb - ab) * t);
   return `rgb(${r},${g},${bVal})`;
 }
-/** Sell: pale peach → dusty coral → deep maroon (ref: #FADBD8, #D98880, #7B1113). */
+/** Sell: light salmon → coral (#F1948A) → dark red (#C0392B). */
 function gradedSellColor(ratio, isPOC) {
   if (isPOC) return "#000000";
   if (ratio <= 0) return "#FADBD8";
   const t = Math.min(1, ratio);
-  if (t < 0.5) return lerpHex("FADBD8", "D98880", t * 2);
-  return lerpHex("D98880", "7B1113", (t - 0.5) * 2);
+  if (t < 0.5) return lerpHex("FADBD8", "F1948A", t * 2);
+  return lerpHex("F1948A", "C0392B", (t - 0.5) * 2);
 }
-/** Buy: pale mint → seafoam → dark forest teal (ref: #E0F2F1, #4DB6AC, #004D40). */
+/** Buy: light teal → seafoam (#76D7C4) → dark teal (#148F77). */
 function gradedBuyColor(ratio, isPOC) {
   if (isPOC) return "#000000";
-  if (ratio <= 0) return "#E0F2F1";
+  if (ratio <= 0) return "#D1F2EB";
   const t = Math.min(1, ratio);
-  if (t < 0.5) return lerpHex("E0F2F1", "4DB6AC", t * 2);
-  return lerpHex("4DB6AC", "004D40", (t - 0.5) * 2);
+  if (t < 0.5) return lerpHex("D1F2EB", "76D7C4", t * 2);
+  return lerpHex("76D7C4", "148F77", (t - 0.5) * 2);
 }
 /** Normalize to ms (backend may send seconds). */
 const toMs = t => (t != null && t < 1e12 ? t * 1000 : t);
