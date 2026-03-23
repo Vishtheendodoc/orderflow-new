@@ -1264,6 +1264,7 @@ export default function App() {
                         { key: "showIFID",  label: "IFI + Depth", defaultVal: false },
                         { key: "showContextEvents", label: "Context Events (Reversal / Rally)", defaultVal: false },
                         { key: "filterByVolume",    label: "Filter arrows by volume/delta", defaultVal: false },
+                        { key: "showGradedPrints", label: "Graded footprint prints (volume color)", defaultVal: false },
                       ].map(({ key, label, defaultVal }) => (
                         <label key={key} className="feat-row">
                           <input
