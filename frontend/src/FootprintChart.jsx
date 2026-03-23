@@ -116,21 +116,23 @@ function lerpHex(hexA, hexB, t) {
   const bVal = Math.round(ab + (bb - ab) * t);
   return `rgb(${r},${g},${bVal})`;
 }
-/** Sell: light salmon → coral (#F1948A) → dark red (#C0392B). */
+/** Sell: light pink → pink → red → dark red. */
 function gradedSellColor(ratio, isPOC) {
   if (isPOC) return "#000000";
-  if (ratio <= 0) return "#FADBD8";
+  if (ratio <= 0) return "#FFE4E8";
   const t = Math.min(1, ratio);
-  if (t < 0.5) return lerpHex("FADBD8", "F1948A", t * 2);
-  return lerpHex("F1948A", "C0392B", (t - 0.5) * 2);
+  if (t < 0.33) return lerpHex("FFE4E8", "FFB3BA", t * 3);
+  if (t < 0.66) return lerpHex("FFB3BA", "E63946", (t - 0.33) * 3);
+  return lerpHex("E63946", "991B1B", (t - 0.66) * 3);
 }
-/** Buy: light teal → seafoam (#76D7C4) → dark teal (#148F77). */
+/** Buy: light green → green → dark green. */
 function gradedBuyColor(ratio, isPOC) {
   if (isPOC) return "#000000";
-  if (ratio <= 0) return "#D1F2EB";
+  if (ratio <= 0) return "#E8F5E9";
   const t = Math.min(1, ratio);
-  if (t < 0.5) return lerpHex("D1F2EB", "76D7C4", t * 2);
-  return lerpHex("76D7C4", "148F77", (t - 0.5) * 2);
+  if (t < 0.33) return lerpHex("E8F5E9", "81C784", t * 3);
+  if (t < 0.66) return lerpHex("81C784", "2E7D32", (t - 0.33) * 3);
+  return lerpHex("2E7D32", "1B5E20", (t - 0.66) * 3);
 }
 /** Normalize to ms (backend may send seconds). */
 const toMs = t => (t != null && t < 1e12 ? t * 1000 : t);
