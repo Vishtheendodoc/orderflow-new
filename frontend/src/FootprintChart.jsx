@@ -103,25 +103,34 @@ const fmtP  = v => {
   return Number.isInteger(n) ? String(n) : n.toFixed(2);
 };
 const sgn   = v => v >= 0 ? "+" : "";
-/** Graded color for sell: light pastel pink → medium red → deep maroon. POC = solid black. */
+/** Lerp between hex colors. a and b are "RRGGBB" strings, t is 0–1. */
+function lerpHex(hexA, hexB, t) {
+  const ar = parseInt(hexA.slice(0, 2), 16);
+  const ag = parseInt(hexA.slice(2, 4), 16);
+  const ab = parseInt(hexA.slice(4, 6), 16);
+  const br = parseInt(hexB.slice(0, 2), 16);
+  const bg = parseInt(hexB.slice(2, 4), 16);
+  const bb = parseInt(hexB.slice(4, 6), 16);
+  const r = Math.round(ar + (br - ar) * t);
+  const g = Math.round(ag + (bg - ag) * t);
+  const bVal = Math.round(ab + (bb - ab) * t);
+  return `rgb(${r},${g},${bVal})`;
+}
+/** Sell: pale peach → dusty coral → deep maroon (ref: #FADBD8, #D98880, #7B1113). */
 function gradedSellColor(ratio, isPOC) {
   if (isPOC) return "#000000";
-  if (ratio <= 0) return "#ffd6d6";  // light pastel pink
+  if (ratio <= 0) return "#FADBD8";
   const t = Math.min(1, ratio);
-  const r = Math.floor(255 - t * 155);
-  const g = Math.floor(218 - t * 218);
-  const b = Math.floor(218 - t * 218);
-  return `rgb(${r},${g},${b})`;
+  if (t < 0.5) return lerpHex("FADBD8", "D98880", t * 2);
+  return lerpHex("D98880", "7B1113", (t - 0.5) * 2);
 }
-/** Graded color for buy: light mint → medium teal → dark forest green. POC = solid black. */
+/** Buy: pale mint → seafoam → dark forest teal (ref: #E0F2F1, #4DB6AC, #004D40). */
 function gradedBuyColor(ratio, isPOC) {
   if (isPOC) return "#000000";
-  if (ratio <= 0) return "#dcfff0";  // light mint / pale aqua
+  if (ratio <= 0) return "#E0F2F1";
   const t = Math.min(1, ratio);
-  const r = Math.floor(220 - t * 220);
-  const g = Math.floor(255 - t * 165);
-  const b = Math.floor(240 - t * 170);
-  return `rgb(${r},${g},${b})`;
+  if (t < 0.5) return lerpHex("E0F2F1", "4DB6AC", t * 2);
+  return lerpHex("4DB6AC", "004D40", (t - 0.5) * 2);
 }
 /** Normalize to ms (backend may send seconds). */
 const toMs = t => (t != null && t < 1e12 ? t * 1000 : t);
