@@ -208,13 +208,13 @@ BSE_INDICES = frozenset(("SENSEX", "BANKEX"))
 
 async def fetch_index_ltp(index_name: str) -> Optional[float]:
     """Fetch live index LTP from Dhan marketfeed/ltp.
-    NSE indices: IDX_I. BSE: try BSE_IDX then IDX_I. Rate limit: 1 req/sec."""
+    NSE + BSE indices: Dhan uses IDX_I for both. Rate limit: 1 req/sec."""
     if not DHAN_TOKEN_OPTIONS or not DHAN_CLIENT_ID:
         return None
     security_id = UNDERLYING_IDS.get(index_name)
     if not security_id:
         return None
-    segments = ["BSE_IDX", "IDX_I"] if index_name in BSE_INDICES else ["IDX_I"]
+    segments = ["IDX_I"]
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             for seg_key in segments:

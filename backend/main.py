@@ -811,58 +811,98 @@ async def build_full_state(symbol: str, engine) -> dict:
             by_time[ot] = ct
 
     # 4. Dhan intraday fallback when we have insufficient candles (e.g. after refresh, market open)
-    # Skip for index (IDX_I) — index uses live feed + disk only, no Dhan history API
     if len(by_time) < DHAN_INTRADAY_FALLBACK_MIN:
         info = subscribed_symbols.get(symbol, {})
         exchange_segment = info.get("exchange_segment", "NSE_FNO")
-        if exchange_segment in ("IDX_I", "BSE_IDX"):
-            pass  # index: live feed + disk only
-        else:
-            security_id = info.get("security_id") or getattr(engine, "security_id", None)
-            if security_id:
-                today = _ist_date_str()
-                from_date = f"{today} 09:15:00"
-                to_date = f"{today} 15:30:00"
-                sym_upper = symbol.upper()
-                if "MCX" in exchange_segment or exchange_segment == "MCX_COMM":
-                    instrument = "FUTCOM"
-                    from_date = f"{today} 09:00:00"
-                    to_date = f"{today} 23:55:00"
-                else:
-                    instrument = "FUTIDX" if any(k in sym_upper for k in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")) else "FUTSTK"
-                data = await fetch_intraday_ohlcv(
-                    security_id=str(security_id),
-                    exchange_segment=exchange_segment,
-                    instrument=instrument,
-                    interval="1",
-                    from_date=from_date,
-                    to_date=to_date,
-                )
-                if data:
-                    IST_OFFSET_SEC = 19800  # UTC+5:30 — chart expects IST-epoch
-                    opens = data.get("open", [])
-                    highs = data.get("high", [])
-                    lows = data.get("low", [])
-                    closes = data.get("close", [])
-                    volumes = data.get("volume", [])
-                    timestamps = data.get("timestamp", [])
-                    for i in range(min(len(opens), len(closes), len(timestamps))):
-                        ts = timestamps[i]
-                        unix_sec = ts / 1000 if ts >= 1e12 else ts
-                        open_time = int((unix_sec + IST_OFFSET_SEC) * 1000)
-                        if open_time >= hist_start and open_time not in by_time:
-                            by_time[open_time] = {
-                                "open_time": open_time,
-                                "open": float(opens[i]) if i < len(opens) else 0,
-                                "high": float(highs[i]) if i < len(highs) else 0,
-                                "low": float(lows[i]) if i < len(lows) else 0,
-                                "close": float(closes[i]) if i < len(closes) else 0,
-                                "volume": int(volumes[i]) if i < len(volumes) else 0,
-                                "closed": True,
-                                "delta": 0,
-                                "buy_vol": 0,
-                                "sell_vol": 0,
-                            }
+        security_id = info.get("security_id") or getattr(engine, "security_id", None)
+
+        if symbol in BSE_INDICES and security_id:
+            # BSE indices (SENSEX, BANKEX): fetch from intraday API (Dhan uses IDX_I for BSE)
+            today = datetime.now(IST).date()
+            y = today - timedelta(days=1)
+            while y.weekday() >= 5:
+                y -= timedelta(days=1)
+            from_date = f"{y} 09:15:00"
+            to_date = f"{today} 15:30:00"
+            data = await fetch_intraday_ohlcv(
+                security_id=str(security_id),
+                exchange_segment="IDX_I",
+                instrument="INDEX",
+                interval="1",
+                from_date=from_date,
+                to_date=to_date,
+            )
+            if data:
+                IST_OFFSET_SEC = 19800
+                opens = data.get("open", [])
+                highs = data.get("high", [])
+                lows = data.get("low", [])
+                closes = data.get("close", [])
+                volumes = data.get("volume", [])
+                timestamps = data.get("timestamp", [])
+                for i in range(min(len(opens), len(closes), len(timestamps))):
+                    ts = timestamps[i]
+                    unix_sec = ts / 1000 if ts >= 1e12 else ts
+                    open_time = int((unix_sec + IST_OFFSET_SEC) * 1000)
+                    if open_time >= hist_start and open_time not in by_time:
+                        by_time[open_time] = {
+                            "open_time": open_time,
+                            "open": float(opens[i]) if i < len(opens) else 0,
+                            "high": float(highs[i]) if i < len(highs) else 0,
+                            "low": float(lows[i]) if i < len(lows) else 0,
+                            "close": float(closes[i]) if i < len(closes) else 0,
+                            "volume": int(volumes[i]) if i < len(volumes) else 0,
+                            "closed": True,
+                            "delta": 0,
+                            "buy_vol": 0,
+                            "sell_vol": 0,
+                        }
+        elif exchange_segment in ("IDX_I", "BSE_IDX"):
+            pass  # NSE indices: live feed + disk only
+        elif security_id:
+            today = _ist_date_str()
+            from_date = f"{today} 09:15:00"
+            to_date = f"{today} 15:30:00"
+            sym_upper = symbol.upper()
+            if "MCX" in exchange_segment or exchange_segment == "MCX_COMM":
+                instrument = "FUTCOM"
+                from_date = f"{today} 09:00:00"
+                to_date = f"{today} 23:55:00"
+            else:
+                instrument = "FUTIDX" if any(k in sym_upper for k in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")) else "FUTSTK"
+            data = await fetch_intraday_ohlcv(
+                security_id=str(security_id),
+                exchange_segment=exchange_segment,
+                instrument=instrument,
+                interval="1",
+                from_date=from_date,
+                to_date=to_date,
+            )
+            if data:
+                IST_OFFSET_SEC = 19800  # UTC+5:30 — chart expects IST-epoch
+                opens = data.get("open", [])
+                highs = data.get("high", [])
+                lows = data.get("low", [])
+                closes = data.get("close", [])
+                volumes = data.get("volume", [])
+                timestamps = data.get("timestamp", [])
+                for i in range(min(len(opens), len(closes), len(timestamps))):
+                    ts = timestamps[i]
+                    unix_sec = ts / 1000 if ts >= 1e12 else ts
+                    open_time = int((unix_sec + IST_OFFSET_SEC) * 1000)
+                    if open_time >= hist_start and open_time not in by_time:
+                        by_time[open_time] = {
+                            "open_time": open_time,
+                            "open": float(opens[i]) if i < len(opens) else 0,
+                            "high": float(highs[i]) if i < len(highs) else 0,
+                            "low": float(lows[i]) if i < len(lows) else 0,
+                            "close": float(closes[i]) if i < len(closes) else 0,
+                            "volume": int(volumes[i]) if i < len(volumes) else 0,
+                            "closed": True,
+                            "delta": 0,
+                            "buy_vol": 0,
+                            "sell_vol": 0,
+                        }
 
     candle_dicts = sorted(by_time.values(), key=lambda x: x["open_time"])
 
@@ -2670,8 +2710,8 @@ async def get_index_candles(index: str):
     from_date = f"{y} 09:15:00"
     to_date = f"{today} 15:30:00"
 
-    # NSE: IDX_I. BSE: try BSE_IDX then IDX_I
-    segments = ["BSE_IDX", "IDX_I"] if idx in BSE_INDICES else ["IDX_I"]
+    # NSE + BSE indices: Dhan uses IDX_I for both
+    segments = ["IDX_I"]
     data = None
     for candle_seg in segments:
         data = await fetch_intraday_ohlcv(
@@ -3424,10 +3464,9 @@ async def startup():
             logger.error(f"Auto-subscribe failed: {e}")
 
     def _init_index_subscriptions():
-        """Subscribe to index live feed: IDX_I (NSE), BSE_IDX (BSE SENSEX/BANKEX)."""
-        BSE_INDICES = ("SENSEX", "BANKEX")
+        """Subscribe to index live feed: IDX_I for NSE + BSE indices (Dhan uses IDX_I for both)."""
         for symbol, security_id in INDEX_LIVE_SYMBOLS:
-            seg = "BSE_IDX" if symbol in BSE_INDICES else "IDX_I"
+            seg = "IDX_I"
             subscribed_symbols[symbol] = {"security_id": security_id, "exchange_segment": seg}
             if symbol not in engines:
                 engines[symbol] = OrderFlowEngine(symbol, security_id)
