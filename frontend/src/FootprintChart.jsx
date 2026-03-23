@@ -103,6 +103,28 @@ const fmtP  = v => {
   return Number.isInteger(n) ? String(n) : n.toFixed(2);
 };
 const sgn   = v => v >= 0 ? "+" : "";
+/** Graded color for sell volume: light pink → dark red → black (POC). ratio 0–1, isPOC for black. */
+function gradedSellColor(ratio, isPOC) {
+  if (isPOC) return "#1a0a0a";
+  if (ratio <= 0) return "rgba(255,220,220,0.45)";
+  const r = Math.min(1, ratio);
+  const r1 = Math.floor(255 - r * 120);
+  const g1 = Math.floor(220 - r * 220);
+  const b1 = Math.floor(220 - r * 220);
+  const a = 0.45 + r * 0.5;
+  return `rgba(${r1},${g1},${b1},${a})`;
+}
+/** Graded color for buy volume: light mint → dark green → black (POC). ratio 0–1, isPOC for black. */
+function gradedBuyColor(ratio, isPOC) {
+  if (isPOC) return "#0a1a0a";
+  if (ratio <= 0) return "rgba(220,255,220,0.45)";
+  const r = Math.min(1, ratio);
+  const g1 = Math.floor(255 - r * 135);
+  const r1 = Math.floor(220 - r * 220);
+  const b1 = Math.floor(220 - r * 220);
+  const a = 0.45 + r * 0.5;
+  return `rgba(${r1},${g1},${b1},${a})`;
+}
 /** Normalize to ms (backend may send seconds). */
 const toMs = t => (t != null && t < 1e12 ? t * 1000 : t);
 
@@ -723,32 +745,32 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     ctx.textBaseline = "middle";
 
     if (!overviewMode) {
-      for (let i = 0; i < bs.length; i++) {
-        const b = bs[i];
-        const x = i * slotW - pan;
+    for (let i = 0; i < bs.length; i++) {
+      const b = bs[i];
+      const x = i * slotW - pan;
         if (x + cw + nzwLayout < 0 || x > W) continue;
 
-        /* current candle tint */
-        if (i === bs.length - 1) {
-          ctx.fillStyle = C.curBg;
-          ctx.fillRect(x, 0, slotW - GAP, H);
+      /* current candle tint */
+      if (i === bs.length - 1) {
+        ctx.fillStyle = C.curBg;
+        ctx.fillRect(x, 0, slotW - GAP, H);
+      }
+
+      ctx.save();
+      const cx0 = x + nzHalf;
+      ctx.beginPath(); ctx.rect(cx0, 0, cw, H); ctx.clip();
+
+      for (const lv of getDisplayLevels(b.levels)) {
+        const ly   = p2y(lv.price, H);
+        const rowY = ly - LEVEL_H / 2;
+        if (rowY > H || rowY + LEVEL_H < 0) continue;
+
+        if (showLinesRef.current) {
+          if (lv.highBuy) buyLinePrices.add(lv.price);
+          if (lv.highSell) sellLinePrices.add(lv.price);
         }
-
-        ctx.save();
-        const cx0 = x + nzHalf;
-        ctx.beginPath(); ctx.rect(cx0, 0, cw, H); ctx.clip();
-
-        for (const lv of getDisplayLevels(b.levels)) {
-          const ly   = p2y(lv.price, H);
-          const rowY = ly - LEVEL_H / 2;
-          if (rowY > H || rowY + LEVEL_H < 0) continue;
-
-          if (showLinesRef.current) {
-            if (lv.highBuy) buyLinePrices.add(lv.price);
-            if (lv.highSell) sellLinePrices.add(lv.price);
-          }
-        }
-        ctx.restore();
+      }
+      ctx.restore();
       }
     } else {
       const i = bs.length - 1;
@@ -836,35 +858,43 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
     /* ── PASS 4: bid/ask prints (hidden in day overview) ── */
     if (!overviewMode) {
-      ctx.textBaseline = "middle";
-      const numPad = 2; // gap between number text and candle edge
+    ctx.textBaseline = "middle";
+    const numPad = 2; // gap between number text and candle edge
 
-      for (let i = 0; i < bs.length; i++) {
-        const b  = bs[i];
-        const x  = i * slotW - pan;
-        const cx = x + nzHalf;
-        if (x + slotW < 0 || x > W) continue;
+    for (let i = 0; i < bs.length; i++) {
+      const b  = bs[i];
+      const x  = i * slotW - pan;
+      const cx = x + nzHalf;
+      if (x + slotW < 0 || x > W) continue;
 
-        ctx.save();
-        // clip to full slot (sell zone + candle + buy zone)
-        ctx.beginPath(); ctx.rect(x, 0, slotW - GAP, H); ctx.clip();
+      const dispLevels = getDisplayLevels(b.levels);
+      let maxSell = 1, maxBuy = 1, pocSellPrice = null, pocBuyPrice = null;
+      for (const lv of dispLevels) {
+        const sv = lv.sell_vol || 0;
+        const bv = lv.buy_vol || 0;
+        if (sv > maxSell) { maxSell = sv; pocSellPrice = lv.price; }
+        if (bv > maxBuy) { maxBuy = bv; pocBuyPrice = lv.price; }
+      }
 
-        for (const lv of getDisplayLevels(b.levels)) {
-          const ly = p2y(lv.price, H);
-          if (ly < -2 || ly > H + 2) continue;
+      ctx.save();
+      ctx.beginPath(); ctx.rect(x, 0, slotW - GAP, H); ctx.clip();
+
+      for (const lv of dispLevels) {
+        const ly = p2y(lv.price, H);
+        if (ly < -2 || ly > H + 2) continue;
 
           let sellTxt = isMobile ? fmtVCompact(lv.sell_vol || 0) : fmtV(lv.sell_vol || 0);
           let buyTxt  = isMobile ? fmtVCompact(lv.buy_vol  || 0) : fmtV(lv.buy_vol  || 0);
 
-          // auto-scale font to fit within nzHalf
-          let fontSize = FONT_SZ;
-          ctx.font = `600 ${fontSize}px ${MONO}`;
-          const maxW = nzHalf - numPad;
+        // auto-scale font to fit within nzHalf
+        let fontSize = FONT_SZ;
+        ctx.font = `600 ${fontSize}px ${MONO}`;
+        const maxW = nzHalf - numPad;
           let sw = ctx.measureText(sellTxt).width;
           let bw = ctx.measureText(buyTxt).width;
-          if (Math.max(sw, bw) > maxW && fontSize > 7) {
-            fontSize = Math.max(7, Math.floor(maxW / Math.max(sw, bw) * fontSize));
-            ctx.font = `600 ${fontSize}px ${MONO}`;
+        if (Math.max(sw, bw) > maxW && fontSize > 7) {
+          fontSize = Math.max(7, Math.floor(maxW / Math.max(sw, bw) * fontSize));
+          ctx.font = `600 ${fontSize}px ${MONO}`;
             sw = ctx.measureText(sellTxt).width;
             bw = ctx.measureText(buyTxt).width;
           }
@@ -882,30 +912,43 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
               sw = ctx.measureText(sellTxt).width;
               bw = ctx.measureText(buyTxt).width;
             }
-          }
-
-          const isImb  = lv.highBuy || lv.highSell;
-          const boxH   = fontSize + 2;
-
-          // sell: right-aligned, flush against left edge of candle body
-          ctx.fillStyle = lv.highSell ? C.sell : C.sellMid;
-          ctx.textAlign = "right";
-          ctx.fillText(sellTxt, cx - numPad, ly);
-
-          // buy: left-aligned, flush against right edge of candle body
-          ctx.fillStyle = lv.highBuy ? C.buy : C.buyMid;
-          ctx.textAlign = "left";
-          ctx.fillText(buyTxt, cx + cw + numPad, ly);
-
-          if (isImb) {
-            const sellDrawX = cx - numPad - ctx.measureText(sellTxt).width;
-            const buyDrawX  = cx + cw + numPad + ctx.measureText(buyTxt).width;
-            ctx.strokeStyle = lv.highBuy ? C.buy : C.sell;
-            ctx.lineWidth = 1;
-            ctx.strokeRect(sellDrawX - 1, ly - boxH / 2, buyDrawX - sellDrawX + 2, boxH);
-          }
         }
-        ctx.restore();
+
+        const isImb  = lv.highBuy || lv.highSell;
+        const boxH   = fontSize + 2;
+        const rowT   = ly - boxH / 2;
+
+        const sellRatio = maxSell > 0 ? (lv.sell_vol || 0) / maxSell : 0;
+        const buyRatio  = maxBuy > 0 ? (lv.buy_vol || 0) / maxBuy : 0;
+        const isPocSell = pocSellPrice != null && lv.price === pocSellPrice && (lv.sell_vol || 0) > 0;
+        const isPocBuy  = pocBuyPrice != null && lv.price === pocBuyPrice && (lv.buy_vol || 0) > 0;
+
+        /* Graded background: sell cell (left) */
+        ctx.fillStyle = gradedSellColor(sellRatio, isPocSell);
+        ctx.fillRect(x, rowT, nzHalf, boxH);
+
+        /* Graded background: buy cell (right) */
+        ctx.fillStyle = gradedBuyColor(buyRatio, isPocBuy);
+        ctx.fillRect(cx + cw, rowT, nzHalf, boxH);
+
+        /* Text: light on dark (POC/high ratio), dark on light */
+        ctx.textAlign = "right";
+        ctx.fillStyle = (sellRatio > 0.5 || isPocSell) ? "#f8fafc" : C.textDark;
+        ctx.fillText(sellTxt, cx - numPad, ly);
+
+        ctx.textAlign = "left";
+        ctx.fillStyle = (buyRatio > 0.5 || isPocBuy) ? "#f8fafc" : C.textDark;
+        ctx.fillText(buyTxt, cx + cw + numPad, ly);
+
+        if (isImb) {
+          const sellDrawX = cx - numPad - ctx.measureText(sellTxt).width;
+          const buyDrawX  = cx + cw + numPad + ctx.measureText(buyTxt).width;
+          ctx.strokeStyle = lv.highBuy ? C.buy : C.sell;
+          ctx.lineWidth = 1;
+          ctx.strokeRect(sellDrawX - 1, rowT, buyDrawX - sellDrawX + 2, boxH);
+        }
+      }
+      ctx.restore();
       }
     }
 
@@ -973,10 +1016,10 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       }
       ctx.stroke();
       if (cumV > 0 && labelY != null && labelY >= 4 && labelY <= H - 4) {
-        ctx.fillStyle = "#f39c12";
-        ctx.font = `700 8px ${MONO}`;
-        ctx.textAlign = "left";
-        ctx.textBaseline = "middle";
+          ctx.fillStyle = "#f39c12";
+          ctx.font = `700 8px ${MONO}`;
+          ctx.textAlign = "left";
+          ctx.textBaseline = "middle";
         ctx.fillText("VWAP", 4, labelY - 8);
       }
       ctx.restore();
@@ -1058,7 +1101,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           ctx.beginPath(); ctx.moveTo(x0, vahY); ctx.lineTo(x1, vahY); ctx.stroke();
           ctx.setLineDash([4, 4]);
           ctx.beginPath(); ctx.moveTo(x0, valY); ctx.lineTo(x1, valY); ctx.stroke();
-          ctx.setLineDash([]);
+        ctx.setLineDash([]);
           ctx.lineWidth = 1;
 
           const segStart = a * slotW - pan;
@@ -1066,8 +1109,8 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           const segW = (b * slotW - pan + slotW - GAP) - segStart;
           const dayTag = toISTDate(bs[a].open_time);
           ctx.font = `800 8px ${MONO}`;
-          ctx.textBaseline = "middle";
-          ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.textAlign = "left";
           if (segW > 44 && vahY >= 10 && vahY <= H - 10) {
             ctx.fillStyle = isPriorSession ? "rgba(65,105,180,0.92)" : "rgba(40,80,150,0.98)";
             ctx.fillText(di === lastDi ? "VAH" : `VAH ${dayTag}`, lx, vahY - 8);
@@ -1861,7 +1904,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           } else {
             userZoomedW.current = true;
             candleWRef.current = newW;
-            scheduleDraw();
+          scheduleDraw();
           }
         }
         return;
@@ -1939,7 +1982,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         if (e.deltaY < 0 && overviewModeRef.current && next >= th) {
           exitOverviewAndFit();
         } else {
-          userZoomedW.current = true;
+        userZoomedW.current = true;
           candleWRef.current = next;
           scheduleDraw();
         }
@@ -1970,7 +2013,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         if (e.deltaY < 0 && overviewModeRef.current && next >= th) {
           exitOverviewAndFit();
         } else {
-          userZoomedW.current = true;
+        userZoomedW.current = true;
           candleWRef.current = next;
         }
       } else {
@@ -2020,9 +2063,9 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       if (e.deltaY < 0 && overviewModeRef.current && next >= th) {
         exitOverviewAndFit();
       } else {
-        userZoomedW.current = true;
+      userZoomedW.current = true;
         candleWRef.current = next;
-        scheduleDraw();
+      scheduleDraw();
       }
     };
     const onDown = e => {
@@ -2041,9 +2084,9 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         exitOverviewAndFit();
         dragStartX = null;
       } else {
-        userZoomedW.current = true;
+      userZoomedW.current = true;
         candleWRef.current = next;
-        scheduleDraw();
+      scheduleDraw();
       }
     };
     const onUp = () => { dragStartX = null; };
