@@ -103,27 +103,25 @@ const fmtP  = v => {
   return Number.isInteger(n) ? String(n) : n.toFixed(2);
 };
 const sgn   = v => v >= 0 ? "+" : "";
-/** Graded color for sell volume: light pink → dark red → black (POC). ratio 0–1, isPOC for black. */
+/** Graded color for sell: light pastel pink → medium red → deep maroon. POC = solid black. */
 function gradedSellColor(ratio, isPOC) {
-  if (isPOC) return "#0d0505";
-  if (ratio <= 0) return "rgba(255,235,235,0.55)";
-  const r = Math.min(1, ratio);
-  const r1 = Math.floor(255 - r * 200);
-  const g1 = Math.floor(235 - r * 235);
-  const b1 = Math.floor(235 - r * 235);
-  const a = 0.55 + r * 0.42;
-  return `rgba(${r1},${g1},${b1},${a})`;
+  if (isPOC) return "#000000";
+  if (ratio <= 0) return "#ffd6d6";  // light pastel pink
+  const t = Math.min(1, ratio);
+  const r = Math.floor(255 - t * 155);
+  const g = Math.floor(218 - t * 218);
+  const b = Math.floor(218 - t * 218);
+  return `rgb(${r},${g},${b})`;
 }
-/** Graded color for buy volume: light mint → dark green → black (POC). ratio 0–1, isPOC for black. */
+/** Graded color for buy: light mint → medium teal → dark forest green. POC = solid black. */
 function gradedBuyColor(ratio, isPOC) {
-  if (isPOC) return "#050d05";
-  if (ratio <= 0) return "rgba(235,255,235,0.55)";
-  const r = Math.min(1, ratio);
-  const g1 = Math.floor(255 - r * 200);
-  const r1 = Math.floor(235 - r * 235);
-  const b1 = Math.floor(235 - r * 235);
-  const a = 0.55 + r * 0.42;
-  return `rgba(${r1},${g1},${b1},${a})`;
+  if (isPOC) return "#000000";
+  if (ratio <= 0) return "#dcfff0";  // light mint / pale aqua
+  const t = Math.min(1, ratio);
+  const r = Math.floor(220 - t * 220);
+  const g = Math.floor(255 - t * 165);
+  const b = Math.floor(240 - t * 170);
+  return `rgb(${r},${g},${b})`;
 }
 /** Normalize to ms (backend may send seconds). */
 const toMs = t => (t != null && t < 1e12 ? t * 1000 : t);
@@ -934,11 +932,11 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
           ctx.fillRect(cx + cw, rowT, nzHalf, boxH);
 
           ctx.textAlign = "right";
-          ctx.fillStyle = (sellRatio > 0.5 || isPocSell) ? "#f8fafc" : C.textDark;
+          ctx.fillStyle = (sellRatio > 0.3 || isPocSell) ? "#ffffff" : C.textDark;
           ctx.fillText(sellTxt, cx - numPad, ly);
 
           ctx.textAlign = "left";
-          ctx.fillStyle = (buyRatio > 0.5 || isPocBuy) ? "#f8fafc" : C.textDark;
+          ctx.fillStyle = (buyRatio > 0.3 || isPocBuy) ? "#ffffff" : C.textDark;
           ctx.fillText(buyTxt, cx + cw + numPad, ly);
         } else {
           ctx.fillStyle = lv.highSell ? C.sell : C.sellMid;
