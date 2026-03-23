@@ -657,6 +657,12 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     return Math.max(0, chartW - wrapW);
   }, [labelW, psW, nzwLayout, RPAD]);
 
+  /** Upper bound for pan during user interaction — allows current candle to move left. */
+  const getPanClampMax = useCallback(() => {
+    const wrapW = (containerRef.current?.clientWidth || 800) - psW - labelW;
+    return getMaxPan() + wrapW;
+  }, [getMaxPan, labelW, psW]);
+
   const getCanvasH = useCallback(() => {
     const tot = containerRef.current?.clientHeight || 600;
     return Math.max(100, tot - TIME_H_EFF - BOT_H_EFF);
@@ -1701,10 +1707,10 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
     setIsFollowingLatest(false);
     const wrapW = ct.clientWidth - psW - labelW;
     const step  = Math.max(FAST_PAN_MIN_PX, Math.round(wrapW * FAST_PAN_FRAC));
-    const maxP  = getMaxPan();
+    const maxP  = getPanClampMax();
     panRef.current = Math.max(0, Math.min(maxP, panRef.current + direction * step));
     scheduleDraw();
-  }, [getMaxPan, scheduleDraw, psW, labelW]);
+  }, [getPanClampMax, scheduleDraw, psW, labelW]);
 
   useEffect(() => {
     const el = chartPlotRef.current;
@@ -1863,7 +1869,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
 
       if (dragging.current) {
         // ── single-finger drag: pan horizontally + vertically ──
-        panRef.current = Math.max(0, Math.min(getMaxPan(),
+        panRef.current = Math.max(0, Math.min(getPanClampMax(),
           panStart.current - (e.clientX - dragX.current)));
         const h = getCanvasH(), vr = getVisRange();
         if (h > 0 && vr > 0) {
@@ -1918,7 +1924,7 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
       cv.removeEventListener("pointercancel", onUp);
       cv.removeEventListener("pointerleave",  onLeave);
     };
-  }, [getMaxPan, getCanvasH, getVisRange, getVisPMin, scheduleDraw, NZW, exitOverviewAndFit]);
+  }, [getPanClampMax, getCanvasH, getVisRange, getVisPMin, scheduleDraw, NZW, exitOverviewAndFit]);
 
   /* canvas wheel */
   useEffect(() => {
@@ -1943,13 +1949,13 @@ export default function FootprintChart({ candles, symbol = "NIFTY", timeFrameMin
         priceScaleRef.current = Math.max(0.2, Math.min(10, priceScaleRef.current * f));
       } else {
         followLatest.current = false;
-        panRef.current = Math.max(0, Math.min(getMaxPan(), panRef.current + e.deltaY * 0.8));
+        panRef.current = Math.max(0, Math.min(getPanClampMax(), panRef.current + e.deltaY * 0.8));
       }
       scheduleDraw();
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, [getMaxPan, scheduleDraw, exitOverviewAndFit]);
+  }, [getPanClampMax, scheduleDraw, exitOverviewAndFit]);
 
   /* price scale: scroll down = zoom out (shrink rows); drag down = zoom out (TradingView style) */
   useEffect(() => {
