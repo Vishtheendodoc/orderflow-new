@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo, Component } from "react";
 import OrderflowChart from "./OrderflowChart";
 import FootprintChart from "./FootprintChart";
+import IntentChart from "./IntentChart";
 import LiquidityHeatmap from "./LiquidityHeatmap";
 import GexChart from "./GexChart";
 import HftScannerChart from "./HftScannerChart";
@@ -653,7 +654,11 @@ export default function App() {
   // Ref copy of activeSymbol so WS callbacks can read it without stale closures
   const activeSymbolRef = useRef(activeSymbol);
   /* ── Feature toggles ── */
-  const [features, setFeatures] = useState({ showOI: true, showVWAP: true, showVP: true, showHFT: false, showLTP: false, showMII: false, showVPT: false, showVZP: false, showDA: false, showOID: false, showREX: false, showIFI: false, showIFID: false, showContextEvents: false, filterByVolume: false });
+  const [features, setFeatures] = useState({
+    showOI: true, showVWAP: true, showVP: true, showHFT: false, showLTP: false, showMII: false, showVPT: false, showVZP: false, showDA: false, showOID: false, showREX: false, showIFI: false, showIFID: false, showContextEvents: false, filterByVolume: false,
+    showIntentBar: true, showIMSTint: false, showCumIMS: false, showRegime: true, showTrap: true,
+    imsWeights: { w1: 0.2, w2: 0.2, w3: 0.2, w4: 0.2, w5: 0.2 },
+  });
   const [splitView, setSplitView] = useState(false);
   const [activeSymbol2, setActiveSymbol2] = useState(null);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -1282,6 +1287,43 @@ export default function App() {
                           </label>
                         </>
                       )}
+                      <div className="feat-dropdown-title" style={{ marginTop: 6 }}>Intent Map Score</div>
+                      {[
+                        { key: "showIntentBar", label: "Intent bar in strip", defaultVal: true },
+                        { key: "showIMSTint", label: "IMS tint (regime row)", defaultVal: false },
+                        { key: "showCumIMS", label: "Cumulative IMS curve", defaultVal: false },
+                        { key: "showRegime", label: "Regime labels", defaultVal: true },
+                        { key: "showTrap", label: "Trap markers", defaultVal: true },
+                      ].map(({ key, label, defaultVal }) => (
+                        <label key={key} className="feat-row">
+                          <input
+                            type="checkbox"
+                            checked={features[key] ?? defaultVal}
+                            onChange={(e) => setFeatures((f) => ({ ...f, [key]: e.target.checked }))}
+                          />
+                          {label}
+                        </label>
+                      ))}
+                      <div className="feat-dropdown-title" style={{ marginTop: 4, fontSize: 11 }}>IMS Weights</div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 4 }}>
+                        {[
+                          { id: "balanced", label: "Balanced", w: { w1: 0.2, w2: 0.2, w3: 0.2, w4: 0.2, w5: 0.2 } },
+                          { id: "delta", label: "Delta", w: { w1: 0.5, w2: 0.1, w3: 0.1, w4: 0.15, w5: 0.15 } },
+                          { id: "imbalance", label: "Imbalance", w: { w1: 0.1, w2: 0.5, w3: 0.1, w4: 0.15, w5: 0.15 } },
+                          { id: "absorb", label: "Absorption", w: { w1: 0.1, w2: 0.1, w3: 0.5, w4: 0.15, w5: 0.15 } },
+                        ].map(({ id, label, w }) => (
+                          <button
+                            key={id}
+                            type="button"
+                            className="cd-btn"
+                            style={{ fontSize: 10, padding: "2px 6px" }}
+                            onClick={() => setFeatures((f) => ({ ...f, imsWeights: w }))}
+                            title={`w1=${w.w1} w2=${w.w2} w3=${w.w3} w4=${w.w4} w5=${w.w5}`}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1300,6 +1342,13 @@ export default function App() {
                   onClick={() => setViewMode("footprint")}
                 >
                   Footprint
+                </button>
+                <button
+                  className={`vt-btn ${viewMode === "intent" ? "active" : ""}`}
+                  onClick={() => setViewMode("intent")}
+                  title="Intent Map Score — IMS, regime, trap detection"
+                >
+                  Intent
                 </button>
                 {isIndexFuture && (
                   <button
@@ -1407,6 +1456,10 @@ export default function App() {
                         <div className="heatmap-view-wrap">
                           <NiftySentimentDashboard symbol={activeSymbol} apiBase={API_URL || window.location.origin} />
                         </div>
+                      ) : viewMode === "intent" ? (
+                        <div className="chart-view-wrap">
+                          <IntentChart candles={displayCandles} symbol={flow.symbol} timeFrameMinutes={timeFrameMinutes} features={features} />
+                        </div>
                       ) : null
                     )}
                   </div>
@@ -1454,6 +1507,10 @@ export default function App() {
                       ) : viewMode === "sentiment" ? (
                         <div className="heatmap-view-wrap">
                           <NiftySentimentDashboard symbol={activeSymbol2} apiBase={API_URL || window.location.origin} />
+                        </div>
+                      ) : viewMode === "intent" ? (
+                        <div className="chart-view-wrap">
+                          <IntentChart candles={displayCandles2} symbol={flow2.symbol} timeFrameMinutes={timeFrameMinutes} features={features} />
                         </div>
                       ) : null
                     ) : (
@@ -1507,6 +1564,10 @@ export default function App() {
                 ) : viewMode === "sentiment" ? (
                   <div className="heatmap-view-wrap">
                     <NiftySentimentDashboard symbol={activeSymbol} apiBase={API_URL || window.location.origin} />
+                  </div>
+                ) : viewMode === "intent" ? (
+                  <div className="chart-view-wrap">
+                    <IntentChart candles={displayCandles} symbol={flow.symbol} timeFrameMinutes={timeFrameMinutes} features={features} />
                   </div>
                 ) : null
               )}
